@@ -1,3 +1,4 @@
+import calendar
 import datetime
 import re
 
@@ -43,6 +44,39 @@ def parse_temporal(value, where: str) -> tuple[str, str]:
 def next_day(iso_date: str) -> str:
     d = datetime.date.fromisoformat(iso_date) + datetime.timedelta(days=1)
     return d.isoformat()
+
+
+FILTER_SOURCES = ("literal", "relative", "question")
+_RELATIVE_RE = re.compile(r"^([+-]?\d+)([dmy])$")
+
+
+def _shift_months(d: datetime.date, n: int) -> datetime.date:
+    total = d.year * 12 + (d.month - 1) + n
+    y, m = divmod(total, 12)
+    m += 1
+    # 말일 보정 — 3월 31일의 한 달 전은 2월 28(29)일이다.
+    return datetime.date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def resolve_relative(value, where: str, today: datetime.date | None = None) -> str:
+    """'-7d' 같은 상대 기간을 오늘 기준 날짜로 편다.
+
+    DB 함수(SYSDATE-7 등)가 아니라 계산된 날짜를 쓴다. 드라이버마다 다른
+    날짜 산술 문법을 늘리지 않아도 되고, SQL 을 읽는 사람이 어느 구간인지
+    바로 알 수 있다.
+    """
+    text = str(value or "").strip().lower()
+    m = _RELATIVE_RE.match(text)
+    if not m:
+        raise ValueError(
+            f"{where} 의 상대 기간 형식이 잘못됐습니다 -> {value!r} "
+            "(예: -7d 이레 전, -1m 한 달 전, -1y 일 년 전, 0d 오늘)"
+        )
+    n, unit = int(m.group(1)), m.group(2)
+    base = today or datetime.date.today()
+    if unit == "d":
+        return (base + datetime.timedelta(days=n)).isoformat()
+    return _shift_months(base, n if unit == "m" else n * 12).isoformat()
 
 
 class Compiler:
@@ -113,10 +147,9 @@ class Compiler:
                     f"(사용 가능: {', '.join(self.metrics) or '없음'})"
                 )
             table = metric["table"]
-            # 지표의 고정 필터가 먼저, 모델이 낸 필터가 뒤에. 모델이 고정 필터를
-            # 잊어도 여기서 항상 붙는다 — 이것이 지표 시스템의 요점이고,
-            # 집계형이든 조회형이든 똑같이 적용된다.
-            filters = list(metric.get("fixed_filters", [])) + list(ast.get("filters") or [])
+            model_filters = list(ast.get("filters") or [])
+            # 지표의 필터가 먼저, 모델이 낸 필터가 뒤에.
+            filters = self._metric_filters(metric, model_filters) + model_filters
             if metric.get("kind") == "projection":
                 # 조회형 지표는 컬럼 목록 자체가 정의다. 여기에 group_by를 겹치면
                 # 정의에 없던 집계가 생기므로 받지 않는다.
@@ -203,6 +236,42 @@ class Compiler:
         if group_cols:
             clauses.append("GROUP BY " + ", ".join(group_cols))
         return " ".join(clauses) + ";"
+
+    def _metric_filters(self, metric: dict, model_filters: list) -> list:
+        """지표의 필터를 출처에 따라 펼친다.
+
+        literal 은 언제나 붙는다 — 모델이 잊어도 여기서 강제되는 불변 조건이다.
+        relative·question 은 값이 질문에서 오는 것이 요점이라, 질문이 같은
+        컬럼을 건드리면 물러난다. 그러지 않으면 지표의 기간과 질문의 기간이
+        AND 로 묶여 교집합이 빈 SQL 이 조용히 나간다.
+        """
+        touched = {
+            str(f.get("field", "")).lower()
+            for f in model_filters if isinstance(f, dict)
+        }
+        out = []
+        for spec in metric.get("fixed_filters", []):
+            source = str(spec.get("source") or "literal").lower()
+            field = str(spec.get("field", ""))
+            if source not in FILTER_SOURCES:
+                raise ValueError(
+                    f"알 수 없는 필터 출처입니다 -> {source!r} "
+                    f"(사용 가능: {', '.join(FILTER_SOURCES)})"
+                )
+            if source == "literal":
+                out.append(spec)
+                continue
+            if field.lower() in touched:
+                continue
+            if source == "question":
+                raise ValueError(
+                    f"지표 {metric['name']!r} 는 {field} 조건을 질문에서 받습니다 -> "
+                    f"filters 에 {field} 를 넣어 값이나 기간을 지정하십시오"
+                )
+            where = f"{metric['table']}.{field}"
+            out.append({**spec, "source": "literal",
+                        "value": resolve_relative(spec.get("value"), where)})
+        return out
 
     def _filter(self, spec: dict, table: str, allowed: list) -> str:
         """WHERE 조건 생성"""

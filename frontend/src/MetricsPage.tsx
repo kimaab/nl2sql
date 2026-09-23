@@ -66,7 +66,12 @@ export function MetricsPage() {
 
   function definitionOf(m: api.Metric): string {
     const where = m.fixed_filters
-      .map((f) => `${f.field} ${f.operator} ${JSON.stringify(f.value)}`)
+      .map((f) => {
+        const src = f.source ?? "literal";
+        if (src === "question") return `${f.field} ${f.operator} <질문에서>`;
+        if (src === "relative") return `${f.field} ${f.operator} <오늘 ${f.value}>`;
+        return `${f.field} ${f.operator} ${JSON.stringify(f.value)}`;
+      })
       .join(" AND ");
     const select =
       m.kind === "projection"

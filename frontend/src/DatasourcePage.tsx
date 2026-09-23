@@ -18,6 +18,20 @@ const OPERATORS = [
   "less_or_equal",
 ];
 
+const SOURCES: { value: string; label: string; hint: string }[] = [
+  { value: "literal", label: "고정", hint: "질문과 무관하게 항상 적용됩니다" },
+  { value: "relative", label: "상대 기간", hint: "오늘 기준으로 계산합니다. 질문이 같은 컬럼을 지정하면 물러납니다" },
+  { value: "question", label: "질문에서", hint: "값을 질문에서 받습니다. 질문이 지정하지 않으면 거부합니다" },
+];
+
+/** 날짜 컬럼인지만 본다. 시각 포함 여부는 백엔드가 드라이버를 보고 판정한다. */
+function isTemporal(type: string): boolean {
+  const t = (type || "").trim().toLowerCase();
+  if (!t) return false;
+  if (t.startsWith("timestamp") || t.startsWith("datetime")) return true;
+  return t.split("(")[0].trim() === "date";
+}
+
 const EMPTY_METRIC: api.MetricInput = {
   name: "",
   description: "",
@@ -178,6 +192,15 @@ export function DatasourcePage() {
     } catch (err) {
       alert("지표 화면을 여는 데 실패했습니다: " + err);
     }
+  }
+
+  /** 날짜 컬럼이면 상대 기간을 기본으로 준다 — 날짜를 고정값으로 박아두면
+   *  다음 주에 그 지표가 지난주를 가리키게 된다. */
+  function newFilter(field: string, type: string) {
+    const temporal = isTemporal(type);
+    return temporal
+      ? { field, operator: "greater_or_equal", source: "relative", value: "-7d" }
+      : { field, operator: "equals", source: "literal", value: "" };
   }
 
   function columnsOf(datasourceId: string, tableName: string): api.SchemaColumn[] {
@@ -648,57 +671,90 @@ export function DatasourcePage() {
             <div style={{ alignItems: "flex-start" }}>
               <label>고정 필터</label>
               {metricForm.fixed_filters.map((f, i) => (
-                <div key={i} style={{ display: "flex", flexDirection: "row", gap: "8px", marginBottom: "6px" }}>
-                  <select
-                    value={f.field ?? ""}
-                    onChange={(e) => {
-                      const next = [...metricForm.fixed_filters];
-                      next[i] = { ...next[i], field: e.target.value };
-                      setMetricForm({ ...metricForm, fixed_filters: next });
-                    }}
-                  >
-                    {columnsOf(expandedId, metricForm.table_name).map((c) => (
-                      <option key={c.name} value={c.name}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={f.operator ?? "equals"}
-                    onChange={(e) => {
-                      const next = [...metricForm.fixed_filters];
-                      next[i] = { ...next[i], operator: e.target.value };
-                      setMetricForm({ ...metricForm, fixed_filters: next });
-                    }}
-                  >
-                    {OPERATORS.map((o) => (
-                      <option key={o} value={o}>
-                        {o}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="text"
-                    value={f.value ?? ""}
-                    onChange={(e) => {
-                      const next = [...metricForm.fixed_filters];
-                      next[i] = { ...next[i], value: e.target.value };
-                      setMetricForm({ ...metricForm, fixed_filters: next });
-                    }}
-                    placeholder="값"
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setMetricForm({
-                        ...metricForm,
-                        fixed_filters: metricForm.fixed_filters.filter((_, j) => j !== i),
-                      })
-                    }
-                    style={{ whiteSpace: "nowrap" }}
-                  >
-                    빼기
-                  </button>
+                <div key={i} style={{ marginBottom: "10px" }}>
+                  <div style={{ display: "flex", flexDirection: "row", gap: "8px" }}>
+                    <select
+                      value={f.field ?? ""}
+                      onChange={(e) => {
+                        const col = columnsOf(expandedId, metricForm.table_name)
+                          .find((c) => c.name === e.target.value);
+                        const next = [...metricForm.fixed_filters];
+                        // 컬럼이 바뀌면 출처 기본값도 다시 정한다
+                        next[i] = newFilter(e.target.value, col?.type ?? "");
+                        setMetricForm({ ...metricForm, fixed_filters: next });
+                      }}
+                    >
+                      {columnsOf(expandedId, metricForm.table_name).map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={f.source ?? "literal"}
+                      onChange={(e) => {
+                        const next = [...metricForm.fixed_filters];
+                        const src = e.target.value;
+                        next[i] = {
+                          ...next[i],
+                          source: src,
+                          value: src === "question" ? "" : src === "relative" ? "-7d" : "",
+                        };
+                        setMetricForm({ ...metricForm, fixed_filters: next });
+                      }}
+                    >
+                      {SOURCES.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={f.operator ?? "equals"}
+                      onChange={(e) => {
+                        const next = [...metricForm.fixed_filters];
+                        next[i] = { ...next[i], operator: e.target.value };
+                        setMetricForm({ ...metricForm, fixed_filters: next });
+                      }}
+                    >
+                      {OPERATORS.map((o) => (
+                        <option key={o} value={o}>
+                          {o}
+                        </option>
+                      ))}
+                    </select>
+                    {(f.source ?? "literal") === "question" ? (
+                      <span style={{ flex: 1, color: "#999", alignSelf: "center", fontSize: "0.9em" }}>
+                        값은 질문에서
+                      </span>
+                    ) : (
+                      <input
+                        type="text"
+                        value={f.value ?? ""}
+                        onChange={(e) => {
+                          const next = [...metricForm.fixed_filters];
+                          next[i] = { ...next[i], value: e.target.value };
+                          setMetricForm({ ...metricForm, fixed_filters: next });
+                        }}
+                        placeholder={(f.source ?? "literal") === "relative" ? "-7d · -1m · 0d" : "값"}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMetricForm({
+                          ...metricForm,
+                          fixed_filters: metricForm.fixed_filters.filter((_, j) => j !== i),
+                        })
+                      }
+                      style={{ whiteSpace: "nowrap" }}
+                    >
+                      빼기
+                    </button>
+                  </div>
+                  <div style={{ fontSize: "0.85em", color: "#888", marginTop: "2px" }}>
+                    {SOURCES.find((o) => o.value === (f.source ?? "literal"))?.hint}
+                  </div>
                 </div>
               ))}
               <button
@@ -709,7 +765,7 @@ export function DatasourcePage() {
                     ...metricForm,
                     fixed_filters: [
                       ...metricForm.fixed_filters,
-                      { field: first?.name ?? "", operator: "equals", value: "" },
+                      newFilter(first?.name ?? "", first?.type ?? ""),
                     ],
                   });
                 }}

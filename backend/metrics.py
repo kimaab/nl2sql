@@ -3,7 +3,7 @@ import json
 from uuid import UUID, uuid4
 import db
 from models import Metric, MetricInput, MetricKind, ApiException
-from compiler import temporal_kind, parse_temporal
+from compiler import FILTER_SOURCES, temporal_kind, parse_temporal, resolve_relative
 
 log = logging.getLogger("nl2sql.metrics")
 
@@ -67,12 +67,33 @@ def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
 
     for filter_spec in input_data.fixed_filters:
         field = filter_spec.get("field")
-        _require_column(field, "고정 필터")
-        # 날짜 값은 여기서 막는다. 질문 시점에 터지면 사용자는 왜 실패하는지 모른다.
+        _require_column(field, "필터")
+        where = f"{input_data.table_name}.{field}"
+        source = str(filter_spec.get("source") or "literal").lower()
+        if source not in FILTER_SOURCES:
+            raise ApiException(
+                400, f"알 수 없는 필터 출처입니다: {source} (사용 가능: {', '.join(FILTER_SOURCES)})")
+
         kind = temporal_kind(types.get(str(field).lower(), ""), driver)
+
+        # 값이 질문에서 오므로 여기서 검사할 값이 없다.
+        if source == "question":
+            continue
+
+        if source == "relative":
+            if not kind:
+                raise ApiException(
+                    400, f"{where} 는 날짜 컬럼이 아니라 상대 기간을 쓸 수 없습니다")
+            try:
+                resolve_relative(filter_spec.get("value"), where)
+            except ValueError as error:
+                raise ApiException(400, str(error)) from None
+            continue
+
+        # source == "literal" — 날짜 값은 여기서 막는다.
+        # 질문 시점에 터지면 사용자는 왜 실패하는지 모른다.
         if not kind:
             continue
-        where = f"{input_data.table_name}.{field}"
         operator = filter_spec.get("operator")
         try:
             value_kind, _ = parse_temporal(filter_spec.get("value"), where)
