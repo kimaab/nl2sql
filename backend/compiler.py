@@ -1,3 +1,50 @@
+import datetime
+import re
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$")
+
+
+def temporal_kind(data_type: str, driver: str) -> str | None:
+    """컬럼이 날짜형인지, 시각을 포함하는지 판정한다.
+
+    'datetime' = 시·분·초를 포함, 'date' = 날짜뿐, None = 날짜 컬럼이 아님.
+    Oracle 의 DATE 는 시각을 포함한다 — 다른 두 드라이버의 date 와 다르다.
+    """
+    text = (data_type or "").strip().lower()
+    if not text:
+        return None
+    if text.startswith(("timestamp", "datetime")):
+        return "datetime"
+    if text.split("(")[0].strip() == "date":
+        return "datetime" if driver == "oracle" else "date"
+    return None
+
+
+def parse_temporal(value, where: str) -> tuple[str, str]:
+    """날짜 값을 (종류, 정규화된 문자열) 로. 형식과 달력 유효성을 함께 본다."""
+    text = str(value).strip()
+    if _DATE_RE.match(text):
+        kind, iso = "date", text
+    elif _DATETIME_RE.match(text):
+        kind, iso = "datetime", text.replace("T", " ")
+    else:
+        raise ValueError(
+            f"{where} 는 날짜 컬럼입니다. 값은 'YYYY-MM-DD' 또는 "
+            f"'YYYY-MM-DD HH:MM:SS' 형식이어야 합니다 -> {value!r}"
+        )
+    try:
+        datetime.date.fromisoformat(iso[:10])
+    except ValueError:
+        raise ValueError(f"{where} 에 없는 날짜입니다 -> {value!r}") from None
+    return kind, iso
+
+
+def next_day(iso_date: str) -> str:
+    d = datetime.date.fromisoformat(iso_date) + datetime.timedelta(days=1)
+    return d.isoformat()
+
+
 class Compiler:
     """AST 검증 및 SQL 조립"""
 
@@ -27,7 +74,14 @@ class Compiler:
             t["name"]: [c["name"] for c in t["columns"]]
             for t in contract["tables"]
         }
+        # 날짜 컬럼을 알아보려면 타입이 필요하다. 이름만 들고 있으면
+        # '2026-01-01' 이 Oracle 에서 깨지는 것을 막을 수 없다.
+        self.column_types = {
+            (t["name"], c["name"]): c.get("type", "")
+            for t in contract["tables"] for c in t["columns"]
+        }
         self.metrics = {m["name"]: m for m in contract.get("metrics", [])}
+        self.driver = contract["driver"]
         self.quote = self._QUOTE.get(contract["driver"], '"')
 
     def compile(self, ast: dict) -> str:
@@ -164,6 +218,8 @@ class Compiler:
             raise ValueError(f"필터링할 수 없는 컬럼입니다 -> {table}.{spec.get('field')}")
         column = self._identifier(resolved)
         operator = spec.get("operator")
+        temporal = temporal_kind(self.column_types.get((table, resolved), ""), self.driver)
+        where = f"{table}.{resolved}"
 
         if operator in self._LIST_OPERATORS:
             values = spec.get("value")
@@ -171,7 +227,10 @@ class Compiler:
                 raise ValueError(
                     f"{operator!r}의 value는 비어 있지 않은 목록이어야 합니다 -> {values!r}"
                 )
-            rendered = ", ".join(self._literal(v) for v in values)
+            if temporal:
+                rendered = ", ".join(self._temporal_value(temporal, v, where) for v in values)
+            else:
+                rendered = ", ".join(self._literal(v) for v in values)
             return f"{column} {self._LIST_OPERATORS[operator]} ({rendered})"
 
         if operator not in self._OPERATORS:
@@ -179,7 +238,50 @@ class Compiler:
                 f"허용되지 않는 비교 연산자입니다 -> {operator!r} (사용 가능: "
                 f"{', '.join(list(self._OPERATORS) + list(self._LIST_OPERATORS))})"
             )
+
+        if temporal:
+            operator, rendered = self._temporal_compare(
+                temporal, operator, spec.get("value"), where)
+            return f"{column} {self._OPERATORS[operator]} {rendered}"
         return f"{column} {self._OPERATORS[operator]} {self._literal(spec.get('value'))}"
+
+    def _temporal_value(self, column_kind: str, value, where: str) -> str:
+        """날짜 값을 타입이 붙은 리터럴로.
+
+        Oracle 은 문자열→DATE 암묵 변환이 NLS_DATE_FORMAT 에 좌우돼서
+        '2026-01-01' 이 ORA-01861 로 깨진다. DATE / TIMESTAMP 리터럴은
+        세 드라이버가 모두 같은 뜻으로 받는다.
+        """
+        value_kind, iso = parse_temporal(value, where)
+        if column_kind == "datetime" and value_kind == "date":
+            raise ValueError(
+                f"{where} 는 시각을 포함하는 컬럼이라 하루를 값 하나로 고를 수 없습니다 "
+                f"(자정인 행만 걸립니다) -> {value!r}. "
+                "greater_or_equal 과 less_or_equal 로 기간을 지정하십시오"
+            )
+        return f"{'TIMESTAMP' if value_kind == 'datetime' else 'DATE'} '{iso}'"
+
+    def _temporal_compare(self, column_kind: str, operator: str, value, where: str):
+        """시각을 포함한 컬럼에 날짜만 주면, 그 날 하루가 온전히 들어오도록 맞춘다.
+
+        `<= 2026-01-31` 을 그대로 두면 31일 00:00 까지만 걸려서 그날 낮에
+        들어온 행이 조용히 빠진다. 이 앱은 SQL 을 실행하지 않고 보여주므로
+        바뀐 결과가 화면에 그대로 드러난다.
+        """
+        value_kind, iso = parse_temporal(value, where)
+        if column_kind == "datetime" and value_kind == "date":
+            if operator in ("equals", "not_equals"):
+                raise ValueError(
+                    f"{where} 는 시각을 포함하는 컬럼이라 {operator!r} 로는 하루를 고를 수 없습니다 "
+                    "(자정인 행만 걸립니다). "
+                    "greater_or_equal 과 less_or_equal 로 기간을 지정하십시오"
+                )
+            if operator == "less_or_equal":
+                operator, iso = "less_than", next_day(iso)
+            elif operator == "greater_than":
+                operator, iso = "greater_or_equal", next_day(iso)
+        prefix = "TIMESTAMP" if value_kind == "datetime" else "DATE"
+        return operator, f"{prefix} '{iso}'"
 
     def _match(self, name, options):
         """대소문자 무시하고 이름 찾기"""
