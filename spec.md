@@ -119,10 +119,28 @@ body에는 이번 질문 하나만 담습니다.
 
 ### 1-7. 업무 지표는 컴파일러가 결정론적으로 전개한다
 
-모델이 "이 질문은 `active_revenue` 지표다"까지만 판단하면, 그 지표의 집계식과 고정 필터는
+모델이 "이 질문은 `active_revenue` 지표다"까지만 판단하면, 그 지표의 정의와 고정 필터는
 컴파일러가 자동으로 채웁니다. 모델이 지표를 알아보고도 고정 필터를 깜빡할 가능성을 아예
 없애는 것이 목적입니다 — 정확성의 보증이 **모델의 기억이 아니라 컴파일러의 강제**에
 있어야 합니다.
+
+지표에는 두 종류가 있고, **고정 필터의 강제는 양쪽에 똑같이 적용됩니다.**
+
+| 종류 | 무엇을 내나 | 정의 |
+|---|---|---|
+| `aggregate` | 숫자 하나 | `agg_function(agg_field)` |
+| `projection` | 컬럼 몇 개 | `select_columns` 목록 |
+
+조회형을 집계형과 같은 표에 두는 이유가 이 강제 때문입니다. `활성회원명단`이
+`SELECT MEMBER_NM, EMAIL FROM TB_MEMBER WHERE STATUS_CD='ACTIVE'`일 때, 그
+`STATUS_CD='ACTIVE'`가 빠지면 탈퇴 회원이 섞여 나갑니다 — 합계가 틀리는 것만큼 나쁩니다.
+"지표는 숫자다"라는 직관을 따라 조회를 밖으로 빼면, 조회만 이 보증을 못 받습니다.
+
+조회형 지표에 `group_by`를 함께 보내면 거부합니다. 컬럼 목록 자체가 이미 정의라,
+거기에 집계를 겹치면 지표가 약속한 것과 다른 질의가 됩니다.
+
+조회형은 행 수를 제한하지 않습니다(`limit`은 9절대로 만들지 않습니다). 큰 표를 가리키는
+조회형 지표는 그대로 전체 조회가 되므로, 지표를 정의하는 사람이 알고 있어야 합니다.
 
 ### 1-8. 비밀번호는 들어가기만 하고 나오지 않는다
 
@@ -679,14 +697,26 @@ PostgreSQL 스키마 이름 오타가 전부 여기로 떨어집니다. 502와 �
 | DELETE | `/api/datasources/{id}/metrics/{metric_id}` |
 
 ```python
+class MetricKind(str, Enum):
+    AGGREGATE = "aggregate"      # 숫자 하나
+    PROJECTION = "projection"    # 컬럼 몇 개
+
+
 class MetricInput(BaseModel):
     name: str
     description: str = ""
+    kind: MetricKind = MetricKind.AGGREGATE
     table_name: str
-    agg_field: str
-    agg_function: str          # SUM | COUNT | AVG | MIN | MAX
+    # kind=aggregate일 때만
+    agg_field: str | None = None
+    agg_function: str | None = None    # SUM | COUNT | AVG | MIN | MAX
+    # kind=projection일 때만
+    select_columns: list[str] = []
     fixed_filters: list[dict] = []
 ```
+
+**종류에 맞지 않는 필드는 저장 전에 비우십시오.** 집계로 저장했는데 컬럼 목록이 딸려
+있는 행이 생기면, 나중에 어느 쪽이 진짜 정의인지 알 방법이 없습니다.
 
 ### 등록 시점에 검증하십시오
 
@@ -694,8 +724,9 @@ class MetricInput(BaseModel):
 거부하십시오. 나중에 질문 시점에 발견하면 사용자는 왜 실패하는지 알 수 없습니다.
 
 - `table_name`이 그 데이터소스의 `datasource_table`에 있는가
-- `agg_field`가 그 테이블의 컬럼인가 (또는 `*`)
-- `agg_function`이 다섯 개 중 하나인가
+- `aggregate`이면 `agg_field`가 그 테이블의 컬럼인가 (또는 `*`),
+  `agg_function`이 다섯 개 중 하나인가
+- `projection`이면 `select_columns`가 비어 있지 않고, **그 전부가** 그 테이블의 컬럼인가
 - 각 `fixed_filters[].field`가 그 테이블의 컬럼인가
 
 ### 동기화 후 깨진 지표
@@ -703,6 +734,10 @@ class MetricInput(BaseModel):
 동기화는 스키마를 통째로 교체하므로, 대상 DB에서 컬럼이 사라지면 지표가 **깨진 상태**로
 남을 수 있습니다. 계약서를 만들 때(7절) 검사해서 **깨진 지표는 모델에게 보여주지 말고
 경고 로그를 남기십시오.** 화면에서도 그 지표에 "스키마와 맞지 않음" 표시를 하십시오.
+
+검사 범위는 종류마다 다릅니다. 집계형은 `agg_field` 하나지만 조회형은
+`select_columns` **전부**가 살아 있어야 합니다. `fixed_filters[].field`는 양쪽 다
+확인하십시오 — 필터가 깨지면 지표가 보장하려던 조건이 조용히 빠집니다.
 
 ---
 

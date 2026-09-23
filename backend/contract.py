@@ -50,28 +50,27 @@ def load_contract(datasource_id: UUID) -> dict:
         "SELECT * FROM datasource_metric WHERE datasource_id = %s",
         str(datasource_id)
     ):
-        table = tables.get(m["table_name"])
-        if table is None or (
-            m["agg_field"] != "*" and
-            m["agg_field"] not in [c["name"] for c in table["columns"]]
-        ):
-            log.warning(
-                "깨진 지표를 제외합니다: %s (%s.%s)",
-                m["name"],
-                m["table_name"],
-                m["agg_field"]
-            )
+        broken = _broken_reason(m, tables)
+        # 모델에게 보여주면 컴파일 단계에서 반드시 실패하는 AST를 유도한다.
+        if broken:
+            log.warning("깨진 지표를 제외합니다: %s — %s", m["name"], broken)
             continue
-        metrics.append({
+
+        entry = {
             "name": m["name"],
             "description": m["description"],
             "table": m["table_name"],
-            "aggregation": {
-                "field": m["agg_field"],
-                "function": m["agg_function"]
-            },
+            "kind": m["kind"],
             "fixed_filters": m["fixed_filters"] or [],
-        })
+        }
+        if m["kind"] == "projection":
+            entry["columns"] = m["select_columns"] or []
+        else:
+            entry["aggregation"] = {
+                "field": m["agg_field"],
+                "function": m["agg_function"],
+            }
+        metrics.append(entry)
 
     return {
         "name": row["name"],
@@ -79,3 +78,32 @@ def load_contract(datasource_id: UUID) -> dict:
         "tables": list(tables.values()),
         "metrics": metrics
     }
+
+
+def _broken_reason(m: dict, tables: dict) -> str | None:
+    """동기화로 테이블·컬럼이 사라진 지표를 가려낸다.
+
+    집계형은 agg_field 하나만 보면 되지만, 조회형은 컬럼 목록 전부가
+    살아 있어야 한다. 고정 필터 컬럼은 어느 쪽이든 확인한다 — 필터가
+    깨지면 지표가 보장하려던 조건이 조용히 빠진다.
+    """
+    table = tables.get(m["table_name"])
+    if table is None:
+        return f"테이블 {m['table_name']}이(가) 없습니다"
+    known = {c["name"] for c in table["columns"]}
+
+    if m["kind"] == "projection":
+        missing = [c for c in (m["select_columns"] or []) if c not in known]
+        if not (m["select_columns"] or []):
+            return "조회 컬럼이 비어 있습니다"
+        if missing:
+            return f"조회 컬럼이 없습니다: {', '.join(missing)}"
+    elif m["agg_field"] != "*" and m["agg_field"] not in known:
+        return f"집계 컬럼 {m['table_name']}.{m['agg_field']}이(가) 없습니다"
+
+    missing_filters = [
+        f.get("field") for f in (m["fixed_filters"] or []) if f.get("field") not in known
+    ]
+    if missing_filters:
+        return f"고정 필터 컬럼이 없습니다: {', '.join(map(str, missing_filters))}"
+    return None

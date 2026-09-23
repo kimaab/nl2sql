@@ -47,12 +47,17 @@ export function MetricsPage() {
     if (!row.tables) return null;
     const table = row.tables.find((t) => t.name === m.table_name);
     if (!table) return `테이블 ${m.table_name}이(가) 스키마에 없습니다`;
-    if (m.agg_field !== "*" && !table.columns.some((c) => c.name === m.agg_field)) {
-      return `컬럼 ${m.table_name}.${m.agg_field}이(가) 스키마에 없습니다`;
+    const has = (name: string) => table.columns.some((c) => c.name === name);
+
+    if (m.kind === "projection") {
+      if (m.select_columns.length === 0) return "조회 컬럼이 비어 있습니다";
+      const gone = m.select_columns.filter((c) => !has(c));
+      if (gone.length > 0) return `조회 컬럼이 스키마에 없습니다: ${gone.join(", ")}`;
+    } else if (m.agg_field !== "*" && !has(m.agg_field ?? "")) {
+      return `집계 컬럼 ${m.table_name}.${m.agg_field}이(가) 스키마에 없습니다`;
     }
-    const missing = m.fixed_filters
-      .map((f) => f.field)
-      .filter((f) => f && !table.columns.some((c) => c.name === f));
+
+    const missing = m.fixed_filters.map((f) => f.field).filter((f) => f && !has(f));
     if (missing.length > 0) {
       return `고정 필터 컬럼이 스키마에 없습니다: ${missing.join(", ")}`;
     }
@@ -63,10 +68,11 @@ export function MetricsPage() {
     const where = m.fixed_filters
       .map((f) => `${f.field} ${f.operator} ${JSON.stringify(f.value)}`)
       .join(" AND ");
-    return (
-      `SELECT ${m.agg_function}(${m.agg_field}) FROM ${m.table_name}` +
-      (where ? ` WHERE ${where}` : "")
-    );
+    const select =
+      m.kind === "projection"
+        ? m.select_columns.join(", ")
+        : `${m.agg_function}(${m.agg_field})`;
+    return `SELECT ${select} FROM ${m.table_name}` + (where ? ` WHERE ${where}` : "");
   }
 
   if (loading) return <div style={{ padding: "20px" }}>불러오는 중...</div>;
@@ -132,8 +138,9 @@ export function MetricsPage() {
             <table style={{ boxShadow: "none" }}>
               <thead>
                 <tr>
-                  <th style={{ width: "20%" }}>이름</th>
-                  <th style={{ width: "30%" }}>설명</th>
+                  <th style={{ width: "18%" }}>이름</th>
+                  <th style={{ width: "8%" }}>종류</th>
+                  <th style={{ width: "26%" }}>설명</th>
                   <th>정의</th>
                 </tr>
               </thead>
@@ -144,6 +151,9 @@ export function MetricsPage() {
                     <tr key={m.id} style={broken ? { background: "#fff3e0" } : undefined}>
                       <td>
                         <strong>{m.name}</strong>
+                      </td>
+                      <td style={{ color: "#555", whiteSpace: "nowrap" }}>
+                        {m.kind === "projection" ? "조회" : "집계"}
                       </td>
                       <td style={{ color: m.description ? "#333" : "#999" }}>
                         {m.description || "(설명 없음 — 질문이 이 지표에 잘 걸리지 않습니다)"}

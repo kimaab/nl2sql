@@ -27,22 +27,28 @@ export interface DatasourceInput {
   password: string;
 }
 
+export type MetricKind = "aggregate" | "projection";
+
 export interface Metric {
   id: string;
   name: string;
   description: string;
+  kind: MetricKind;
   table_name: string;
-  agg_field: string;
-  agg_function: string;
+  agg_field: string | null;
+  agg_function: string | null;
+  select_columns: string[];
   fixed_filters: Record<string, any>[];
 }
 
 export interface MetricInput {
   name: string;
   description: string;
+  kind: MetricKind;
   table_name: string;
-  agg_field: string;
-  agg_function: string;
+  agg_field: string | null;
+  agg_function: string | null;
+  select_columns: string[];
   fixed_filters: Record<string, any>[];
 }
 

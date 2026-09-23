@@ -21,9 +21,11 @@ const OPERATORS = [
 const EMPTY_METRIC: api.MetricInput = {
   name: "",
   description: "",
+  kind: "aggregate",
   table_name: "",
   agg_field: "*",
   agg_function: "COUNT",
+  select_columns: [],
   fixed_filters: [],
 };
 
@@ -190,7 +192,13 @@ export function DatasourcePage() {
     if (!tables) return false;
     const table = tables.find((t) => t.name === m.table_name);
     if (!table) return true;
-    return m.agg_field !== "*" && !table.columns.some((c) => c.name === m.agg_field);
+    const has = (name: string) => table.columns.some((c) => c.name === name);
+    if (m.kind === "projection") {
+      if (m.select_columns.length === 0 || !m.select_columns.every(has)) return true;
+    } else if (m.agg_field !== "*" && !has(m.agg_field ?? "")) {
+      return true;
+    }
+    return m.fixed_filters.some((f) => f.field && !has(f.field));
   }
 
   async function handleCreateMetric(e: React.FormEvent) {
@@ -201,6 +209,7 @@ export function DatasourcePage() {
       await api.createMetric(expandedId, metricForm);
       setMetricForm({
         ...EMPTY_METRIC,
+        kind: metricForm.kind,
         table_name: metricForm.table_name,
       });
       await loadMetrics(expandedId);
@@ -437,7 +446,9 @@ export function DatasourcePage() {
                   >
                     <strong>{m.name}</strong>{" "}
                     <code>
-                      {m.agg_function}({m.agg_field}) FROM {m.table_name}
+                      {m.kind === "projection"
+                        ? `${m.select_columns.join(", ")} FROM ${m.table_name}`
+                        : `${m.agg_function}(${m.agg_field}) FROM ${m.table_name}`}
                     </code>
                     {m.fixed_filters.length > 0 && (
                       <code style={{ marginLeft: "6px" }}>
@@ -481,6 +492,34 @@ export function DatasourcePage() {
             <h4 style={{ marginTop: 0 }}>지표 추가</h4>
 
             <div>
+              <label>종류</label>
+              <div style={{ display: "flex", flexDirection: "row", gap: "16px" }}>
+                <label style={{ flexDirection: "row", alignItems: "center", gap: "5px", fontWeight: 400 }}>
+                  <input
+                    type="radio"
+                    checked={metricForm.kind === "aggregate"}
+                    onChange={() =>
+                      setMetricForm({ ...metricForm, kind: "aggregate", agg_field: "*", agg_function: "COUNT", select_columns: [] })
+                    }
+                    style={{ width: "auto" }}
+                  />
+                  집계 — 숫자 하나 (SUM, COUNT ...)
+                </label>
+                <label style={{ flexDirection: "row", alignItems: "center", gap: "5px", fontWeight: 400 }}>
+                  <input
+                    type="radio"
+                    checked={metricForm.kind === "projection"}
+                    onChange={() =>
+                      setMetricForm({ ...metricForm, kind: "projection", agg_field: null, agg_function: null })
+                    }
+                    style={{ width: "auto" }}
+                  />
+                  조회 — 컬럼 목록 (SELECT a, b, c)
+                </label>
+              </div>
+            </div>
+
+            <div>
               <label>이름</label>
               <input
                 type="text"
@@ -510,6 +549,7 @@ export function DatasourcePage() {
                     ...metricForm,
                     table_name: e.target.value,
                     agg_field: "*",
+                    select_columns: [],
                     fixed_filters: [],
                   })
                 }
@@ -524,32 +564,86 @@ export function DatasourcePage() {
               </select>
             </div>
 
-            <div>
-              <label>집계</label>
-              <div style={{ display: "flex", flexDirection: "row", gap: "8px" }}>
-                <select
-                  value={metricForm.agg_function}
-                  onChange={(e) => setMetricForm({ ...metricForm, agg_function: e.target.value })}
-                >
-                  {AGG_FUNCTIONS.map((f) => (
-                    <option key={f} value={f}>
-                      {f}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={metricForm.agg_field}
-                  onChange={(e) => setMetricForm({ ...metricForm, agg_field: e.target.value })}
-                >
-                  <option value="*">*</option>
-                  {columnsOf(expandedId, metricForm.table_name).map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name} ({c.type})
-                    </option>
-                  ))}
-                </select>
+            {metricForm.kind === "aggregate" ? (
+              <div>
+                <label>집계</label>
+                <div style={{ display: "flex", flexDirection: "row", gap: "8px" }}>
+                  <select
+                    value={metricForm.agg_function ?? "COUNT"}
+                    onChange={(e) => setMetricForm({ ...metricForm, agg_function: e.target.value })}
+                  >
+                    {AGG_FUNCTIONS.map((f) => (
+                      <option key={f} value={f}>
+                        {f}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={metricForm.agg_field ?? "*"}
+                    onChange={(e) => setMetricForm({ ...metricForm, agg_field: e.target.value })}
+                  >
+                    <option value="*">*</option>
+                    {columnsOf(expandedId, metricForm.table_name).map((c) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name} ({c.type})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div style={{ alignItems: "flex-start" }}>
+                <label>
+                  조회 컬럼 — 체크한 순서대로 SELECT에 들어갑니다
+                  {metricForm.select_columns.length > 0 && (
+                    <span style={{ fontWeight: 400, color: "#555" }}>
+                      {" "}
+                      ({metricForm.select_columns.length}개:{" "}
+                      {metricForm.select_columns.join(", ")})
+                    </span>
+                  )}
+                </label>
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "row",
+                    flexWrap: "wrap",
+                    gap: "4px 14px",
+                    maxHeight: "180px",
+                    overflowY: "auto",
+                    border: "1px solid #ddd",
+                    padding: "10px",
+                    width: "100%",
+                  }}
+                >
+                  {columnsOf(expandedId, metricForm.table_name).map((c) => (
+                    <label
+                      key={c.name}
+                      style={{ flexDirection: "row", alignItems: "center", gap: "4px", fontWeight: 400 }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={metricForm.select_columns.includes(c.name)}
+                        onChange={(e) =>
+                          setMetricForm({
+                            ...metricForm,
+                            select_columns: e.target.checked
+                              ? [...metricForm.select_columns, c.name]
+                              : metricForm.select_columns.filter((x) => x !== c.name),
+                          })
+                        }
+                        style={{ width: "auto" }}
+                      />
+                      {c.name}
+                      <span style={{ color: "#999" }}>({c.type})</span>
+                    </label>
+                  ))}
+                  {columnsOf(expandedId, metricForm.table_name).length === 0 && (
+                    <span style={{ color: "#666" }}>테이블을 먼저 고르십시오.</span>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div style={{ alignItems: "flex-start" }}>
               <label>고정 필터</label>
@@ -625,7 +719,14 @@ export function DatasourcePage() {
               </button>
             </div>
 
-            <button type="submit" disabled={savingMetric || !metricForm.table_name}>
+            <button
+              type="submit"
+              disabled={
+                savingMetric ||
+                !metricForm.table_name ||
+                (metricForm.kind === "projection" && metricForm.select_columns.length === 0)
+              }
+            >
               {savingMetric ? "등록 중..." : "지표 등록"}
             </button>
           </form>

@@ -59,10 +59,26 @@ class Compiler:
                     f"(사용 가능: {', '.join(self.metrics) or '없음'})"
                 )
             table = metric["table"]
-            aggregations = [{**metric["aggregation"], "alias": metric_name}]
+            # 지표의 고정 필터가 먼저, 모델이 낸 필터가 뒤에. 모델이 고정 필터를
+            # 잊어도 여기서 항상 붙는다 — 이것이 지표 시스템의 요점이고,
+            # 집계형이든 조회형이든 똑같이 적용된다.
             filters = list(metric.get("fixed_filters", [])) + list(ast.get("filters") or [])
+            if metric.get("kind") == "projection":
+                # 조회형 지표는 컬럼 목록 자체가 정의다. 여기에 group_by를 겹치면
+                # 정의에 없던 집계가 생기므로 받지 않는다.
+                if ast.get("group_by"):
+                    raise ValueError(
+                        f"조회형 지표에는 group_by를 쓸 수 없습니다 -> {metric_name!r} "
+                        f"(이 지표는 {', '.join(metric['columns'])} 조회로 이미 정의돼 있습니다)"
+                    )
+                projection = metric["columns"]
+                aggregations = []
+            else:
+                projection = []
+                aggregations = [{**metric["aggregation"], "alias": metric_name}]
         else:
             table = ast.get("target_table")
+            projection = []
             aggregations = ast.get("aggregations") or []
             filters = ast.get("filters") or []
 
@@ -77,6 +93,12 @@ class Compiler:
 
         # SELECT 절 생성
         select = []
+        for column in projection:
+            resolved = self._match(column, allowed)
+            if resolved is None:
+                raise ValueError(f"조회할 수 없는 컬럼입니다 -> {resolved_table}.{column}")
+            select.append(self._identifier(resolved))
+
         for agg in aggregations:
             if not isinstance(agg, dict):
                 raise ValueError(f"aggregations의 항목은 객체여야 합니다 -> {agg!r}")
