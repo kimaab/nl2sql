@@ -14,6 +14,19 @@ export function AskPage() {
   const [question, setQuestion] = useState("");
   const [history, setHistory] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+
+  async function copySql(index: number, sql: string) {
+    try {
+      await navigator.clipboard.writeText(sql);
+      setCopiedIndex(index);
+      // 잠시 뒤 원래 라벨로 돌린다. 계속 "복사됨"이면 다음에 눌렀을 때
+      // 눌린 것인지 알 수 없다.
+      setTimeout(() => setCopiedIndex((c) => (c === index ? null : c)), 1500);
+    } catch {
+      alert("클립보드에 쓰지 못했습니다. SQL을 직접 선택해 복사하십시오.");
+    }
+  }
 
   useEffect(() => {
     loadDatasources();
@@ -107,7 +120,24 @@ export function AskPage() {
                 <p style={{ fontWeight: "bold" }}>Q. {entry.question}</p>
                 {entry.sql ? (
                   <div>
-                    <p style={{ color: "green" }}>✓ 성공 ({entry.attempts}번 시도)</p>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "10px",
+                      }}
+                    >
+                      <p style={{ color: "green" }}>✓ 성공 ({entry.attempts}번 시도)</p>
+                      <button
+                        type="button"
+                        onClick={() => copySql(i, entry.sql!)}
+                        style={{ whiteSpace: "nowrap", marginTop: 0 }}
+                      >
+                        {copiedIndex === i ? "복사됨" : "SQL 복사"}
+                      </button>
+                    </div>
                     <pre
                       style={{
                         backgroundColor: "#f5f5f5",
