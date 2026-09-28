@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import datetime
 import logging
 from pathlib import Path
 from uuid import UUID
@@ -249,9 +250,15 @@ def post_ask(req: AskRequest):
 
 def _system_prompt(contract: dict, pruned: dict) -> str:
     """시스템 프롬프트 생성"""
+    today = datetime.date.today()
     return (
         f"당신은 자연어 질문을 '{contract['name']}' 데이터베이스"
         f"({contract['driver']}) 조회로 바꾸는 시맨틱 파서입니다.\n"
+        # 오늘 날짜가 없으면 "최근 일주일", "지난달", "7월" 같은 말을 날짜로
+        # 옮길 수 없어 모델이 연도를 찍는다.
+        f"오늘은 {today.isoformat()} ({'월화수목금토일'[today.weekday()]}요일) 입니다. "
+        "“최근 7일”, “지난달”, “올해 7월” 같은 표현은 이 날짜를 기준으로 계산해 "
+        "YYYY-MM-DD 형식으로 적으십시오. 기간의 끝은 less_or_equal 로 지정하십시오.\n"
         "아래 [허용된 메타데이터]에 없는 테이블·컬럼·지표 이름은 절대 만들어내지 "
         "마십시오.\n\n"
         f"[허용된 메타데이터]\n{json.dumps(pruned, ensure_ascii=False, indent=2)}\n\n"
