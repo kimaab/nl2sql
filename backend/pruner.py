@@ -33,7 +33,8 @@ class Pruner:
 
         # 지표 항목 추가
         for metric in contract.get("metrics", []):
-            text = f"{metric['name']} {metric.get('description', '')} {metric['table']}"
+            joined = " ".join(j["table"] for j in metric.get("joins") or [])
+            text = f"{metric['name']} {metric.get('description', '')} {metric['table']} {joined}"
             self.entries.append(("metric", metric, text))
 
         self._tables_by_name = {t["name"]: t for t in contract["tables"]}
@@ -61,9 +62,11 @@ class Pruner:
                 seen.add(item["name"])
             elif kind == "metric":
                 metrics.append(item)
-                if item["table"] not in seen:
-                    tables.append(self._tables_by_name[item["table"]])
-                    seen.add(item["table"])
+                # 조인 지표에 group_by·filters 를 붙이려면 모델이 조인된 테이블의 컬럼도 봐야 한다.
+                for name in [item["table"]] + [j["table"] for j in item.get("joins") or []]:
+                    if name not in seen and name in self._tables_by_name:
+                        tables.append(self._tables_by_name[name])
+                        seen.add(name)
 
         # 아무것도 걸리지 않으면 상위 몇 개라도 돌려준다
         if not tables:

@@ -2,6 +2,7 @@ import logging
 from uuid import UUID
 import db
 from models import ApiException
+from compiler import build_scope, resolve_ref
 
 log = logging.getLogger("nl2sql.contract")
 
@@ -63,6 +64,8 @@ def load_contract(datasource_id: UUID) -> dict:
             "kind": m["kind"],
             "fixed_filters": m["fixed_filters"] or [],
         }
+        if m.get("joins"):
+            entry["joins"] = m["joins"]
         if m["kind"] == "projection":
             entry["columns"] = m["select_columns"] or []
         else:
@@ -83,27 +86,26 @@ def load_contract(datasource_id: UUID) -> dict:
 def _broken_reason(m: dict, tables: dict) -> str | None:
     """동기화로 테이블·컬럼이 사라진 지표를 가려낸다.
 
-    집계형은 agg_field 하나만 보면 되지만, 조회형은 컬럼 목록 전부가
-    살아 있어야 한다. 고정 필터 컬럼은 어느 쪽이든 확인한다 — 필터가
-    깨지면 지표가 보장하려던 조건이 조용히 빠진다.
+    기본 테이블·조인 테이블·ON 컬럼, 집계 또는 조회 컬럼, 고정 필터 컬럼이
+    전부 살아 있어야 한다 — 필터가 깨지면 지표가 보장하려던 조건이 조용히 빠진다.
     """
-    table = tables.get(m["table_name"])
-    if table is None:
-        return f"테이블 {m['table_name']}이(가) 없습니다"
-    known = {c["name"] for c in table["columns"]}
+    columns = {name: [c["name"] for c in t["columns"]] for name, t in tables.items()}
+    try:
+        scope, _ = build_scope(m["table_name"], m.get("joins") or [], columns)
+    except ValueError as error:
+        return str(error)
+    base = next(iter(scope))
 
     if m["kind"] == "projection":
-        missing = [c for c in (m["select_columns"] or []) if c not in known]
-        if not (m["select_columns"] or []):
+        refs = list(m["select_columns"] or [])
+        if not refs:
             return "조회 컬럼이 비어 있습니다"
-        if missing:
-            return f"조회 컬럼이 없습니다: {', '.join(missing)}"
-    elif m["agg_field"] != "*" and m["agg_field"] not in known:
-        return f"집계 컬럼 {m['table_name']}.{m['agg_field']}이(가) 없습니다"
-
-    missing_filters = [
-        f.get("field") for f in (m["fixed_filters"] or []) if f.get("field") not in known
-    ]
-    if missing_filters:
-        return f"고정 필터 컬럼이 없습니다: {', '.join(map(str, missing_filters))}"
+    else:
+        refs = [] if m["agg_field"] == "*" else [m["agg_field"]]
+    refs += [f.get("field") for f in (m["fixed_filters"] or [])]
+    for ref in refs:
+        try:
+            resolve_ref(ref, scope, base)
+        except ValueError as error:
+            return str(error)
     return None

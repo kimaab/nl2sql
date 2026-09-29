@@ -3,7 +3,9 @@ import json
 from uuid import UUID, uuid4
 import db
 from models import Metric, MetricInput, MetricKind, ApiException
-from compiler import FILTER_SOURCES, temporal_kind, parse_temporal, resolve_relative
+from compiler import (
+    FILTER_SOURCES, build_scope, parse_temporal, resolve_ref, resolve_relative, temporal_kind,
+)
 
 log = logging.getLogger("nl2sql.metrics")
 
@@ -35,28 +37,33 @@ def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
     가리키는 테이블·컬럼이 저장된 스키마에 실제로 있는지 여기서 확인한다.
     질문 시점에 발견하면 사용자는 왜 실패하는지 알 수 없다.
     """
-    table = db.one(
-        "SELECT id FROM datasource_table WHERE datasource_id = %s AND name = %s",
-        str(datasource_id),
-        input_data.table_name
-    )
-    if table is None:
-        raise ApiException(400, f"테이블을 찾을 수 없습니다: {input_data.table_name}")
-
-    types = {
-        r["name"].lower(): r["data_type"]
-        for r in db.query(
-            "SELECT name, data_type FROM datasource_column WHERE table_id = %s", table["id"]
-        )
-    }
-    known = set(types)
+    types: dict[tuple[str, str], str] = {}
+    tables: dict[str, list[str]] = {}
+    for r in db.query("""
+        SELECT t.name AS table_name, c.name AS column_name, c.data_type
+          FROM datasource_table t
+          LEFT JOIN datasource_column c ON c.table_id = t.id
+         WHERE t.datasource_id = %s
+         ORDER BY t.name, c.ordinal
+    """, str(datasource_id)):
+        columns = tables.setdefault(r["table_name"], [])
+        if r["column_name"] is not None:
+            columns.append(r["column_name"])
+            types[(r["table_name"], r["column_name"])] = r["data_type"] or ""
     driver = db.one("SELECT driver FROM datasource WHERE id = %s", str(datasource_id))["driver"]
 
-    def _require_column(column: str, what: str) -> None:
-        if not column or column.lower() not in known:
-            raise ApiException(
-                400, f"{what} 컬럼을 찾을 수 없습니다: {input_data.table_name}.{column}"
-            )
+    joins = [j.model_dump() for j in input_data.joins]
+    try:
+        scope, _ = build_scope(input_data.table_name, joins, tables)
+    except ValueError as error:
+        raise ApiException(400, str(error)) from None
+    base = next(iter(scope))
+
+    def _require_column(column, what: str) -> tuple[str, str]:
+        try:
+            return resolve_ref(column, scope, base)
+        except ValueError as error:
+            raise ApiException(400, f"{what} 컬럼: {error}") from None
 
     if input_data.kind is MetricKind.AGGREGATE:
         if input_data.agg_field != "*":
@@ -67,14 +74,14 @@ def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
 
     for filter_spec in input_data.fixed_filters:
         field = filter_spec.get("field")
-        _require_column(field, "필터")
-        where = f"{input_data.table_name}.{field}"
+        ref = _require_column(field, "필터")
+        where = ".".join(ref)
         source = str(filter_spec.get("source") or "literal").lower()
         if source not in FILTER_SOURCES:
             raise ApiException(
                 400, f"알 수 없는 필터 출처입니다: {source} (사용 가능: {', '.join(FILTER_SOURCES)})")
 
-        kind = temporal_kind(types.get(str(field).lower(), ""), driver)
+        kind = temporal_kind(types.get(ref, ""), driver)
 
         # 값이 질문에서 오므로 여기서 검사할 값이 없다.
         if source == "question":
@@ -119,23 +126,25 @@ def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO datasource_metric
-                (id, datasource_id, name, description, kind, table_name,
+                (id, datasource_id, name, description, kind, table_name, joins,
                  agg_field, agg_function, select_columns, fixed_filters)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 str(metric_id),
                 str(datasource_id),
                 input_data.name,
                 input_data.description,
                 input_data.kind.value,
-                input_data.table_name,
+                base,
+                json.dumps(joins),
                 input_data.agg_field,
                 input_data.agg_function,
                 json.dumps(input_data.select_columns),
                 json.dumps(input_data.fixed_filters),
             ))
 
-    log.info("metric created: %s (%s, kind=%s)", metric_id, input_data.name, input_data.kind.value)
+    log.info("metric created: %s (%s, kind=%s, joins=%d)",
+             metric_id, input_data.name, input_data.kind.value, len(joins))
     return get_metric(datasource_id, metric_id)
 
 
@@ -159,6 +168,7 @@ def _row_to_metric(row: dict) -> Metric:
         description=row["description"],
         kind=MetricKind(row["kind"]),
         table_name=row["table_name"],
+        joins=row.get("joins") or [],
         agg_field=row["agg_field"],
         agg_function=row["agg_function"],
         select_columns=row["select_columns"] or [],

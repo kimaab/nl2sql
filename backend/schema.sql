@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS datasource_metric (
     name          TEXT NOT NULL,
     description   TEXT NOT NULL DEFAULT '',
     table_name    TEXT NOT NULL,
+    -- 기본 테이블에 붙는 조인. [{"table","type":"inner|left","on":[{"left":"T.C","right":"T.C"}]}]
+    joins         JSONB NOT NULL DEFAULT '[]',
     -- 'aggregate' = 집계 하나를 내는 지표, 'projection' = 컬럼 몇 개를 조회하는 지표.
     -- 어느 쪽이든 fixed_filters는 컴파일러가 강제로 붙인다.
     kind          TEXT NOT NULL DEFAULT 'aggregate',
@@ -57,6 +59,7 @@ ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAUL
 ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS select_columns JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE datasource_metric ALTER COLUMN agg_field DROP NOT NULL;
 ALTER TABLE datasource_metric ALTER COLUMN agg_function DROP NOT NULL;
+ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS joins JSONB NOT NULL DEFAULT '[]';
 
 CREATE INDEX IF NOT EXISTS idx_datasource_table_ds ON datasource_table (datasource_id);
 CREATE INDEX IF NOT EXISTS idx_datasource_column_table ON datasource_column (table_id);

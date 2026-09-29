@@ -37,6 +37,7 @@ const EMPTY_METRIC: api.MetricInput = {
   description: "",
   kind: "aggregate",
   table_name: "",
+  joins: [],
   agg_field: "*",
   agg_function: "COUNT",
   select_columns: [],
@@ -212,16 +213,70 @@ export function DatasourcePage() {
   /** 동기화로 테이블·컬럼이 사라진 지표. 모델에게 전달되지 않으므로 화면에서도 알려야 한다. */
   function isBroken(datasourceId: string, m: api.Metric): boolean {
     const tables = schemas[datasourceId];
-    if (!tables) return false;
-    const table = tables.find((t) => t.name === m.table_name);
-    if (!table) return true;
-    const has = (name: string) => table.columns.some((c) => c.name === name);
-    if (m.kind === "projection") {
-      if (m.select_columns.length === 0 || !m.select_columns.every(has)) return true;
-    } else if (m.agg_field !== "*" && !has(m.agg_field ?? "")) {
-      return true;
+    return !!tables && api.metricBrokenReason(tables, m) !== null;
+  }
+
+  /** 테이블들의 컬럼을 선택지로. 조인이 있으면 '테이블.컬럼' 으로 적어 모호함을 없앤다. */
+  function columnOptions(datasourceId: string, tables: string[], qualify: boolean) {
+    return tables.flatMap((t) =>
+      columnsOf(datasourceId, t).map((c) => ({
+        value: qualify ? `${t}.${c.name}` : c.name,
+        type: c.type,
+      }))
+    );
+  }
+
+  function formColumns() {
+    if (!expandedId) return [];
+    const f = metricForm;
+    return columnOptions(expandedId, [f.table_name, ...f.joins.map((j) => j.table)], f.joins.length > 0);
+  }
+
+  /** 조인이 바뀌면 이미 고른 컬럼을 새 모양으로 옮긴다. 사라진 테이블의 컬럼은 버린다. */
+  function withJoins(form: api.MetricInput, joins: api.JoinSpec[]): api.MetricInput {
+    const inScope = new Set([form.table_name, ...joins.map((j) => j.table)]);
+    const qualify = joins.length > 0;
+    const move = (ref: string | null | undefined): string | null => {
+      if (!ref) return null;
+      const dot = ref.indexOf(".");
+      const [t, c] = dot >= 0 ? [ref.slice(0, dot), ref.slice(dot + 1)] : [form.table_name, ref];
+      if (!inScope.has(t)) return null;
+      if (qualify) return `${t}.${c}`;
+      return t === form.table_name ? c : null;
+    };
+    // 앞에서 빠진 테이블을 가리키는 ON 조건도 함께 버린다.
+    const cleaned = joins.map((j, i) => {
+      const earlier = new Set([form.table_name, ...joins.slice(0, i).map((x) => x.table)]);
+      return {
+        ...j,
+        on: j.on.filter((p) => earlier.has(p.left.split(".")[0]) && p.right.split(".")[0] === j.table),
+      };
+    });
+    return {
+      ...form,
+      joins: cleaned,
+      agg_field: form.agg_field === "*" ? "*" : move(form.agg_field) ?? "*",
+      select_columns: form.select_columns.map(move).filter((c): c is string => c !== null),
+      fixed_filters: form.fixed_filters
+        .map((f) => ({ ...f, field: move(f.field) }))
+        .filter((f) => f.field !== null),
+    };
+  }
+
+  /** 새 조인의 ON 기본값 — 앞선 테이블과 이름이 같은 컬럼이 있으면 그것으로 잇는다. */
+  function guessPair(datasourceId: string, earlier: string[], table: string): api.JoinOn {
+    const right = columnsOf(datasourceId, table);
+    for (const t of earlier) {
+      const common = columnsOf(datasourceId, t).find((c) =>
+        right.some((r) => r.name.toLowerCase() === c.name.toLowerCase())
+      );
+      if (common) {
+        const r = right.find((x) => x.name.toLowerCase() === common.name.toLowerCase())!;
+        return { left: `${t}.${common.name}`, right: `${table}.${r.name}` };
+      }
     }
-    return m.fixed_filters.some((f) => f.field && !has(f.field));
+    const first = columnsOf(datasourceId, earlier[0])[0];
+    return { left: `${earlier[0]}.${first?.name ?? ""}`, right: `${table}.${right[0]?.name ?? ""}` };
   }
 
   async function handleCreateMetric(e: React.FormEvent) {
@@ -234,6 +289,7 @@ export function DatasourcePage() {
         ...EMPTY_METRIC,
         kind: metricForm.kind,
         table_name: metricForm.table_name,
+        joins: metricForm.joins,
       });
       await loadMetrics(expandedId);
       await loadDatasources();
@@ -470,8 +526,8 @@ export function DatasourcePage() {
                     <strong>{m.name}</strong>{" "}
                     <code>
                       {m.kind === "projection"
-                        ? `${m.select_columns.join(", ")} FROM ${m.table_name}`
-                        : `${m.agg_function}(${m.agg_field}) FROM ${m.table_name}`}
+                        ? `${m.select_columns.join(", ")} FROM ${m.table_name}${api.joinClause(m)}`
+                        : `${m.agg_function}(${m.agg_field}) FROM ${m.table_name}${api.joinClause(m)}`}
                     </code>
                     {m.fixed_filters.length > 0 && (
                       <code style={{ marginLeft: "6px" }}>
@@ -564,13 +620,14 @@ export function DatasourcePage() {
             </div>
 
             <div>
-              <label>테이블</label>
+              <label>기본 테이블</label>
               <select
                 value={metricForm.table_name}
                 onChange={(e) =>
                   setMetricForm({
                     ...metricForm,
                     table_name: e.target.value,
+                    joins: [],
                     agg_field: "*",
                     select_columns: [],
                     fixed_filters: [],
@@ -585,6 +642,122 @@ export function DatasourcePage() {
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div style={{ alignItems: "flex-start" }}>
+              <label>
+                조인{" "}
+                <span style={{ fontWeight: 400, color: "#888" }}>
+                  — 1:N 으로 조인하면 기본 테이블의 행이 불어나 SUM·COUNT 가 커집니다
+                </span>
+              </label>
+              {metricForm.joins.map((j, i) => {
+                const earlier = [metricForm.table_name, ...metricForm.joins.slice(0, i).map((x) => x.table)];
+                const taken = new Set([metricForm.table_name, ...metricForm.joins.map((x) => x.table)]);
+                const setJoin = (next: api.JoinSpec) => {
+                  const joins = [...metricForm.joins];
+                  joins[i] = next;
+                  setMetricForm(withJoins(metricForm, joins));
+                };
+                const leftCols = columnOptions(expandedId, earlier, true);
+                const rightCols = columnOptions(expandedId, [j.table], true);
+                return (
+                  <div key={i} style={{ marginBottom: "10px", padding: "8px", border: "1px solid #eee", width: "100%" }}>
+                    <div style={{ display: "flex", flexDirection: "row", gap: "8px" }}>
+                      <select
+                        value={j.type}
+                        onChange={(e) => setJoin({ ...j, type: e.target.value as api.JoinSpec["type"] })}
+                        style={{ width: "auto" }}
+                      >
+                        <option value="inner">INNER JOIN</option>
+                        <option value="left">LEFT JOIN</option>
+                      </select>
+                      <select
+                        value={j.table}
+                        onChange={(e) =>
+                          setJoin({ ...j, table: e.target.value, on: [guessPair(expandedId, earlier, e.target.value)] })
+                        }
+                      >
+                        {(schemas[expandedId] ?? [])
+                          .filter((t) => t.name === j.table || !taken.has(t.name))
+                          .map((t) => (
+                            <option key={t.name} value={t.name}>
+                              {t.name}
+                              {t.description ? " — " + t.description : ""}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => setMetricForm(withJoins(metricForm, metricForm.joins.filter((_, k) => k !== i)))}
+                        style={{ whiteSpace: "nowrap" }}
+                      >
+                        조인 빼기
+                      </button>
+                    </div>
+                    {j.on.map((p, pi) => (
+                      <div key={pi} style={{ display: "flex", flexDirection: "row", gap: "8px", marginTop: "6px", alignItems: "center" }}>
+                        <span style={{ color: "#888", minWidth: "36px" }}>{pi === 0 ? "ON" : "AND"}</span>
+                        <select
+                          value={p.left}
+                          onChange={(e) => setJoin({ ...j, on: j.on.map((x, k) => (k === pi ? { ...x, left: e.target.value } : x)) })}
+                        >
+                          {leftCols.map((c) => (
+                            <option key={c.value} value={c.value}>
+                              {c.value}
+                            </option>
+                          ))}
+                        </select>
+                        <span>=</span>
+                        <select
+                          value={p.right}
+                          onChange={(e) => setJoin({ ...j, on: j.on.map((x, k) => (k === pi ? { ...x, right: e.target.value } : x)) })}
+                        >
+                          {rightCols.map((c) => (
+                            <option key={c.value} value={c.value}>
+                              {c.value}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => setJoin({ ...j, on: j.on.filter((_, k) => k !== pi) })}
+                          style={{ whiteSpace: "nowrap" }}
+                        >
+                          빼기
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setJoin({ ...j, on: [...j.on, guessPair(expandedId, earlier, j.table)] })}
+                      style={{ marginTop: "6px" }}
+                    >
+                      조건 추가
+                    </button>
+                    {j.on.length === 0 && (
+                      <span style={{ color: TONE.warn.color, marginLeft: "8px" }}>ON 조건이 하나 이상 필요합니다</span>
+                    )}
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => {
+                  const taken = new Set([metricForm.table_name, ...metricForm.joins.map((x) => x.table)]);
+                  const next = (schemas[expandedId] ?? []).find((t) => !taken.has(t.name));
+                  if (!next) return;
+                  setMetricForm(
+                    withJoins(metricForm, [
+                      ...metricForm.joins,
+                      { table: next.name, type: "inner", on: [guessPair(expandedId, [...taken], next.name)] },
+                    ])
+                  );
+                }}
+                disabled={!metricForm.table_name}
+              >
+                조인 추가
+              </button>
             </div>
 
             {metricForm.kind === "aggregate" ? (
@@ -606,9 +779,9 @@ export function DatasourcePage() {
                     onChange={(e) => setMetricForm({ ...metricForm, agg_field: e.target.value })}
                   >
                     <option value="*">*</option>
-                    {columnsOf(expandedId, metricForm.table_name).map((c) => (
-                      <option key={c.name} value={c.name}>
-                        {c.name} ({c.type})
+                    {formColumns().map((c) => (
+                      <option key={c.value} value={c.value}>
+                        {c.value} ({c.type})
                       </option>
                     ))}
                   </select>
@@ -639,29 +812,29 @@ export function DatasourcePage() {
                     width: "100%",
                   }}
                 >
-                  {columnsOf(expandedId, metricForm.table_name).map((c) => (
+                  {formColumns().map((c) => (
                     <label
-                      key={c.name}
+                      key={c.value}
                       style={{ flexDirection: "row", alignItems: "center", gap: "4px", fontWeight: 400 }}
                     >
                       <input
                         type="checkbox"
-                        checked={metricForm.select_columns.includes(c.name)}
+                        checked={metricForm.select_columns.includes(c.value)}
                         onChange={(e) =>
                           setMetricForm({
                             ...metricForm,
                             select_columns: e.target.checked
-                              ? [...metricForm.select_columns, c.name]
-                              : metricForm.select_columns.filter((x) => x !== c.name),
+                              ? [...metricForm.select_columns, c.value]
+                              : metricForm.select_columns.filter((x) => x !== c.value),
                           })
                         }
                         style={{ width: "auto" }}
                       />
-                      {c.name}
+                      {c.value}
                       <span style={{ color: "#999" }}>({c.type})</span>
                     </label>
                   ))}
-                  {columnsOf(expandedId, metricForm.table_name).length === 0 && (
+                  {formColumns().length === 0 && (
                     <span style={{ color: "#666" }}>테이블을 먼저 고르십시오.</span>
                   )}
                 </div>
@@ -676,17 +849,16 @@ export function DatasourcePage() {
                     <select
                       value={f.field ?? ""}
                       onChange={(e) => {
-                        const col = columnsOf(expandedId, metricForm.table_name)
-                          .find((c) => c.name === e.target.value);
+                        const col = formColumns().find((c) => c.value === e.target.value);
                         const next = [...metricForm.fixed_filters];
                         // 컬럼이 바뀌면 출처 기본값도 다시 정한다
                         next[i] = newFilter(e.target.value, col?.type ?? "");
                         setMetricForm({ ...metricForm, fixed_filters: next });
                       }}
                     >
-                      {columnsOf(expandedId, metricForm.table_name).map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
+                      {formColumns().map((c) => (
+                        <option key={c.value} value={c.value}>
+                          {c.value}
                         </option>
                       ))}
                     </select>
@@ -760,16 +932,16 @@ export function DatasourcePage() {
               <button
                 type="button"
                 onClick={() => {
-                  const first = columnsOf(expandedId, metricForm.table_name)[0];
+                  const first = formColumns()[0];
                   setMetricForm({
                     ...metricForm,
                     fixed_filters: [
                       ...metricForm.fixed_filters,
-                      newFilter(first?.name ?? "", first?.type ?? ""),
+                      newFilter(first?.value ?? "", first?.type ?? ""),
                     ],
                   });
                 }}
-                disabled={columnsOf(expandedId, metricForm.table_name).length === 0}
+                disabled={formColumns().length === 0}
               >
                 필터 추가
               </button>
@@ -780,6 +952,7 @@ export function DatasourcePage() {
               disabled={
                 savingMetric ||
                 !metricForm.table_name ||
+                metricForm.joins.some((j) => j.on.length === 0) ||
                 (metricForm.kind === "projection" && metricForm.select_columns.length === 0)
               }
             >
