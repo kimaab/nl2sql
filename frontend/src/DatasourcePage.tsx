@@ -222,6 +222,7 @@ export function DatasourcePage() {
       columnsOf(datasourceId, t).map((c) => ({
         value: qualify ? `${t}.${c.name}` : c.name,
         type: c.type,
+        comment: c.description,
       }))
     );
   }
@@ -704,7 +705,7 @@ export function DatasourcePage() {
                         >
                           {leftCols.map((c) => (
                             <option key={c.value} value={c.value}>
-                              {c.value}
+                              {c.value}{c.comment ? ` — ${c.comment}` : ""}
                             </option>
                           ))}
                         </select>
@@ -715,7 +716,7 @@ export function DatasourcePage() {
                         >
                           {rightCols.map((c) => (
                             <option key={c.value} value={c.value}>
-                              {c.value}
+                              {c.value}{c.comment ? ` — ${c.comment}` : ""}
                             </option>
                           ))}
                         </select>
@@ -781,7 +782,7 @@ export function DatasourcePage() {
                     <option value="*">*</option>
                     {formColumns().map((c) => (
                       <option key={c.value} value={c.value}>
-                        {c.value} ({c.type})
+                        {c.value} ({c.type}){c.comment ? ` — ${c.comment}` : ""}
                       </option>
                     ))}
                   </select>
@@ -831,7 +832,8 @@ export function DatasourcePage() {
                         style={{ width: "auto" }}
                       />
                       {c.value}
-                      <span style={{ color: "#999" }}>({c.type})</span>
+                      {c.comment && <span style={{ color: "#1565c0", marginLeft: "4px" }}>{c.comment}</span>}
+                      <span style={{ color: "#999", marginLeft: "4px" }}>({c.type})</span>
                     </label>
                   ))}
                   {formColumns().length === 0 && (
@@ -858,7 +860,7 @@ export function DatasourcePage() {
                     >
                       {formColumns().map((c) => (
                         <option key={c.value} value={c.value}>
-                          {c.value}
+                          {c.value}{c.comment ? ` — ${c.comment}` : ""}
                         </option>
                       ))}
                     </select>
