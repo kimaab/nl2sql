@@ -272,7 +272,8 @@ export function MetricWizard() {
               form.series?.order_by &&
               form.agg_field &&
               form.agg_field !== "*" &&
-              (form.agg_function !== "CHANGE_COUNT" || form.series?.baseline?.trim())
+              (form.agg_function !== "CHANGE_COUNT" || form.series?.baseline?.trim()) &&
+              (form.series?.max_step == null || form.series.max_step > 0)
           ))) ||
         (form.kind === "projection" && form.select_columns.length > 0) ||
         (form.kind === "derived" && Boolean(form.expression?.trim()) && formulaRefs(form.expression).length > 0)),
@@ -614,6 +615,24 @@ export function MetricWizard() {
                         ))}
                       </select>
                     </Field>
+                    {form.agg_function === "DELTA_SUM" && (
+                      <Field
+                        label="한 행 최대 증가폭"
+                        hint="이보다 크게 늘어난 행은 리셋 복귀·장비 교체로 튄 값으로 보고 0으로 칩니다. 비우면 제한 없음"
+                      >
+                        <input
+                          className="input"
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={form.series.max_step ?? ""}
+                          onChange={(e) =>
+                            patch({ series: { ...form.series!, max_step: e.target.value === "" ? null : Number(e.target.value) } })
+                          }
+                          placeholder="예: 2 (시간)"
+                        />
+                      </Field>
+                    )}
                     {form.agg_function === "CHANGE_COUNT" && (
                       <Field label="정상값" required hint="이 값에서 다른 값으로 바뀐 순간을 1건으로 셉니다 (예: 오류 코드 0)">
                         <input

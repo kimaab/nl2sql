@@ -42,6 +42,7 @@ export interface SeriesSpec {
   partition_by: string;
   order_by: string;
   baseline: string | null;
+  max_step?: number | null;
 }
 
 export interface MetricExample {

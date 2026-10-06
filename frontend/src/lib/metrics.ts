@@ -128,6 +128,7 @@ export function definitionLines(m: Partial<MetricInput>): string {
         : isSeries(m.agg_function)
           ? `${m.agg_function}(${m.agg_field ?? "…"}` +
             (m.agg_function === "CHANGE_COUNT" ? `, 정상=${m.series?.baseline ?? "…"}` : "") +
+            (m.agg_function === "DELTA_SUM" && m.series?.max_step ? `, 한 행 최대 +${m.series.max_step}` : "") +
             `) <${m.series?.partition_by || "…"}별, ${m.series?.order_by || "…"} 순>`
           : `${m.agg_function ?? "COUNT"}(${m.agg_field ?? "*"})`;
   const lines = [`SELECT ${select}`, `FROM ${m.table_name || "…"}`];

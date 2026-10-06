@@ -204,7 +204,7 @@ def test_series_metrics_registered_and_compiled(client, ds):
     hours = client.post(base, json={"name": "가동", "table_name": "VLOG", "agg_field": "HOURS",
                                     "agg_function": "DELTA_SUM", "series": series})
     assert hours.status_code == 200, hours.text
-    assert hours.json()["series"] == {**series, "baseline": None}
+    assert hours.json()["series"] == {**series, "baseline": None, "max_step": None}
     assert client.post(base, json={"name": "오류", "table_name": "VLOG", "agg_field": "ERR",
                                    "agg_function": "CHANGE_COUNT", "series": series}).status_code == 422  # 정상값 없음
     assert client.post(base, json={"name": "오류", "table_name": "VLOG", "agg_field": "ERR",
@@ -220,3 +220,18 @@ def test_series_metrics_registered_and_compiled(client, ds):
         rows = dict(conn.execute(sql).fetchall())
     # a: 증가분 1 + 0 + (리셋 3→ 버림) + 1 = 2시간, 오류 발생 2회(0→2, 0→5) → 1.0 / b: 증가분 0 → NULL
     assert float(rows["a"]) == 1.0 and rows["b"] is None
+
+
+def test_series_max_step_is_saved_and_applied(client, ds):
+    base = f"/api/datasources/{ds}/metrics"
+    res = client.post(base, json={"name": "가동_제한", "table_name": "VLOG", "agg_field": "HOURS", "agg_function": "DELTA_SUM",
+                                  "series": {"partition_by": "VID", "order_by": "TS", "max_step": 0.5}})
+    assert res.status_code == 200, res.text and res.json()["series"]["max_step"] == 0.5
+    assert client.post(base, json={"name": "y", "table_name": "VLOG", "agg_field": "HOURS", "agg_function": "DELTA_SUM",
+                                   "series": {"partition_by": "VID", "order_by": "TS", "max_step": 0}}).status_code == 422
+    sql = client.post(f"/api/datasources/{ds}/compile", json={"ast": {"metric": "가동_제한", "group_by": ["VID"]}}).json()["sql"]
+    with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
+        conn.execute(f"SET search_path TO {TARGET_SCHEMA}")
+        rows = dict(conn.execute(sql).fetchall())
+    # a 의 증가 1, 0, (리셋), 1 은 모두 0.5 를 넘으므로 0
+    assert float(rows["a"]) == 0.0
