@@ -1,44 +1,38 @@
-import { useState } from "react";
-import { DatasourcePage } from "./DatasourcePage";
-import { AskPage } from "./AskPage";
-import { MetricsPage } from "./MetricsPage";
-import "./App.css";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { Layout } from "./components/Layout";
+import { ToastProvider } from "./components/Toast";
+import { AskPage } from "./pages/AskPage";
+import { DatasourceList } from "./pages/datasources/DatasourceList";
+import { DatasourceForm } from "./pages/datasources/DatasourceForm";
+import { DatasourceSync } from "./pages/datasources/DatasourceSync";
+import { SyncHistory } from "./pages/datasources/SyncHistory";
+import { MetricList } from "./pages/metrics/MetricList";
+import { MetricDetail } from "./pages/metrics/MetricDetail";
+import { MetricWizard } from "./pages/metrics/MetricWizard";
+import "./styles.css";
 
 function App() {
-  const [currentPage, setCurrentPage] = useState<"datasource" | "metrics" | "ask">("ask");
-
   return (
-    <div className="app">
-      <header className="header">
-        <h1>nl2sql Studio</h1>
-        <nav>
-          <button
-            className={currentPage === "ask" ? "active" : ""}
-            onClick={() => setCurrentPage("ask")}
-          >
-            질문
-          </button>
-          <button
-            className={currentPage === "datasource" ? "active" : ""}
-            onClick={() => setCurrentPage("datasource")}
-          >
-            데이터소스
-          </button>
-          <button
-            className={currentPage === "metrics" ? "active" : ""}
-            onClick={() => setCurrentPage("metrics")}
-          >
-            지표
-          </button>
-        </nav>
-      </header>
+    <ToastProvider>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route path="/" element={<Navigate to="/ask" replace />} />
+          <Route path="/ask" element={<AskPage />} />
 
-      <main>
-        {currentPage === "ask" && <AskPage />}
-        {currentPage === "datasource" && <DatasourcePage />}
-        {currentPage === "metrics" && <MetricsPage />}
-      </main>
-    </div>
+          <Route path="/datasources" element={<DatasourceList />} />
+          <Route path="/datasources/new" element={<DatasourceForm />} />
+          <Route path="/datasources/:id/edit" element={<DatasourceForm />} />
+          <Route path="/sync" element={<DatasourceSync />} />
+          <Route path="/sync/history" element={<SyncHistory />} />
+
+          <Route path="/metrics" element={<MetricList />} />
+          <Route path="/metrics/new" element={<MetricWizard />} />
+          <Route path="/metrics/:dsId/:metricId" element={<MetricDetail />} />
+
+          <Route path="*" element={<Navigate to="/ask" replace />} />
+        </Route>
+      </Routes>
+    </ToastProvider>
   );
 }
 
