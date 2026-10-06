@@ -29,12 +29,19 @@ export interface DatasourceInput {
 
 export type MetricKind = "aggregate" | "projection";
 
+export interface MetricJoin {
+  table: string;
+  type: "inner" | "left";
+  on: { left: string; right: string }[];
+}
+
 export interface Metric {
   id: string;
   name: string;
   description: string;
   kind: MetricKind;
   table_name: string;
+  joins?: MetricJoin[];
   agg_field: string | null;
   agg_function: string | null;
   select_columns: string[];

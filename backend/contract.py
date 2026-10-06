@@ -2,6 +2,7 @@ import logging
 from uuid import UUID
 import db
 from models import ApiException
+from compiler import build_scope, resolve_ref
 
 log = logging.getLogger("nl2sql.contract")
 
@@ -63,6 +64,8 @@ def load_contract(datasource_id: UUID) -> dict:
             "kind": m["kind"],
             "fixed_filters": m["fixed_filters"] or [],
         }
+        if m.get("joins"):
+            entry["joins"] = m["joins"]
         if m["kind"] == "projection":
             entry["columns"] = m["select_columns"] or []
         else:
@@ -87,23 +90,32 @@ def _broken_reason(m: dict, tables: dict) -> str | None:
     살아 있어야 한다. 고정 필터 컬럼은 어느 쪽이든 확인한다 — 필터가
     깨지면 지표가 보장하려던 조건이 조용히 빠진다.
     """
-    table = tables.get(m["table_name"])
-    if table is None:
-        return f"테이블 {m['table_name']}이(가) 없습니다"
-    known = {c["name"] for c in table["columns"]}
+    columns = {name: [c["name"] for c in t["columns"]] for name, t in tables.items()}
+    try:
+        scope, _ = build_scope(m["table_name"], m.get("joins") or [], columns)
+    except ValueError as e:
+        return str(e)
+    base = next(iter(scope))
+
+    def missing(refs) -> list[str]:
+        out = []
+        for ref in refs:
+            try:
+                resolve_ref(str(ref), scope, base)
+            except ValueError:
+                out.append(str(ref))
+        return out
 
     if m["kind"] == "projection":
-        missing = [c for c in (m["select_columns"] or []) if c not in known]
         if not (m["select_columns"] or []):
             return "조회 컬럼이 비어 있습니다"
-        if missing:
-            return f"조회 컬럼이 없습니다: {', '.join(missing)}"
-    elif m["agg_field"] != "*" and m["agg_field"] not in known:
-        return f"집계 컬럼 {m['table_name']}.{m['agg_field']}이(가) 없습니다"
+        missing_columns = missing(m["select_columns"])
+        if missing_columns:
+            return f"조회 컬럼이 없습니다: {', '.join(missing_columns)}"
+    elif m["agg_field"] != "*" and missing([m["agg_field"]]):
+        return f"집계 컬럼 {m['agg_field']}이(가) 없습니다"
 
-    missing_filters = [
-        f.get("field") for f in (m["fixed_filters"] or []) if f.get("field") not in known
-    ]
+    missing_filters = missing(f.get("field") for f in (m["fixed_filters"] or []))
     if missing_filters:
-        return f"고정 필터 컬럼이 없습니다: {', '.join(map(str, missing_filters))}"
+        return f"고정 필터 컬럼이 없습니다: {', '.join(missing_filters)}"
     return None

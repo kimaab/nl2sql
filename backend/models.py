@@ -1,5 +1,6 @@
 from enum import Enum
 from uuid import UUID
+from typing import Literal
 from pydantic import BaseModel, field_validator, model_validator
 from datetime import datetime
 
@@ -77,6 +78,19 @@ class MetricKind(str, Enum):
 AGG_FUNCTIONS = ("SUM", "COUNT", "AVG", "MIN", "MAX")
 
 
+class JoinOn(BaseModel):
+    """ON 조건 한 쌍. 양쪽 모두 '테이블.컬럼'."""
+    left: str
+    right: str
+
+
+class JoinSpec(BaseModel):
+    """지표의 기본 테이블에 붙는 조인 하나"""
+    table: str
+    type: Literal["inner", "left"] = "inner"
+    on: list[JoinOn]
+
+
 class MetricInput(BaseModel):
     """업무 지표 입력.
 
@@ -87,6 +101,7 @@ class MetricInput(BaseModel):
     description: str = ""
     kind: MetricKind = MetricKind.AGGREGATE
     table_name: str
+    joins: list[JoinSpec] = []
     agg_field: str | None = None
     agg_function: str | None = None
     select_columns: list[str] = []
@@ -133,6 +148,7 @@ class Metric(BaseModel):
     description: str
     kind: MetricKind
     table_name: str
+    joins: list[JoinSpec]
     agg_field: str | None
     agg_function: str | None
     select_columns: list[str]

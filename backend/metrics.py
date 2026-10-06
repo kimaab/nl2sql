@@ -120,8 +120,8 @@ def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
             cur.execute("""
                 INSERT INTO datasource_metric
                 (id, datasource_id, name, description, kind, table_name,
-                 agg_field, agg_function, select_columns, fixed_filters)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 joins, agg_field, agg_function, select_columns, fixed_filters)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 str(metric_id),
                 str(datasource_id),
@@ -129,6 +129,7 @@ def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
                 input_data.description,
                 input_data.kind.value,
                 input_data.table_name,
+                json.dumps([j.model_dump() for j in input_data.joins]),
                 input_data.agg_field,
                 input_data.agg_function,
                 json.dumps(input_data.select_columns),
@@ -153,12 +154,25 @@ def delete_metric(datasource_id: UUID, metric_id: UUID) -> None:
 
 def _row_to_metric(row: dict) -> Metric:
     """DB 행을 Metric 모델로 변환"""
+    from models import JoinSpec, JoinOn
+
+    joins_data = row.get("joins") or []
+    joins = [
+        JoinSpec(
+            table=j["table"],
+            type=j.get("type", "inner"),
+            on=[JoinOn(left=on["left"], right=on["right"]) for on in j.get("on", [])]
+        )
+        for j in joins_data
+    ]
+
     return Metric(
         id=row["id"],
         name=row["name"],
         description=row["description"],
         kind=MetricKind(row["kind"]),
         table_name=row["table_name"],
+        joins=joins,
         agg_field=row["agg_field"],
         agg_function=row["agg_function"],
         select_columns=row["select_columns"] or [],

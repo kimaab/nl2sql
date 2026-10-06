@@ -57,6 +57,7 @@ ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAUL
 ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS select_columns JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE datasource_metric ALTER COLUMN agg_field DROP NOT NULL;
 ALTER TABLE datasource_metric ALTER COLUMN agg_function DROP NOT NULL;
+ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS joins JSONB NOT NULL DEFAULT '[]';
 
 CREATE INDEX IF NOT EXISTS idx_datasource_table_ds ON datasource_table (datasource_id);
 CREATE INDEX IF NOT EXISTS idx_datasource_column_table ON datasource_column (table_id);

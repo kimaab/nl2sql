@@ -83,16 +83,30 @@ export function definitionLines(m: MetricInput | Metric): string {
 /** 동기화로 테이블·컬럼이 사라진 지표는 질문에 쓰이지 않는다. */
 export function brokenReason(tables: SchemaTable[] | null, m: Metric): string | null {
   if (!tables) return null;
-  const table = tables.find((t) => t.name === m.table_name);
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  const table = tables.find((t) => same(t.name, m.table_name));
   if (!table) return `테이블 ${m.table_name}이(가) 스키마에 없습니다`;
-  const has = (name: string) => table.columns.some((c) => c.name === name);
+  const scope = [table];
+  for (const j of m.joins ?? []) {
+    const joined = tables.find((t) => same(t.name, j.table));
+    if (!joined) return `조인 테이블 ${j.table}이(가) 스키마에 없습니다`;
+    scope.push(joined);
+  }
+  // 백엔드 compiler.resolve_ref 와 같은 규칙: '테이블.컬럼' 은 조인 범위에서, '컬럼' 은 기본 테이블에서 찾는다.
+  const has = (ref: string) => {
+    const parts = ref.split(".");
+    if (parts.length > 2) return false;
+    const owner = parts.length === 2 ? scope.find((t) => same(t.name, parts[0].trim())) : table;
+    const col = parts[parts.length - 1].trim();
+    return !!owner && owner.columns.some((c) => same(c.name, col));
+  };
 
   if (m.kind === "projection") {
     if (m.select_columns.length === 0) return "조회 컬럼이 비어 있습니다";
     const gone = m.select_columns.filter((c) => !has(c));
     if (gone.length > 0) return `조회 컬럼이 스키마에 없습니다: ${gone.join(", ")}`;
   } else if (m.agg_field !== "*" && !has(m.agg_field ?? "")) {
-    return `집계 컬럼 ${m.table_name}.${m.agg_field}이(가) 스키마에 없습니다`;
+    return `집계 컬럼 ${m.agg_field}이(가) 스키마에 없습니다`;
   }
 
   const missing = m.fixed_filters.map((f) => f.field).filter((f) => f && !has(f));

@@ -48,6 +48,7 @@ def next_day(iso_date: str) -> str:
 
 FILTER_SOURCES = ("literal", "relative", "question")
 _RELATIVE_RE = re.compile(r"^([+-]?\d+)([dmy])$")
+JOIN_TYPES = {"inner": "INNER JOIN", "left": "LEFT JOIN"}
 
 
 def _shift_months(d: datetime.date, n: int) -> datetime.date:
@@ -77,6 +78,98 @@ def resolve_relative(value, where: str, today: datetime.date | None = None) -> s
     if unit == "d":
         return (base + datetime.timedelta(days=n)).isoformat()
     return _shift_months(base, n if unit == "m" else n * 12).isoformat()
+
+
+def _find(name, options):
+    """대소문자 무시하고 이름 찾기"""
+    if not isinstance(name, str):
+        return None
+    for candidate in options:
+        if candidate.lower() == name.lower():
+            return candidate
+    return None
+
+
+def build_scope(base: str, joins: list, tables: dict) -> tuple[dict, list]:
+    """지표의 기본 테이블과 조인을 검증해 (scope, 조인 목록) 을 돌려준다.
+
+    scope 는 {테이블: [컬럼...]} 로 기본 테이블이 맨 앞이다. 조인 목록은
+    (조인 종류, 테이블, [((왼쪽 테이블, 컬럼), (오른쪽 테이블, 컬럼)), ...]).
+    ON 은 한 쪽이 이번에 붙는 테이블, 다른 쪽이 앞서 나온 테이블이어야 한다 —
+    그래야 조인 순서대로 읽었을 때 모든 조건이 이미 나온 테이블만 가리킨다.
+    """
+    resolved_base = _find(base, tables)
+    if resolved_base is None:
+        raise ValueError(f"조회할 수 없는 테이블입니다 -> {base!r} (사용 가능: {', '.join(tables)})")
+    scope = {resolved_base: tables[resolved_base]}
+    out = []
+    for join in joins or []:
+        if not isinstance(join, dict):
+            raise ValueError(f"조인 항목은 객체여야 합니다 -> {join!r}")
+        table = _find(join.get("table"), tables)
+        if table is None:
+            raise ValueError(f"조인할 수 없는 테이블입니다 -> {join.get('table')!r}")
+        if table in scope:
+            raise ValueError(f"같은 테이블을 두 번 조인할 수 없습니다 -> {table}")
+        kind = str(join.get("type") or "inner").lower()
+        if kind not in JOIN_TYPES:
+            raise ValueError(f"조인 종류는 {', '.join(JOIN_TYPES)} 중 하나여야 합니다 -> {kind!r}")
+        pairs = join.get("on") or []
+        if not pairs:
+            raise ValueError(f"{table} 조인에 ON 조건이 없습니다")
+        earlier = dict(scope)
+        scope[table] = tables[table]
+        rendered = []
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                raise ValueError(f"ON 항목은 객체여야 합니다 -> {pair!r}")
+            left = pair.get("left", "")
+            right = pair.get("right", "")
+            if not left or not right:
+                raise ValueError(f"ON 항목에 left와 right가 필요합니다 -> {pair!r}")
+            left_table, left_col = _parse_ref(left)
+            right_table, right_col = _parse_ref(right)
+            left_resolved = _find(left_table, earlier) if left_table else next(iter(earlier))
+            right_resolved = _find(right_table, scope) if right_table else table
+            if left_resolved is None:
+                raise ValueError(f"ON 조건의 왼쪽 테이블을 찾을 수 없습니다 -> {left!r}")
+            if right_resolved is None:
+                raise ValueError(f"ON 조건의 오른쪽 테이블을 찾을 수 없습니다 -> {right!r}")
+            left_cols = [c for c in tables[left_resolved] if c.lower() == left_col.lower()]
+            right_cols = [c for c in tables[right_resolved] if c.lower() == right_col.lower()]
+            if not left_cols:
+                raise ValueError(f"ON 조건의 왼쪽 컬럼을 찾을 수 없습니다 -> {left_resolved}.{left_col}")
+            if not right_cols:
+                raise ValueError(f"ON 조건의 오른쪽 컬럼을 찾을 수 없습니다 -> {right_resolved}.{right_col}")
+            rendered.append(((left_resolved, left_cols[0]), (right_resolved, right_cols[0])))
+        out.append((kind, table, rendered))
+    return scope, out
+
+
+def _parse_ref(ref: str) -> tuple[str, str]:
+    """'테이블.컬럼' 형식을 파싱"""
+    parts = str(ref).split(".")
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    if len(parts) == 1:
+        return "", parts[0].strip()
+    raise ValueError(f"컬럼 참조 형식이 잘못됐습니다 -> {ref!r}")
+
+
+def resolve_ref(ref: str, scope: dict, base: str, label: str = "조회할 수 없는 컬럼입니다") -> tuple[str, str]:
+    """컬럼 참조를 (테이블, 컬럼)으로 해석"""
+    ref_table, ref_col = _parse_ref(ref)
+    if ref_table:
+        resolved = _find(ref_table, scope)
+        if resolved is None:
+            raise ValueError(f"조인에 없는 테이블입니다 -> {ref_table!r}")
+        table = resolved
+    else:
+        table = base
+    cols = [c for c in scope[table] if c.lower() == ref_col.lower()]
+    if not cols:
+        raise ValueError(f"{label} -> {table}.{ref_col}")
+    return table, cols[0]
 
 
 class Compiler:
@@ -147,9 +240,6 @@ class Compiler:
                     f"(사용 가능: {', '.join(self.metrics) or '없음'})"
                 )
             table = metric["table"]
-            model_filters = list(ast.get("filters") or [])
-            # 지표의 필터가 먼저, 모델이 낸 필터가 뒤에.
-            filters = self._metric_filters(metric, model_filters) + model_filters
             if metric.get("kind") == "projection":
                 # 조회형 지표는 컬럼 목록 자체가 정의다. 여기에 group_by를 겹치면
                 # 정의에 없던 집계가 생기므로 받지 않는다.
@@ -167,24 +257,35 @@ class Compiler:
             table = ast.get("target_table")
             projection = []
             aggregations = ast.get("aggregations") or []
-            filters = ast.get("filters") or []
 
-        # 테이블 검증
-        resolved_table = self._match(table, self.allowed_tables)
-        if resolved_table is None:
-            raise ValueError(
-                f"조회할 수 없는 테이블입니다 -> {table!r} "
-                f"(사용 가능: {', '.join(self.allowed_tables)})"
-            )
-        allowed = self.allowed_tables[resolved_table]
+        # 테이블 검증 — 조인은 지표 정의에서만 온다(모델은 joins 키를 쓸 수 없다).
+        joins = []
+        if metric_name and metric.get("joins"):
+            scope, joins = build_scope(table, metric["joins"], self.allowed_tables)
+            resolved_table = next(iter(scope))
+        else:
+            resolved_table = self._match(table, self.allowed_tables)
+            if resolved_table is None:
+                raise ValueError(
+                    f"조회할 수 없는 테이블입니다 -> {table!r} "
+                    f"(사용 가능: {', '.join(self.allowed_tables)})"
+                )
+            scope = {resolved_table: self.allowed_tables[resolved_table]}
+        # 단일 테이블 SQL 은 예전 모양 그대로 두고, 조인이 있을 때만 컬럼에 테이블을 붙인다.
+        qualify = bool(joins)
+
+        if metric_name:
+            model_filters = list(ast.get("filters") or [])
+            # 지표의 필터가 먼저, 모델이 낸 필터가 뒤에.
+            filters = self._metric_filters(metric, model_filters, scope, resolved_table) + model_filters
+        else:
+            filters = ast.get("filters") or []
 
         # SELECT 절 생성
         select = []
         for column in projection:
-            resolved = self._match(column, allowed)
-            if resolved is None:
-                raise ValueError(f"조회할 수 없는 컬럼입니다 -> {resolved_table}.{column}")
-            select.append(self._identifier(resolved))
+            owner, resolved = resolve_ref(column, scope, resolved_table)
+            select.append(self._column_sql(owner, resolved, qualify))
 
         for agg in aggregations:
             if not isinstance(agg, dict):
@@ -208,36 +309,39 @@ class Compiler:
             if field == "*":
                 target = "*"
             else:
-                resolved = self._match(field, allowed)
-                if resolved is None:
-                    raise ValueError(f"존재하지 않는 컬럼입니다 -> {resolved_table}.{field}")
-                target = self._identifier(resolved)
+                owner, resolved = resolve_ref(field, scope, resolved_table, "존재하지 않는 컬럼입니다")
+                target = self._column_sql(owner, resolved, qualify)
             alias = agg.get("alias") or f"{function.lower()}_{field}"
             select.append(f"{function}({target}) AS {self._alias(alias)}")
 
         # GROUP BY 절 생성
         group_cols = []
         for col in (ast.get("group_by") or []):
-            resolved = self._match(col, allowed)
-            if resolved is None:
-                raise ValueError(f"그룹화할 수 없는 컬럼입니다 -> {resolved_table}.{col}")
-            group_cols.append(self._identifier(resolved))
+            owner, resolved = resolve_ref(col, scope, resolved_table, "그룹화할 수 없는 컬럼입니다")
+            group_cols.append(self._column_sql(owner, resolved, qualify))
 
         select = group_cols + select
 
         # SQL 조립
+        source = f"FROM {self._identifier(resolved_table)}"
+        for kind, joined, pairs in joins:
+            on = " AND ".join(
+                f"{self._column_sql(lt, lc, True)} = {self._column_sql(rt, rc, True)}"
+                for (lt, lc), (rt, rc) in pairs
+            )
+            source += f" {JOIN_TYPES[kind]} {self._identifier(joined)} ON {on}"
         clauses = [
             f"SELECT {', '.join(select) or '*'}",
-            f"FROM {self._identifier(resolved_table)}"
+            source
         ]
-        where = [self._filter(f, resolved_table, allowed) for f in filters]
+        where = [self._filter(f, scope, resolved_table, qualify) for f in filters]
         if where:
             clauses.append("WHERE " + " AND ".join(where))
         if group_cols:
             clauses.append("GROUP BY " + ", ".join(group_cols))
         return " ".join(clauses) + ";"
 
-    def _metric_filters(self, metric: dict, model_filters: list) -> list:
+    def _metric_filters(self, metric: dict, model_filters: list, scope: dict, base: str) -> list:
         """지표의 필터를 출처에 따라 펼친다.
 
         literal 은 언제나 붙는다 — 모델이 잊어도 여기서 강제되는 불변 조건이다.
@@ -245,10 +349,14 @@ class Compiler:
         컬럼을 건드리면 물러난다. 그러지 않으면 지표의 기간과 질문의 기간이
         AND 로 묶여 교집합이 빈 SQL 이 조용히 나간다.
         """
-        touched = {
-            str(f.get("field", "")).lower()
-            for f in model_filters if isinstance(f, dict)
-        }
+        # 'MEMBER_ID' 와 'TB_ORDER.MEMBER_ID' 는 같은 컬럼이다 — 해석한 (테이블, 컬럼)으로 비교한다.
+        touched = set()
+        for f in model_filters:
+            if isinstance(f, dict):
+                try:
+                    touched.add(resolve_ref(str(f.get("field", "")), scope, base))
+                except ValueError:
+                    pass  # 잘못된 컬럼은 _filter 가 구체적인 오류로 돌려준다
         out = []
         for spec in metric.get("fixed_filters", []):
             source = str(spec.get("source") or "literal").lower()
@@ -261,19 +369,20 @@ class Compiler:
             if source == "literal":
                 out.append(spec)
                 continue
-            if field.lower() in touched:
+            key = resolve_ref(field, scope, base, "지표의 고정 필터 컬럼을 찾을 수 없습니다")
+            if key in touched:
                 continue
             if source == "question":
                 raise ValueError(
                     f"지표 {metric['name']!r} 는 {field} 조건을 질문에서 받습니다 -> "
                     f"filters 에 {field} 를 넣어 값이나 기간을 지정하십시오"
                 )
-            where = f"{metric['table']}.{field}"
+            where = f"{key[0]}.{key[1]}"
             out.append({**spec, "source": "literal",
                         "value": resolve_relative(spec.get("value"), where)})
         return out
 
-    def _filter(self, spec: dict, table: str, allowed: list) -> str:
+    def _filter(self, spec: dict, scope: dict, base: str, qualify: bool) -> str:
         """WHERE 조건 생성"""
         if not isinstance(spec, dict):
             raise ValueError(f"filters의 항목은 객체여야 합니다 -> {spec!r}")
@@ -282,10 +391,8 @@ class Compiler:
                 f"filters 항목에 field 키가 없습니다 -> 받은 키: {sorted(spec)} "
                 "(모양: " + '{"field": "컬럼명", "operator": "equals", "value": "값"}' + ")"
             )
-        resolved = self._match(spec.get("field"), allowed)
-        if resolved is None:
-            raise ValueError(f"필터링할 수 없는 컬럼입니다 -> {table}.{spec.get('field')}")
-        column = self._identifier(resolved)
+        table, resolved = resolve_ref(str(spec.get("field")), scope, base, "필터링할 수 없는 컬럼입니다")
+        column = self._column_sql(table, resolved, qualify)
         operator = spec.get("operator")
         temporal = temporal_kind(self.column_types.get((table, resolved), ""), self.driver)
         where = f"{table}.{resolved}"
@@ -369,6 +476,12 @@ class Compiler:
         if self.quote in text or "\x00" in text:
             raise ValueError(f"식별자에 {self.quote}나 NUL을 쓸 수 없습니다 -> {name!r}")
         return f"{self.quote}{text}{self.quote}"
+
+    def _column_sql(self, table: str, column: str, qualify: bool) -> str:
+        """컬럼 식별자. 조인이 있으면 같은 이름의 컬럼이 겹치지 않도록 테이블을 붙인다."""
+        if qualify:
+            return f"{self._identifier(table)}.{self._identifier(column)}"
+        return self._identifier(column)
 
     def _alias(self, alias: str) -> str:
         """SELECT 별칭 검증 및 인용"""
