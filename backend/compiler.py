@@ -64,6 +64,11 @@ FILTER_SOURCES = ("literal", "relative", "question")
 _RELATIVE_RE = re.compile(r"^([+-]?\d+)([dmy])$")
 JOIN_TYPES = {"inner": "INNER JOIN", "left": "LEFT JOIN"}
 GRAINS = ("day", "week", "month", "quarter", "year")
+# 지표 정의에서만 쓰는 시계열 집계. 행 순서(series)가 있어야 뜻이 있어서 모델 AST 로는 받지 않는다.
+SERIES_FUNCTIONS = {
+    "DELTA_SUM": "누적값 증가분 합 — 직전 행보다 늘어난 만큼만 더한다(리셋으로 줄면 0)",
+    "CHANGE_COUNT": "상태 발생 횟수 — 기준값(정상)에서 다른 값으로 바뀐 순간만 센다",
+}
 # 지표 정의에서 온 필터 표시. 모델이 이 키를 보내도 normalize 를 거친 filters 와 섞이지 않게
 # 사람이 쓰지 않을 이름으로 둔다.
 METRIC_FILTER = "__metric_filter__"
@@ -198,7 +203,7 @@ _TOP_KEY_ALIASES = {
     "where": "filters", "filter": "filters", "conditions": "filters",
     "group": "group_by", "groupby": "group_by", "group_by_columns": "group_by",
     "order": "order_by", "orderby": "order_by", "sort": "order_by", "sort_by": "order_by",
-    "top": "limit", "max_rows": "limit", "join": "joins",
+    "top": "limit", "max_rows": "limit", "join": "joins", "metrics": "metric",
     "select": "columns", "fields": "columns",
     "aggregation": "aggregations", "aggs": "aggregations", "aggregates": "aggregations",
 }
@@ -467,16 +472,18 @@ class Compiler:
         ast = normalize_ast(ast)
         self._reject_unknown(ast)
 
-        metric = self._metric(ast)
-        if metric is not None:
+        metrics = self._metrics(ast)
+        # 지표 하나면 그 지표의 고정 필터가 WHERE 로, 여럿이면 지표마다 CASE WHEN 안으로 간다.
+        metric = metrics[0] if len(metrics) == 1 else None
+        if metrics:
             for key in ("columns", "aggregations", "joins"):
                 if ast.get(key):
                     raise ValueError(
-                        f"지표를 쓸 때는 {key} 를 적지 않습니다 — 지표 {metric['name']!r} 의 정의가 "
+                        f"지표를 쓸 때는 {key} 를 적지 않습니다 — 지표 {', '.join(m['name'] for m in metrics)} 의 정의가 "
                         "그대로 쓰입니다. 조건은 filters, 묶음은 group_by 로만 더하십시오"
                     )
-            table = metric["table"]
-            joins_spec = metric.get("joins") or []
+            table = metrics[0]["table"]
+            joins_spec = metrics[0].get("joins") or []
         else:
             table = ast.get("target_table")
             joins_spec = []
@@ -487,7 +494,7 @@ class Compiler:
                 f"조회할 수 없는 테이블입니다 -> {table!r} "
                 f"(사용 가능: {', '.join(self.allowed_tables)})"
             )
-        if metric is None and ast.get("joins"):
+        if not metrics and ast.get("joins"):
             joins_spec = self._relation_joins(resolved_base, ast["joins"])
         if joins_spec:
             scope, joins = build_scope(resolved_base, joins_spec, self.allowed_tables)
@@ -496,7 +503,8 @@ class Compiler:
         base = resolved_base
         # 단일 테이블 SQL 은 예전 모양 그대로 두고, 조인이 있을 때만 컬럼에 테이블을 붙인다.
         qualify = bool(joins)
-        ctx = {"scope": scope, "base": base, "qualify": qualify}
+        # lags: 시계열 집계가 쓰는 LAG 컬럼 {(컬럼, 구분, 순서): 별칭}
+        ctx = {"scope": scope, "base": base, "qualify": qualify, "lags": {}}
 
         model_filters = list(ast.get("filters") or [])
         if metric is not None:
@@ -506,7 +514,10 @@ class Compiler:
             filters = model_filters
 
         # 무엇을 SELECT 하는가
-        row_columns, aggregates = self._selection(ast, metric, model_filters, ctx)
+        if len(metrics) > 1:
+            row_columns, aggregates = None, [self._conditional_metric(m, model_filters, ctx) for m in metrics]
+        else:
+            row_columns, aggregates = self._selection(ast, metric, model_filters, ctx)
         row_mode = row_columns is not None
 
         group_cols, group_items = [], []
@@ -545,7 +556,25 @@ class Compiler:
         for agg in aggregates:
             select.append(f"{agg['sql']} AS {self._alias(agg['alias'])}")
 
-        source = f"FROM {self._identifier(base)}"
+        where = [self._condition(f, ctx) for f in filters]
+        if ctx["lags"]:
+            # 시계열 집계: 기본 테이블을 LAG 를 붙인 서브쿼리로 감싼다. 별칭을 테이블 이름 그대로 둬서
+            # 바깥의 컬럼 참조는 바뀌지 않는다. 기본 테이블만 보는 조건(기간 등)은 안으로 넣어 읽는 범위를
+            # 줄인다 — 누적값의 증가분은 행을 걸러도 합이 맞는다(중간 값이 빠져도 끝값−시작값은 같다).
+            inner = [w for f, w in zip(filters, where) if self._only_base(f, ctx)]
+            where = [w for f, w in zip(filters, where) if not self._only_base(f, ctx)]
+            # 같은 시각에 찍힌 행이 있어도 결과가 매번 같도록 값 자체로 한 번 더 정렬한다.
+            lag_cols = ", ".join(
+                f"LAG({self._identifier(col)}) OVER (PARTITION BY {self._identifier(part)} "
+                f"ORDER BY {self._identifier(order)}, {self._identifier(col)}) AS {self._identifier(alias)}"
+                for (col, part, order), alias in ctx["lags"].items()
+            )
+            sub = f"SELECT {self._identifier(base)}.*, {lag_cols} FROM {self._identifier(base)}"
+            if inner:
+                sub += " WHERE " + " AND ".join(inner)
+            source = f"FROM ({sub}) {self._identifier(base)}"
+        else:
+            source = f"FROM {self._identifier(base)}"
         for kind, joined, pairs in joins:
             on = " AND ".join(
                 f"{self._column_sql(lt, lc, True)} = {self._column_sql(rt, rc, True)}"
@@ -555,7 +584,6 @@ class Compiler:
 
         head = "SELECT DISTINCT" if ast.get("distinct") else "SELECT"
         clauses = [f"{head} {', '.join(select) or '*'}", source]
-        where = [self._condition(f, ctx) for f in filters]
         if where:
             clauses.append("WHERE " + " AND ".join(where))
         if group_items:
@@ -586,17 +614,52 @@ class Compiler:
             parts.append(f"모르는 항목입니다 -> {', '.join(other)}")
         raise ValueError("; ".join(parts) + ". 쓸 수 있는 키: " + ", ".join(sorted(self.KEYS)))
 
-    def _metric(self, ast: dict) -> dict | None:
-        name = ast.get("metric")
-        if not name:
-            return None
-        metric = self.metrics.get(name) or self.metrics.get(_find(name, self.metrics) or "")
-        if metric is None:
-            raise ValueError(
-                f"등록되지 않은 지표입니다 -> {name!r} "
-                f"(사용 가능: {', '.join(self.metrics) or '없음'})"
-            )
-        return metric
+    def _metrics(self, ast: dict) -> list[dict]:
+        """metric 은 지표 이름 하나나 이름 목록이다. 여럿이면 한 SELECT 에 나란히 조회한다."""
+        names = ast.get("metric")
+        if not names:
+            return []
+        if isinstance(names, str):
+            names = [names]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ValueError(f"metric 은 지표 이름이나 이름 목록입니다 -> {names!r}")
+        out = []
+        for name in names:
+            metric = self.metrics.get(name) or self.metrics.get(_find(name, self.metrics) or "")
+            if metric is None:
+                raise ValueError(
+                    f"등록되지 않은 지표입니다 -> {name!r} "
+                    f"(사용 가능: {', '.join(self.metrics) or '없음'})"
+                )
+            if metric not in out:
+                out.append(metric)
+        if len(out) > 1:
+            first = out[0]
+            for m in out:
+                if m.get("kind") == "projection":
+                    raise ValueError(f"조회형 지표 {m['name']!r} 는 다른 지표와 함께 쓸 수 없습니다 — 따로 물으십시오")
+                if m["table"].lower() != first["table"].lower() or (m.get("joins") or []) != (first.get("joins") or []):
+                    raise ValueError(
+                        f"지표 {first['name']!r} 와 {m['name']!r} 는 테이블(조인)이 달라 한 번에 조회할 수 없습니다 "
+                        "— 지표마다 따로 물으십시오"
+                    )
+        return out
+
+    def _conditional_metric(self, metric: dict, model_filters: list, ctx: dict) -> dict:
+        """여러 지표를 함께 조회할 때: 지표마다 자기 고정 필터를 CASE WHEN 으로 품어 서로 섞이지 않게 한다."""
+        specs = self._metric_filters(metric, model_filters, ctx["scope"], ctx["base"])
+        own = " AND ".join(self._condition(s, ctx) for s in specs) or None
+        if metric.get("kind") == "derived":
+            inner = self._derived_aggregate(metric, model_filters, ctx)
+        else:
+            agg = metric["aggregation"]
+            inner = self._aggregate({"field": agg["field"], "function": agg["function"], "alias": metric["name"]},
+                                    ctx, series=metric.get("series"))
+
+        def render(extra=None):
+            return inner["render"](" AND ".join(c for c in (own, extra) if c) or None)
+
+        return {"alias": metric["name"], "sql": render(), "render": render}
 
     def _relation_joins(self, base: str, items: list) -> list:
         """모델이 테이블 이름만 적은 조인을 등록된 관계로 펼친다.
@@ -667,7 +730,8 @@ class Compiler:
                 return None, [self._derived_aggregate(metric, model_filters, ctx)]
             agg = metric["aggregation"]
             return None, [self._aggregate(
-                {"field": agg["field"], "function": agg["function"], "alias": metric["name"]}, ctx)]
+                {"field": agg["field"], "function": agg["function"], "alias": metric["name"]}, ctx,
+                series=metric.get("series"))]
 
         columns = ast.get("columns")
         aggregations = ast.get("aggregations") or []
@@ -685,7 +749,7 @@ class Compiler:
                         "sql": self._column_sql(owner, resolved, ctx["qualify"])})
         return out
 
-    def _aggregate(self, agg, ctx: dict) -> dict:
+    def _aggregate(self, agg, ctx: dict, series: dict | None = None) -> dict:
         if not isinstance(agg, dict):
             raise ValueError(f"aggregations의 항목은 객체여야 합니다 -> {agg!r}")
         # 받은 키를 그대로 실어 보낸다. "컬럼이 None이다"라고만 하면 모델은
@@ -698,12 +762,25 @@ class Compiler:
             )
         field = agg.get("field")
         function = str(agg.get("function", "")).upper()
-        if function not in self._FUNCTIONS:
+        if function in SERIES_FUNCTIONS and series is None:
+            raise ValueError(
+                f"{function} 는 지표 정의에서만 쓸 수 있습니다 (차량·시간 순서 같은 행 순서가 필요합니다). "
+                "누적값의 증가분이나 발생 횟수는 그렇게 정의된 지표를 metric 으로 쓰십시오"
+            )
+        if function not in self._FUNCTIONS and function not in SERIES_FUNCTIONS:
             raise ValueError(
                 f"허용되지 않은 집계 함수입니다 -> {function!r} "
                 f"(사용 가능: {', '.join(self._FUNCTIONS)}). "
                 "함수와 컬럼은 따로 적습니다 -> " + '{"field": "컬럼명 또는 *", "function": "COUNT"}'
             )
+        if function in SERIES_FUNCTIONS:
+            target = self._series_target(function, field, series, ctx)
+            alias = agg.get("alias") or f"{function.lower()}_{field}"
+
+            def render_series(extra=None, target=target):
+                return self._agg_sql("SUM", target, extra)
+
+            return {"alias": str(alias), "sql": render_series(), "render": render_series}
         if field == "*":
             if function not in ("COUNT",):
                 raise ValueError(f"* 는 COUNT 에만 쓸 수 있습니다 -> {function}(*)")
@@ -732,12 +809,16 @@ class Compiler:
             cond = " AND ".join(self._condition(s, ctx) for s in specs) or None
             agg = comp["aggregation"]
             field = agg["field"]
-            if field == "*":
+            function = str(agg["function"]).upper()
+            if function in SERIES_FUNCTIONS:
+                target = self._series_target(function, field, comp.get("series"), ctx)
+                function = "SUM"
+            elif field == "*":
                 target = "*"
             else:
                 owner, resolved = self._ref(str(field), ctx["scope"], ctx["base"], "존재하지 않는 컬럼입니다")
                 target = self._column_sql(owner, resolved, ctx["qualify"])
-            parts[name] = (str(agg["function"]).upper(), target, cond)
+            parts[name] = (function, target, cond)
             return name
 
         # 먼저 한 번 돌려 구성 지표를 검증·수집한다
@@ -751,6 +832,53 @@ class Compiler:
             return compile_formula(metric["expression"], ref)[0]
 
         return {"alias": metric["name"], "sql": render(), "render": render}
+
+    def _series_target(self, function: str, field, series, ctx: dict) -> str:
+        """시계열 집계의 행 단위 식. 직전 행 값은 서브쿼리의 LAG 컬럼에서 온다."""
+        if not isinstance(series, dict) or not series.get("partition_by") or not series.get("order_by"):
+            raise ValueError(f"{function} 지표에는 구분 컬럼(partition_by)과 순서 컬럼(order_by)이 필요합니다")
+        base, scope = ctx["base"], ctx["scope"]
+        base_only = {base: scope[base]}
+        owner, column = self._ref(str(field), scope, base, "존재하지 않는 컬럼입니다")
+        if owner != base:
+            raise ValueError(f"{function} 는 기본 테이블 {base} 의 컬럼만 쓸 수 있습니다 -> {owner}.{column}")
+        _, part = resolve_ref(str(series["partition_by"]), base_only, base, "구분 컬럼을 찾을 수 없습니다")
+        _, order = resolve_ref(str(series["order_by"]), base_only, base, "순서 컬럼을 찾을 수 없습니다")
+        lags = ctx["lags"]
+        key = (column, part, order)
+        if key not in lags:
+            lags[key] = f"lag_{len(lags) + 1}_{column}"
+        value = self._column_sql(base, column, ctx["qualify"])
+        previous = self._column_sql(base, lags[key], ctx["qualify"])
+        if function == "DELTA_SUM":
+            max_step = series.get("max_step")
+            if max_step is None:
+                return f"GREATEST({value} - {previous}, 0)"
+            # 리셋 뒤 원래 값으로 돌아오는 순간처럼 한 행에서 크게 튄 증가는 사용량이 아니다.
+            limit = self._number(max_step, "max_step")
+            return f"CASE WHEN {value} - {previous} BETWEEN 0 AND {limit} THEN {value} - {previous} ELSE 0 END"
+        baseline = series.get("baseline")
+        if baseline is None or str(baseline).strip() == "":
+            raise ValueError("CHANGE_COUNT 지표에는 기준값(baseline, 예: 정상 = 0)이 필요합니다")
+        data_type = self.column_types.get((base, column), "")
+        where = f"{base}.{column}"
+        normal = self._number(baseline, where) if is_numeric_type(data_type) else self._value(
+            base, column, data_type, baseline, where, codes=False)
+        return f"CASE WHEN {value} <> {normal} AND COALESCE({previous}, {normal}) = {normal} THEN 1 ELSE 0 END"
+
+    def _only_base(self, spec, ctx: dict) -> bool:
+        """이 조건이 기본 테이블 컬럼만 보는가 (시계열 서브쿼리 안으로 넣어도 되는가)."""
+        fields = _filter_fields([spec]) if isinstance(spec, dict) else []
+        if not fields:
+            return False
+        for field in fields:
+            try:
+                owner, _ = resolve_ref(str(field), ctx["scope"], ctx["base"])
+            except ValueError:
+                return False
+            if owner != ctx["base"]:
+                return False
+        return True
 
     def _agg_sql(self, function: str, target: str, cond: str | None) -> str:
         if cond is None:
@@ -897,7 +1025,7 @@ class Compiler:
                 raise ValueError(f"direction 은 asc 나 desc 입니다 -> {direction!r}")
             field = str(item["field"])
             if field.lower() in aliases:
-                out.append(f"{self._alias(aliases[field.lower()])} {direction.upper()}")
+                out.append(self._order_term(self._alias(aliases[field.lower()]), direction))
                 continue
             try:
                 owner, resolved = self._ref(field, ctx["scope"], ctx["base"], "정렬할 수 없는 컬럼입니다")
@@ -917,8 +1045,17 @@ class Compiler:
                 (c["table"], c["column"]) == (owner, resolved) for c in row_columns
             ):
                 raise ValueError(f"distinct 목록은 조회한 컬럼으로만 정렬할 수 있습니다 -> {field}")
-            out.append(f"{column} {direction.upper()}")
+            out.append(self._order_term(column, direction))
         return out
+
+    def _order_term(self, expr: str, direction: str) -> str:
+        """NULL 은 언제나 뒤로. 0으로 나눠 NULL 이 된 비율이 "상위 5개" 의 맨 앞에 오지 않게 한다.
+
+        PostgreSQL·Oracle 은 DESC 에서, MySQL 은 ASC 에서 NULL 이 앞에 온다.
+        """
+        if self.driver == "mysql":
+            return f"{expr} IS NULL, {expr} ASC" if direction == "asc" else f"{expr} DESC"
+        return f"{expr} DESC NULLS LAST" if direction == "desc" else f"{expr} ASC"
 
     def _limit(self, value):
         if value is None:

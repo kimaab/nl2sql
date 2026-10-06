@@ -53,8 +53,8 @@ def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
             cur.execute("""
                 INSERT INTO datasource_metric
                 (id, datasource_id, name, description, kind, table_name,
-                 joins, agg_field, agg_function, select_columns, expression, fixed_filters, examples)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 joins, agg_field, agg_function, select_columns, expression, fixed_filters, examples, series)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (str(metric_id), str(datasource_id), *_values(input_data, table_name)))
             _record_history(cur, datasource_id, metric_id, 1, "create")
 
@@ -77,7 +77,7 @@ def update_metric(datasource_id: UUID, metric_id: UUID, input_data: MetricInput)
                 UPDATE datasource_metric SET
                     name = %s, description = %s, kind = %s, table_name = %s, joins = %s,
                     agg_field = %s, agg_function = %s, select_columns = %s, expression = %s,
-                    fixed_filters = %s, examples = %s, version = %s, updated_at = now()
+                    fixed_filters = %s, examples = %s, series = %s, version = %s, updated_at = now()
                 WHERE id = %s AND datasource_id = %s
             """, (*_values(input_data, table_name), version, str(metric_id), str(datasource_id)))
             _record_history(cur, datasource_id, metric_id, version, "update")
@@ -128,7 +128,7 @@ def _record_history(cur, datasource_id: UUID, metric_id: UUID, version: int, act
                                   'table_name', table_name, 'joins', joins, 'agg_field', agg_field,
                                   'agg_function', agg_function, 'select_columns', select_columns,
                                   'expression', expression, 'fixed_filters', fixed_filters,
-                                  'examples', examples)
+                                  'examples', examples, 'series', series)
           FROM datasource_metric WHERE id = %s AND datasource_id = %s
     """, (version, action, str(metric_id), str(datasource_id)))
 
@@ -146,6 +146,7 @@ def _values(input_data: MetricInput, table_name: str) -> tuple:
         input_data.expression,
         json.dumps(input_data.fixed_filters),
         json.dumps([e.model_dump() for e in input_data.examples], ensure_ascii=False),
+        json.dumps(input_data.series.model_dump()) if input_data.series else None,
     )
 
 
@@ -199,7 +200,9 @@ def _validate(datasource_id: UUID, data: MetricInput) -> str:
             raise ApiException(400, str(error)) from None
 
     if data.kind is MetricKind.AGGREGATE:
-        if data.agg_field != "*":
+        if data.series is not None:
+            _validate_series(data, scope, base, types, driver)
+        elif data.agg_field != "*":
             require(data.agg_field, "집계")
         elif data.agg_function != "COUNT":
             raise ApiException(400, "* 는 COUNT 에만 쓸 수 있습니다")
@@ -256,6 +259,30 @@ def _validate(datasource_id: UUID, data: MetricInput) -> str:
     return base
 
 
+def _validate_series(data: MetricInput, scope: dict, base: str, types: dict, driver: str) -> None:
+    """시계열 집계: 값·구분·순서 컬럼은 모두 기본 테이블에 있어야 한다 (LAG 서브쿼리가 기본 테이블만 감싼다)."""
+    only_base = {base: scope[base]}
+    labels = (("집계", data.agg_field), ("구분", data.series.partition_by), ("순서", data.series.order_by))
+    resolved = {}
+    for what, ref in labels:
+        if ref == "*":
+            raise ApiException(400, f"{data.agg_function} 는 * 대신 컬럼이 필요합니다")
+        try:
+            resolved[what] = resolve_ref(str(ref or ""), only_base, base, f"{what} 컬럼을 기본 테이블 {base} 에서 찾을 수 없습니다")
+        except ValueError as error:
+            raise ApiException(400, str(error)) from None
+    value_type = types.get(resolved["집계"], "")
+    if data.agg_function == "DELTA_SUM" and not is_numeric_type(value_type):
+        raise ApiException(400, f"DELTA_SUM 은 숫자 컬럼에만 씁니다 -> {base}.{resolved['집계'][1]} ({value_type})")
+    if data.agg_function == "CHANGE_COUNT" and is_numeric_type(value_type):
+        try:
+            float(data.series.baseline)
+        except ValueError:
+            raise ApiException(400, f"정상값은 숫자여야 합니다 -> {data.series.baseline!r}") from None
+    if not temporal_kind(types.get(resolved["순서"], ""), driver) and not is_numeric_type(types.get(resolved["순서"], "")):
+        raise ApiException(400, f"순서 컬럼은 날짜·시각이나 숫자 컬럼이어야 합니다 -> {base}.{resolved['순서'][1]}")
+
+
 def _validate_formula(datasource_id: UUID, data: MetricInput, scope: dict) -> None:
     rows = {
         r["name"].lower(): r
@@ -294,6 +321,7 @@ def _validate_examples(datasource_id: UUID, data: MetricInput, base: str) -> Non
         "joins": [j.model_dump() for j in data.joins], "select_columns": data.select_columns,
         "expression": data.expression, "agg_field": data.agg_field, "agg_function": data.agg_function,
         "fixed_filters": data.fixed_filters,
+        "series": data.series.model_dump() if data.series else None,
     })
     contract["metrics"] = [m for m in contract["metrics"] if m["name"].lower() != data.name.lower()] + [draft]
     compiler = Compiler(contract)
@@ -317,6 +345,7 @@ def _row_to_metric(row: dict) -> Metric:
         agg_function=row["agg_function"],
         select_columns=row["select_columns"] or [],
         expression=row.get("expression"),
+        series=row.get("series"),
         fixed_filters=row["fixed_filters"] or [],
         examples=row.get("examples") or [],
         version=row.get("version") or 1,

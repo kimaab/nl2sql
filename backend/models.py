@@ -77,6 +77,8 @@ class MetricKind(str, Enum):
 
 
 AGG_FUNCTIONS = ("SUM", "COUNT", "AVG", "MIN", "MAX", "COUNT_DISTINCT")
+# 지표 정의에서만 쓰는 시계열 집계 (compiler.SERIES_FUNCTIONS). 행 순서(series)가 필요하다.
+SERIES_AGG_FUNCTIONS = ("DELTA_SUM", "CHANGE_COUNT")
 
 
 class JoinOn(BaseModel):
@@ -90,6 +92,38 @@ class JoinSpec(BaseModel):
     table: str
     type: Literal["inner", "left"] = "inner"
     on: list[JoinOn]
+
+
+class SeriesSpec(BaseModel):
+    """시계열 집계의 행 순서. 누적 카운터는 이 순서로 직전 행과 비교한다."""
+    partition_by: str  # 행을 나누는 컬럼 (예: 차량 ID)
+    order_by: str      # 시간 순서 컬럼 (예: 수집 일시)
+    baseline: str | None = None  # CHANGE_COUNT 의 정상값 (예: 0)
+    # DELTA_SUM 의 한 행 최대 증가폭. 넘으면 리셋 복귀·장비 교체로 튄 값으로 보고 0으로 친다.
+    max_step: float | None = None
+
+    @field_validator("partition_by", "order_by")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise ValueError("구분 컬럼과 순서 컬럼이 필요합니다")
+        return cleaned
+
+    @field_validator("max_step")
+    @classmethod
+    def _positive(cls, value):
+        if value is not None and value <= 0:
+            raise ValueError("최대 증가폭은 0보다 커야 합니다")
+        return value
+
+    @field_validator("baseline", mode="before")
+    @classmethod
+    def _baseline_text(cls, value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
 
 class MetricExample(BaseModel):
@@ -121,6 +155,7 @@ class MetricInput(BaseModel):
     agg_function: str | None = None
     select_columns: list[str] = []
     expression: str | None = None
+    series: SeriesSpec | None = None
     fixed_filters: list[dict] = []
     examples: list[MetricExample] = []
 
@@ -139,9 +174,21 @@ class MetricInput(BaseModel):
         if self.kind is MetricKind.AGGREGATE:
             if not self.agg_field or not self.agg_function:
                 raise ValueError("집계형 지표는 agg_field와 agg_function이 필요합니다")
-            if str(self.agg_function).upper() not in AGG_FUNCTIONS:
-                raise ValueError(f"agg_function은 {', '.join(AGG_FUNCTIONS)} 중 하나여야 합니다")
-            self.agg_function = str(self.agg_function).upper()
+            function = str(self.agg_function).upper()
+            if function not in AGG_FUNCTIONS + SERIES_AGG_FUNCTIONS:
+                raise ValueError(f"agg_function은 {', '.join(AGG_FUNCTIONS + SERIES_AGG_FUNCTIONS)} 중 하나여야 합니다")
+            self.agg_function = function
+            if function in SERIES_AGG_FUNCTIONS:
+                if self.series is None:
+                    raise ValueError(f"{function} 는 구분 컬럼과 순서 컬럼(series)이 필요합니다")
+                if function == "CHANGE_COUNT" and self.series.baseline is None:
+                    raise ValueError("CHANGE_COUNT 는 정상값(series.baseline, 예: 0)이 필요합니다")
+                if function == "DELTA_SUM":
+                    self.series.baseline = None
+                else:
+                    self.series.max_step = None
+            else:
+                self.series = None
             self.select_columns = []
             self.expression = None
         elif self.kind is MetricKind.PROJECTION:
@@ -157,6 +204,7 @@ class MetricInput(BaseModel):
             self.agg_field = None
             self.agg_function = None
             self.expression = None
+            self.series = None
         else:
             if not (self.expression or "").strip():
                 raise ValueError("파생 지표는 expression(예: [매출] - [환불])이 필요합니다")
@@ -164,6 +212,7 @@ class MetricInput(BaseModel):
             self.agg_field = None
             self.agg_function = None
             self.select_columns = []
+            self.series = None
         return self
 
 
@@ -179,6 +228,7 @@ class Metric(BaseModel):
     agg_function: str | None
     select_columns: list[str]
     expression: str | None
+    series: SeriesSpec | None
     fixed_filters: list[dict]
     examples: list[MetricExample]
     version: int

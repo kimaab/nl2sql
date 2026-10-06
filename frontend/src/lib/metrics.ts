@@ -1,6 +1,23 @@
 import type { Metric, MetricInput, SchemaTable } from "../api";
 
-export const AGG_FUNCTIONS = ["SUM", "COUNT", "AVG", "MIN", "MAX", "COUNT_DISTINCT"];
+export const AGG_FUNCTIONS: { value: string; label: string }[] = [
+  { value: "SUM", label: "SUM" },
+  { value: "COUNT", label: "COUNT" },
+  { value: "AVG", label: "AVG" },
+  { value: "MIN", label: "MIN" },
+  { value: "MAX", label: "MAX" },
+  { value: "COUNT_DISTINCT", label: "COUNT_DISTINCT" },
+  { value: "DELTA_SUM", label: "누적값 증가분 합" },
+  { value: "CHANGE_COUNT", label: "상태 발생 횟수" },
+];
+
+/** 행 순서가 필요한 시계열 집계. 백엔드 compiler.SERIES_FUNCTIONS 와 같다. */
+export const SERIES_FUNCTIONS: Record<string, string> = {
+  DELTA_SUM: "누적 카운터(가동시간·주행거리 등)의 기간 사용량. 구분별로 시간순 직전 행보다 늘어난 만큼만 더하고, 리셋으로 줄면 0으로 봅니다.",
+  CHANGE_COUNT: "상태가 정상값에서 다른 값으로 바뀐 순간만 셉니다. 같은 상태가 여러 행 이어져도 1건입니다.",
+};
+
+export const isSeries = (fn: string | null | undefined) => Boolean(fn && SERIES_FUNCTIONS[fn]);
 
 export const OPERATORS: { value: string; label: string; symbol: string; noValue?: boolean }[] = [
   { value: "equals", label: "같음", symbol: "=" },
@@ -41,6 +58,7 @@ export const EMPTY_METRIC: MetricInput = {
   agg_function: "COUNT",
   select_columns: [],
   expression: null,
+  series: null,
   fixed_filters: [],
   examples: [],
 };
@@ -57,6 +75,7 @@ export function toInput(m: Metric): MetricInput {
     agg_function: m.agg_function,
     select_columns: m.select_columns,
     expression: m.expression,
+    series: m.series ?? null,
     fixed_filters: m.fixed_filters,
     examples: m.examples ?? [],
   };
@@ -106,7 +125,11 @@ export function definitionLines(m: Partial<MetricInput>): string {
         : "…"
       : m.kind === "derived"
         ? m.expression || "…"
-        : `${m.agg_function ?? "COUNT"}(${m.agg_field ?? "*"})`;
+        : isSeries(m.agg_function)
+          ? `${m.agg_function}(${m.agg_field ?? "…"}` +
+            (m.agg_function === "CHANGE_COUNT" ? `, 정상=${m.series?.baseline ?? "…"}` : "") +
+            `) <${m.series?.partition_by || "…"}별, ${m.series?.order_by || "…"} 순>`
+          : `${m.agg_function ?? "COUNT"}(${m.agg_field ?? "*"})`;
   const lines = [`SELECT ${select}`, `FROM ${m.table_name || "…"}`];
   for (const j of m.joins ?? []) {
     const on = j.on.map((p) => `${p.left} = ${p.right}`).join(" AND ") || "…";
@@ -159,6 +182,10 @@ export function brokenReason(tables: SchemaTable[] | null, m: Metric, all: Metri
     if (gone.length > 0) return `조회 컬럼이 스키마에 없습니다: ${gone.join(", ")}`;
   } else if (m.kind === "aggregate" && m.agg_field !== "*" && !has(m.agg_field ?? "")) {
     return `집계 컬럼 ${m.agg_field}이(가) 스키마에 없습니다`;
+  }
+  if (m.kind === "aggregate" && m.series) {
+    const gone = [m.series.partition_by, m.series.order_by].filter((c) => !has(c));
+    if (gone.length > 0) return `구분·순서 컬럼이 스키마에 없습니다: ${gone.join(", ")}`;
   }
 
   const missing = m.fixed_filters.map((f) => f.field).filter((f) => f && !has(f));

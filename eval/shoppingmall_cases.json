@@ -76,7 +76,7 @@
           }
         ]
       },
-      "expected_sql": "SELECT \"PAY_METHOD\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY \"PAY_METHOD\" ORDER BY \"매출\" DESC;"
+      "expected_sql": "SELECT \"PAY_METHOD\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY \"PAY_METHOD\" ORDER BY \"매출\" DESC NULLS LAST;"
     },
     {
       "question": "올해 월별 주문 수",
@@ -127,7 +127,7 @@
         ],
         "limit": 10
       },
-      "expected_sql": "SELECT \"ORDER_ID\", \"MEMBER_ID\", \"ORDER_DTM\", \"TOTAL_AMT\" FROM \"TB_ORDER\" ORDER BY \"ORDER_DTM\" DESC LIMIT 10;"
+      "expected_sql": "SELECT \"ORDER_ID\", \"MEMBER_ID\", \"ORDER_DTM\", \"TOTAL_AMT\" FROM \"TB_ORDER\" ORDER BY \"ORDER_DTM\" DESC NULLS LAST LIMIT 10;"
     },
     {
       "question": "매출 상위 5명 회원",
@@ -144,7 +144,7 @@
         ],
         "limit": 5
       },
-      "expected_sql": "SELECT \"MEMBER_ID\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY \"MEMBER_ID\" ORDER BY \"매출\" DESC LIMIT 5;"
+      "expected_sql": "SELECT \"MEMBER_ID\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY \"MEMBER_ID\" ORDER BY \"매출\" DESC NULLS LAST LIMIT 5;"
     },
     {
       "question": "m001 회원의 주문상세",
@@ -535,7 +535,7 @@
           }
         ]
       },
-      "expected_sql": "SELECT \"TB_PRODUCT\".\"CATEGORY_CD\", SUM(\"TB_ORDER_ITEM\".\"QTY\") AS \"판매수량\" FROM \"TB_ORDER_ITEM\" INNER JOIN \"TB_PRODUCT\" ON \"TB_ORDER_ITEM\".\"PRODUCT_ID\" = \"TB_PRODUCT\".\"PRODUCT_ID\" GROUP BY \"TB_PRODUCT\".\"CATEGORY_CD\" ORDER BY \"판매수량\" DESC;"
+      "expected_sql": "SELECT \"TB_PRODUCT\".\"CATEGORY_CD\", SUM(\"TB_ORDER_ITEM\".\"QTY\") AS \"판매수량\" FROM \"TB_ORDER_ITEM\" INNER JOIN \"TB_PRODUCT\" ON \"TB_ORDER_ITEM\".\"PRODUCT_ID\" = \"TB_PRODUCT\".\"PRODUCT_ID\" GROUP BY \"TB_PRODUCT\".\"CATEGORY_CD\" ORDER BY \"판매수량\" DESC NULLS LAST;"
     },
     {
       "question": "가장 많이 팔린 상품 3개",
@@ -562,7 +562,7 @@
         ],
         "limit": 3
       },
-      "expected_sql": "SELECT \"TB_PRODUCT\".\"PRODUCT_NM\", SUM(\"TB_ORDER_ITEM\".\"QTY\") AS \"판매수량\" FROM \"TB_ORDER_ITEM\" INNER JOIN \"TB_PRODUCT\" ON \"TB_ORDER_ITEM\".\"PRODUCT_ID\" = \"TB_PRODUCT\".\"PRODUCT_ID\" GROUP BY \"TB_PRODUCT\".\"PRODUCT_NM\" ORDER BY \"판매수량\" DESC LIMIT 3;"
+      "expected_sql": "SELECT \"TB_PRODUCT\".\"PRODUCT_NM\", SUM(\"TB_ORDER_ITEM\".\"QTY\") AS \"판매수량\" FROM \"TB_ORDER_ITEM\" INNER JOIN \"TB_PRODUCT\" ON \"TB_ORDER_ITEM\".\"PRODUCT_ID\" = \"TB_PRODUCT\".\"PRODUCT_ID\" GROUP BY \"TB_PRODUCT\".\"PRODUCT_NM\" ORDER BY \"판매수량\" DESC NULLS LAST LIMIT 3;"
     },
     {
       "question": "등급별 주문 금액 합계",

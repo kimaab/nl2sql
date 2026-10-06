@@ -13,6 +13,7 @@ MAX_EXAMPLES = 6
 AST_GUIDE = """[조회 명세(ast) 모양]
 ast 는 JSON 객체이고 아래 키만 씁니다. 키 이름을 바꾸지 마십시오 (column 이 아니라 field, table 이 아니라 target_table).
 - metric: 지표 이름. 지표의 집계식·조회 컬럼·조인·고정 필터는 자동으로 적용되니 다시 적지 않습니다. metric 을 쓰면 target_table, columns, aggregations, joins 는 적지 않습니다.
+  질문이 지표 여러 개를 함께 물으면 이름 목록으로 적습니다 ("metric": ["가동시간", "작업면적"]) — 같은 테이블의 집계형·파생 지표끼리만 됩니다.
 - target_table: 맞는 지표가 없을 때 조회할 테이블.
 - columns: 행 목록을 볼 때의 컬럼 ["컬럼", "테이블.컬럼"]. aggregations 와 함께 쓰지 않습니다.
 - aggregations: [{"field": "컬럼 또는 *", "function": "COUNT", "alias": "선택"}]. function 은 SUM, COUNT, AVG, MIN, MAX, COUNT_DISTINCT 중 하나이고 괄호 없이 이름만 적습니다 ("COUNT(*)"가 아니라 function 은 "COUNT", field 는 "*").

@@ -64,6 +64,8 @@ ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS expression TEXT;
 ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS examples JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+-- 시계열 집계(DELTA_SUM, CHANGE_COUNT)의 행 순서: {"partition_by", "order_by", "baseline"}
+ALTER TABLE datasource_metric ADD COLUMN IF NOT EXISTS series JSONB;
 
 -- 지표를 바꾸거나 지울 때마다 그 시점의 정의를 남긴다. 지표가 지워져도 이력은 남는다.
 CREATE TABLE IF NOT EXISTS datasource_metric_history (

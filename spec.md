@@ -1595,6 +1595,14 @@ export function AskPage() {
 - **수정·이력**: `PUT` 으로 고치면 `version` 이 오르고 `datasource_metric_history` 에 남습니다. 삭제도
   남습니다. 파생 지표가 쓰는 지표는 지우거나 이름을 바꿀 수 없습니다.
 - 조인 지표의 저장 검증은 컴파일러의 `build_scope`·`resolve_ref` 와 같은 규칙입니다.
+- **시계열 집계** (`agg_function` = `DELTA_SUM` | `CHANGE_COUNT`, `series` = `{partition_by, order_by, baseline}`):
+  누적 카운터(가동시간·면적 등)는 합이나 평균이 뜻이 없고 기간의 증가분이 필요합니다. 컴파일러가 기본 테이블을
+  `SELECT t.*, LAG(col) OVER (PARTITION BY 구분 ORDER BY 순서, col) AS lag_n_col FROM t WHERE 기본 테이블 조건`
+  서브쿼리로 감싸고(별칭은 테이블 이름 그대로), `DELTA_SUM` 은 `SUM(GREATEST(col - lag, 0))`(리셋으로 줄면 0),
+  `CHANGE_COUNT` 는 정상값에서 다른 값으로 바뀐 순간만 셉니다. 기본 테이블만 보는 조건은 서브쿼리 안으로 넣어
+  읽는 범위를 줄입니다 — 증가분의 합은 중간 행이 빠져도 같습니다. **윈도 함수는 관리자가 등록한 지표 정의에서만
+  나오고, 모델 AST 로는 받지 않습니다**(1-1·1-7절). 값·구분·순서 컬럼은 모두 기본 테이블에 있어야 합니다.
+  파생 지표의 구성 지표로도 쓸 수 있습니다(`[오류발생] * 100 / [가동시간증가]`).
 
 ### 17-3. 관계와 용어·코드 사전
 

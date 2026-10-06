@@ -123,7 +123,7 @@ def test_normalize_does_not_override_canonical_key():
 def test_columns_order_by_limit_postgres(compiler):
     out = sql(compiler, {"target_table": "TB_ORDER", "columns": ["ORDER_ID", "ORDER_DTM"],
                          "order_by": [{"field": "ORDER_DTM", "direction": "desc"}], "limit": 10})
-    assert out == 'SELECT "ORDER_ID", "ORDER_DTM" FROM "TB_ORDER" ORDER BY "ORDER_DTM" DESC LIMIT 10;'
+    assert out == 'SELECT "ORDER_ID", "ORDER_DTM" FROM "TB_ORDER" ORDER BY "ORDER_DTM" DESC NULLS LAST LIMIT 10;'
 
 
 def test_limit_on_oracle_uses_fetch_first(compiler_for):
@@ -135,12 +135,12 @@ def test_order_by_aggregate_alias_top_n(compiler):
     out = sql(compiler, {"target_table": "TB_ORDER", "group_by": ["MEMBER_ID"],
                          "aggregations": [{"field": "TOTAL_AMT", "function": "SUM", "alias": "총액"}],
                          "order_by": [{"field": "총액", "direction": "desc"}], "limit": 5})
-    assert out.endswith('GROUP BY "MEMBER_ID" ORDER BY "총액" DESC LIMIT 5;')
+    assert out.endswith('GROUP BY "MEMBER_ID" ORDER BY "총액" DESC NULLS LAST LIMIT 5;')
 
 
 def test_order_by_metric_name(compiler):
     out = sql(compiler, {"metric": "매출", "group_by": ["PAY_METHOD"], "order_by": ["매출 desc"]})
-    assert out.endswith('ORDER BY "매출" DESC;')
+    assert out.endswith('ORDER BY "매출" DESC NULLS LAST;')
 
 
 def test_order_by_non_grouped_column_in_aggregate_rejected(compiler):
@@ -172,7 +172,8 @@ def test_group_by_month_per_driver(compiler_for, driver, expr):
                                         "order_by": [{"field": "ORDER_DTM_month"}]})
     q = "`" if driver == "mysql" else '"'
     assert out.startswith(f"SELECT {expr} AS {q}ORDER_DTM_month{q}, COUNT(*) AS {q}주문수{q}")
-    assert f"GROUP BY {expr} ORDER BY {q}ORDER_DTM_month{q} ASC" in out
+    order = f"{q}ORDER_DTM_month{q} IS NULL, {q}ORDER_DTM_month{q} ASC" if driver == "mysql" else f"{q}ORDER_DTM_month{q} ASC"
+    assert f"GROUP BY {expr} ORDER BY {order}" in out
 
 
 def test_grain_on_non_date_column_rejected(compiler):
@@ -377,3 +378,83 @@ def test_unjoined_table_reference_suggests_joins(compiler):
     assert '"joins": ["TB_MEMBER"]' in msg
     msg = error(compiler, {"target_table": "TB_MEMBER", "columns": ["TB_PRODUCT.PRODUCT_NM"]})
     assert "등록된 관계가 없어" in msg
+
+
+# ------------------------------------------------------------------ 시계열 집계 (누적값 증가분·상태 발생 횟수)
+
+def _series_contract(contract):
+    contract["tables"].append({"name": "LOG", "columns": [
+        {"name": "VID", "type": "varchar(20)"}, {"name": "TS", "type": "timestamp"},
+        {"name": "HOURS", "type": "real"}, {"name": "ERR", "type": "smallint"}]})
+    series = {"partition_by": "VID", "order_by": "TS"}
+    contract["metrics"] += [
+        {"name": "가동시간", "table": "LOG", "kind": "aggregate", "fixed_filters": [],
+         "aggregation": {"field": "HOURS", "function": "DELTA_SUM"}, "series": series},
+        {"name": "오류발생", "table": "LOG", "kind": "aggregate", "fixed_filters": [],
+         "aggregation": {"field": "ERR", "function": "CHANGE_COUNT"}, "series": {**series, "baseline": "0"}},
+        {"name": "시간당오류", "table": "LOG", "kind": "derived", "expression": "[오류발생] / [가동시간]", "fixed_filters": []},
+    ]
+    return Compiler(contract)
+
+
+def test_delta_sum_wraps_base_in_lag_subquery_and_pushes_filters_inside(contract):
+    out = _series_contract(contract).compile({"metric": "가동시간", "group_by": ["VID"], "filters": [
+        {"field": "TS", "operator": "greater_or_equal", "value": "2026-09-29"}]})
+    assert out == (
+        'SELECT "VID", SUM(GREATEST("HOURS" - "lag_1_HOURS", 0)) AS "가동시간" '
+        'FROM (SELECT "LOG".*, LAG("HOURS") OVER (PARTITION BY "VID" ORDER BY "TS", "HOURS") AS "lag_1_HOURS" '
+        "FROM \"LOG\" WHERE \"TS\" >= DATE '2026-09-29') \"LOG\" GROUP BY \"VID\";"
+    )
+
+
+def test_change_count_and_derived_share_one_subquery(contract):
+    out = _series_contract(contract).compile({"metric": "시간당오류", "group_by": ["VID"]})
+    assert 'CASE WHEN "ERR" <> 0 AND COALESCE("lag_1_ERR", 0) = 0 THEN 1 ELSE 0 END' in out
+    assert out.count("LAG(") == 2 and out.count("FROM (SELECT") == 1
+    assert "* 1.0 / NULLIF(SUM(GREATEST(\"HOURS\" - \"lag_2_HOURS\", 0)), 0)" in out
+
+
+def test_series_function_is_not_available_to_model(contract):
+    c = _series_contract(contract)
+    with pytest.raises(ValueError, match="지표 정의에서만"):
+        c.compile({"target_table": "LOG", "aggregations": [{"field": "HOURS", "function": "DELTA_SUM"}]})
+
+
+def test_series_on_oracle_uses_unaliased_derived_table(compiler_for, contract):
+    contract["driver"] = "oracle"
+    out = _series_contract(contract).compile({"metric": "가동시간"})
+    assert 'FROM (SELECT "LOG".*, LAG("HOURS")' in out and ') "LOG";' in out and " AS \"LOG\"" not in out
+
+
+
+# ------------------------------------------------------------------ 여러 지표 한 번에, NULL 정렬
+
+def test_multiple_metrics_keep_their_own_filters(compiler):
+    out = compiler.compile({"metric": ["매출", "주문수", "취소율"], "group_by": ["PAY_METHOD"],
+                            "filters": [{"field": "ORDER_DTM", "operator": "greater_or_equal", "value": "2026-09-01"}]})
+    assert out == (
+        "SELECT \"PAY_METHOD\", SUM(CASE WHEN \"ORDER_STATUS\" != '99' THEN \"TOTAL_AMT\" END) AS \"매출\", "
+        "COUNT(*) AS \"주문수\", COUNT(CASE WHEN \"ORDER_STATUS\" = '99' THEN 1 END) * 1.0 / NULLIF(COUNT(*), 0) AS \"취소율\" "
+        "FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-09-01' GROUP BY \"PAY_METHOD\";"
+    )
+
+
+def test_multiple_metrics_alias_metrics_key_and_rejections(compiler):
+    assert '"주문수"' in compiler.compile({"metrics": ["매출", "주문수"]})
+    with pytest.raises(ValueError, match="함께 쓸 수 없습니다"):
+        compiler.compile({"metric": ["매출", "최근주문"]})
+
+
+def test_nulls_sort_last_for_rankings(compiler_for):
+    ast = {"metric": "취소율", "group_by": ["PAY_METHOD"], "order_by": [{"field": "취소율", "direction": "desc"}], "limit": 3}
+    assert 'ORDER BY "취소율" DESC NULLS LAST FETCH FIRST 3 ROWS ONLY;' in compiler_for("oracle").compile(ast)
+    assert "ORDER BY `취소율` DESC LIMIT 3;" in compiler_for("mysql").compile(ast)
+    ast["order_by"][0]["direction"] = "asc"
+    assert "ORDER BY `취소율` IS NULL, `취소율` ASC LIMIT 3;" in compiler_for("mysql").compile(ast)
+
+
+def test_delta_sum_max_step_ignores_jumps(contract):
+    c = _series_contract(contract)
+    c.metrics["가동시간"]["series"] = {"partition_by": "VID", "order_by": "TS", "max_step": 2}
+    out = c.compile({"metric": "가동시간"})
+    assert 'SUM(CASE WHEN "HOURS" - "lag_1_HOURS" BETWEEN 0 AND 2 THEN "HOURS" - "lag_1_HOURS" ELSE 0 END)' in out

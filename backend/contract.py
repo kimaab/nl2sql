@@ -133,6 +133,8 @@ def metric_entry(m: dict) -> dict:
             "field": m["agg_field"],
             "function": m["agg_function"],
         }
+        if m.get("series"):
+            entry["series"] = m["series"]
     if m.get("examples"):
         entry["examples"] = m["examples"]
     return entry
@@ -216,6 +218,11 @@ def _broken_reason(m: dict, columns: dict) -> str | None:
             return f"조회 컬럼이 없습니다: {', '.join(missing_columns)}"
     elif m["kind"] == "aggregate" and m["agg_field"] != "*" and missing([m["agg_field"]]):
         return f"집계 컬럼 {m['agg_field']}이(가) 없습니다"
+    if m["kind"] == "aggregate" and m.get("series"):
+        series = m["series"]
+        gone = missing([series.get("partition_by"), series.get("order_by")])
+        if gone:
+            return f"구분·순서 컬럼이 없습니다: {', '.join(gone)}"
 
     missing_filters = missing(f.get("field") for f in (m["fixed_filters"] or []))
     if missing_filters:

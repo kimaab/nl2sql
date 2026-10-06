@@ -20,10 +20,13 @@ import {
   EMPTY_METRIC,
   formulaRefs,
   isNoValue,
+  isSeries,
+  isTemporal,
   KIND_LABEL,
   metricScope,
   newFilter,
   OPERATORS,
+  SERIES_FUNCTIONS,
   SOURCES,
   toInput,
 } from "../../lib/metrics";
@@ -130,15 +133,48 @@ export function MetricWizard() {
     );
   }, [tables, form.table_name, form.joins, qualified]);
   const typeOf = (ref: string) => columnOptions.find((c) => c.value === ref)?.type ?? "";
+  // 시계열 집계는 기본 테이블 컬럼만 쓴다 (LAG 서브쿼리가 기본 테이블만 감싼다)
+  const baseColumns = columnOptions
+    .filter((c) => c.table === form.table_name)
+    .map((c) => ({ ...c, name: c.value.includes(".") ? c.value.slice(c.value.indexOf(".") + 1) : c.value }));
 
   function setKind(kind: api.MetricKind) {
     if (kind === "aggregate") {
-      patch({ kind, agg_field: "*", agg_function: "COUNT", select_columns: [], expression: null });
+      patch({ kind, agg_field: "*", agg_function: "COUNT", select_columns: [], expression: null, series: null });
     } else if (kind === "projection") {
-      patch({ kind, agg_field: null, agg_function: null, expression: null });
+      patch({ kind, agg_field: null, agg_function: null, expression: null, series: null });
     } else {
-      patch({ kind, agg_field: null, agg_function: null, select_columns: [], expression: form.expression ?? "" });
+      patch({ kind, agg_field: null, agg_function: null, select_columns: [], expression: form.expression ?? "", series: null });
     }
+  }
+
+  function setAggFunction(fn: string) {
+    if (!isSeries(fn)) {
+      patch({
+        agg_function: fn,
+        agg_field: fn !== "COUNT" && form.agg_field === "*" ? columnOptions[0]?.value ?? null : form.agg_field,
+        series: null,
+      });
+      return;
+    }
+    // 처음 고를 때 그럴듯한 기본값: 구분은 이름이 _id 로 끝나는 컬럼, 순서는 첫 날짜 컬럼
+    const numeric = (type: string) => /int|numeric|decimal|number|real|double|float|serial/i.test(type);
+    const current = baseColumns.find((c) => c.value === form.agg_field);
+    const keepField =
+      current && (fn !== "DELTA_SUM" || numeric(current.type))
+        ? current.value
+        : (fn === "DELTA_SUM" ? baseColumns.find((c) => numeric(c.type)) : baseColumns[0])?.value ?? null;
+    const guessPartition = baseColumns.find((c) => /_?id$/i.test(c.name) && !isTemporal(c.type))?.name ?? "";
+    const guessOrder = baseColumns.find((c) => isTemporal(c.type))?.name ?? "";
+    patch({
+      agg_function: fn,
+      agg_field: keepField,
+      series: {
+        partition_by: form.series?.partition_by || guessPartition,
+        order_by: form.series?.order_by || guessOrder,
+        baseline: fn === "CHANGE_COUNT" ? form.series?.baseline ?? "0" : null,
+      },
+    });
   }
 
   function setFilter(i: number, p: Record<string, any>) {
@@ -229,7 +265,15 @@ export function MetricWizard() {
     true,
     Boolean(dsId && form.table_name) &&
       joinsValid &&
-      (form.kind === "aggregate" ||
+      ((form.kind === "aggregate" &&
+        (!isSeries(form.agg_function) ||
+          Boolean(
+            form.series?.partition_by &&
+              form.series?.order_by &&
+              form.agg_field &&
+              form.agg_field !== "*" &&
+              (form.agg_function !== "CHANGE_COUNT" || form.series?.baseline?.trim())
+          ))) ||
         (form.kind === "projection" && form.select_columns.length > 0) ||
         (form.kind === "derived" && Boolean(form.expression?.trim()) && formulaRefs(form.expression).length > 0)),
     form.fixed_filters.every(
@@ -502,20 +546,24 @@ export function MetricWizard() {
                 )}
 
                 {dsId && form.table_name && form.kind === "aggregate" && (
-                  <Field label="집계" hint="COUNT는 컬럼 대신 * 를 쓸 수 있습니다">
+                  <Field
+                    label="집계"
+                    hint={
+                      isSeries(form.agg_function)
+                        ? SERIES_FUNCTIONS[form.agg_function!]
+                        : "COUNT는 컬럼 대신 * 를 쓸 수 있습니다"
+                    }
+                  >
                     <div className="agg-sentence">
                       <select
                         className="select"
                         value={form.agg_function ?? "COUNT"}
-                        onChange={(e) =>
-                          patch({
-                            agg_function: e.target.value,
-                            agg_field: e.target.value !== "COUNT" && form.agg_field === "*" ? columnOptions[0]?.value ?? null : form.agg_field,
-                          })
-                        }
+                        onChange={(e) => setAggFunction(e.target.value)}
                       >
                         {AGG_FUNCTIONS.map((f) => (
-                          <option key={f}>{f}</option>
+                          <option key={f.value} value={f.value}>
+                            {f.label}
+                          </option>
                         ))}
                       </select>
                       <span>(</span>
@@ -525,7 +573,7 @@ export function MetricWizard() {
                         onChange={(e) => patch({ agg_field: e.target.value })}
                       >
                         {form.agg_function === "COUNT" && <option value="*">*</option>}
-                        {columnOptions.map((c) => (
+                        {(isSeries(form.agg_function) ? baseColumns : columnOptions).map((c) => (
                           <option key={c.value} value={c.value}>
                             {c.value} ({c.type})
                           </option>
@@ -534,6 +582,49 @@ export function MetricWizard() {
                       <span>)</span>
                     </div>
                   </Field>
+                )}
+
+                {dsId && form.table_name && form.kind === "aggregate" && isSeries(form.agg_function) && form.series && (
+                  <div className="form-grid">
+                    <Field label="구분 컬럼" required hint="이 컬럼 값마다 따로 시간순으로 비교합니다 (예: 차량 ID)">
+                      <select
+                        className="select"
+                        value={form.series.partition_by}
+                        onChange={(e) => patch({ series: { ...form.series!, partition_by: e.target.value } })}
+                      >
+                        <option value="">선택</option>
+                        {baseColumns.map((c) => (
+                          <option key={c.value} value={c.name}>
+                            {c.name} ({c.type})
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="순서 컬럼" required hint="직전 행을 정하는 시간 순서 (예: 수집 일시)">
+                      <select
+                        className="select"
+                        value={form.series.order_by}
+                        onChange={(e) => patch({ series: { ...form.series!, order_by: e.target.value } })}
+                      >
+                        <option value="">선택</option>
+                        {baseColumns.map((c) => (
+                          <option key={c.value} value={c.name}>
+                            {c.name} ({c.type})
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    {form.agg_function === "CHANGE_COUNT" && (
+                      <Field label="정상값" required hint="이 값에서 다른 값으로 바뀐 순간을 1건으로 셉니다 (예: 오류 코드 0)">
+                        <input
+                          className="input"
+                          value={form.series.baseline ?? ""}
+                          onChange={(e) => patch({ series: { ...form.series!, baseline: e.target.value } })}
+                          placeholder="0"
+                        />
+                      </Field>
+                    )}
+                  </div>
                 )}
 
                 {dsId && form.table_name && form.kind === "projection" && (

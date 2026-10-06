@@ -190,3 +190,33 @@ def test_history_feedback_and_export(client, ds):
     cleared = client.patch(f"/api/history/{ok}", json={"feedback": ""}).json()
     assert cleared["feedback"] is None and cleared["favorite"]
     assert client.delete(f"/api/history/{fail}").status_code == 204
+
+
+def test_series_metrics_registered_and_compiled(client, ds):
+    with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
+        conn.execute(f'CREATE TABLE {TARGET_SCHEMA}."VLOG" ("VID" varchar(10), "TS" timestamp, "HOURS" real, "ERR" smallint)')
+        conn.execute(f"""INSERT INTO {TARGET_SCHEMA}."VLOG" VALUES
+            ('a', '2026-10-01 00:00', 10, 0), ('a', '2026-10-01 00:01', 11, 2), ('a', '2026-10-01 00:02', 11, 2),
+            ('a', '2026-10-01 00:03', 3, 0), ('a', '2026-10-01 00:04', 4, 5), ('b', '2026-10-01 00:00', 7, 0)""")
+    assert client.post(f"/api/datasources/{ds}/sync").status_code == 200
+    base = f"/api/datasources/{ds}/metrics"
+    series = {"partition_by": "VID", "order_by": "TS"}
+    hours = client.post(base, json={"name": "가동", "table_name": "VLOG", "agg_field": "HOURS",
+                                    "agg_function": "DELTA_SUM", "series": series})
+    assert hours.status_code == 200, hours.text
+    assert hours.json()["series"] == {**series, "baseline": None}
+    assert client.post(base, json={"name": "오류", "table_name": "VLOG", "agg_field": "ERR",
+                                   "agg_function": "CHANGE_COUNT", "series": series}).status_code == 422  # 정상값 없음
+    assert client.post(base, json={"name": "오류", "table_name": "VLOG", "agg_field": "ERR",
+                                   "agg_function": "CHANGE_COUNT", "series": {**series, "baseline": 0}}).status_code == 200
+    assert client.post(base, json={"name": "x", "table_name": "VLOG", "agg_field": "HOURS", "agg_function": "DELTA_SUM",
+                                   "series": {"partition_by": "NOPE", "order_by": "TS"}}).status_code == 400
+    assert client.post(base, json={"name": "시간당오류", "kind": "derived", "table_name": "VLOG",
+                                   "expression": "[오류] / [가동]"}).status_code == 200
+
+    sql = client.post(f"/api/datasources/{ds}/compile", json={"ast": {"metric": "시간당오류", "group_by": ["VID"]}}).json()["sql"]
+    with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
+        conn.execute(f"SET search_path TO {TARGET_SCHEMA}")
+        rows = dict(conn.execute(sql).fetchall())
+    # a: 증가분 1 + 0 + (리셋 3→ 버림) + 1 = 2시간, 오류 발생 2회(0→2, 0→5) → 1.0 / b: 증가분 0 → NULL
+    assert float(rows["a"]) == 1.0 and rows["b"] is None

@@ -37,6 +37,13 @@ export interface MetricJoin {
   on: { left: string; right: string }[];
 }
 
+/** 시계열 집계(DELTA_SUM, CHANGE_COUNT)의 행 순서 */
+export interface SeriesSpec {
+  partition_by: string;
+  order_by: string;
+  baseline: string | null;
+}
+
 export interface MetricExample {
   question: string;
   ast: Record<string, any> | null;
@@ -52,6 +59,7 @@ export interface MetricInput {
   agg_function: string | null;
   select_columns: string[];
   expression: string | null;
+  series: SeriesSpec | null;
   fixed_filters: Record<string, any>[];
   examples: MetricExample[];
 }
