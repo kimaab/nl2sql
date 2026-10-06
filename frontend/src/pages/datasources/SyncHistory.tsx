@@ -1,39 +1,59 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import * as api from "../../api";
 import { Alert, Badge, EmptyState, Loading, PageHeader } from "../../components/ui";
 import { formatAgo, formatDateTime } from "../../lib/format";
 
 export function SyncHistory() {
-  const [items, setItems] = useState<api.Datasource[] | null>(null);
+  const [params, setParams] = useSearchParams();
+  const dsId = params.get("ds") ?? "";
+  const [datasources, setDatasources] = useState<api.Datasource[] | null>(null);
+  const [logs, setLogs] = useState<api.SyncLog[] | null>(null);
 
   useEffect(() => {
     api
       .listDatasources()
-      .then((list) =>
-        // 오래 동기화하지 않은 것, 한 번도 안 한 것이 위로 오게 한다
-        setItems([...list].sort((a, b) => (a.synced_at ?? "").localeCompare(b.synced_at ?? "")))
-      )
-      .catch(() => setItems([]));
+      // 오래 동기화하지 않은 것, 한 번도 안 한 것이 위로 오게 한다
+      .then((list) => setDatasources([...list].sort((a, b) => (a.synced_at ?? "").localeCompare(b.synced_at ?? ""))))
+      .catch(() => setDatasources([]));
   }, []);
 
+  useEffect(() => {
+    setLogs(null);
+    api.listSyncLogs(dsId || undefined, 100).then(setLogs).catch(() => setLogs([]));
+  }, [dsId]);
+
+  // 데이터소스마다 가장 최근 기록 — 깨진 지표 알림은 마지막 동기화 기준이다
+  const latest = new Map<string, api.SyncLog>();
+  for (const log of logs ?? []) if (!latest.has(log.datasource_id)) latest.set(log.datasource_id, log);
+  const alerts = [...latest.values()].filter((l) => l.status === "error" || l.broken_metrics.length > 0);
+
   return (
-    <div className="page">
+    <div className="page wide">
       <PageHeader
         title="동기화 현황"
-        desc="데이터소스별 마지막 동기화 상태입니다. 동기화하지 않았거나 오래된 항목이 위에 표시됩니다."
+        desc="데이터소스별 마지막 상태와 실행 기록입니다. 자동 동기화(AUTO_SYNC_MINUTES)를 켜면 주기 실행도 여기에 'auto'로 남습니다."
       />
 
       <div className="stack">
-        <Alert tone="info">
-          현재는 마지막 동기화 결과만 기록됩니다. 실행할 때마다의 이력을 보려면 백엔드에 동기화 이력 저장이
-          필요합니다.
-        </Alert>
+        {alerts.map((l) =>
+          l.status === "error" ? (
+            <Alert key={l.id} tone="danger">
+              <strong>{l.datasource_name}</strong> 마지막 동기화 실패 ({formatDateTime(l.started_at)}): {l.error}
+            </Alert>
+          ) : (
+            <Alert key={l.id} tone="warn">
+              <strong>{l.datasource_name}</strong> 동기화 뒤 깨진 지표 {l.broken_metrics.length}개 —{" "}
+              {l.broken_metrics.map((b) => `${b.name} (${b.reason})`).join(", ")}.{" "}
+              <Link to={`/metrics?ds=${l.datasource_id}`}>지표 확인 →</Link>
+            </Alert>
+          )
+        )}
 
         <div className="card">
-          {items === null ? (
+          {datasources === null ? (
             <Loading />
-          ) : items.length === 0 ? (
+          ) : datasources.length === 0 ? (
             <EmptyState title="데이터소스가 없습니다" />
           ) : (
             <div className="table-wrap">
@@ -48,32 +68,85 @@ export function SyncHistory() {
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map((ds) => (
-                    <tr key={ds.id}>
+                  {datasources.map((ds) => (
+                    <tr key={ds.id} className="clickable" onClick={() => setParams(dsId === ds.id ? {} : { ds: ds.id })}>
                       <td>
-                        <div className="cell-title">{ds.name}</div>
+                        <div className="cell-title">
+                          {dsId === ds.id ? "▸ " : ""}
+                          {ds.name}
+                        </div>
                         <div className="cell-sub">{ds.driver}</div>
                       </td>
                       <td>
-                        {ds.synced_at ? (
-                          <Badge tone="ok">동기화됨</Badge>
-                        ) : (
-                          <Badge tone="danger">스키마 없음</Badge>
-                        )}
+                        {ds.synced_at ? <Badge tone="ok">동기화됨</Badge> : <Badge tone="danger">스키마 없음</Badge>}
                       </td>
                       <td>
                         {ds.synced_at ? (
                           <>
-                            {formatDateTime(ds.synced_at)}{" "}
-                            <span className="faint">({formatAgo(ds.synced_at)})</span>
+                            {formatDateTime(ds.synced_at)} <span className="faint">({formatAgo(ds.synced_at)})</span>
                           </>
                         ) : (
                           <span className="faint">-</span>
                         )}
                       </td>
                       <td className="num">{ds.synced_at ? ds.table_count : "-"}</td>
-                      <td style={{ textAlign: "right" }}>
+                      <td style={{ textAlign: "right" }} onClick={(e) => e.stopPropagation()}>
                         <Link to={`/sync?ds=${ds.id}`}>동기화 →</Link>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="card-head">
+            <span className="card-title">실행 기록</span>
+            <span className="faint">{dsId ? datasources?.find((d) => d.id === dsId)?.name : "전체"}</span>
+          </div>
+          {logs === null ? (
+            <Loading />
+          ) : logs.length === 0 ? (
+            <EmptyState title="동기화 기록이 없습니다" />
+          ) : (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>시각</th>
+                    <th>데이터소스</th>
+                    <th>방식</th>
+                    <th>결과</th>
+                    <th className="num">테이블</th>
+                    <th className="num">컬럼</th>
+                    <th className="num">관계</th>
+                    <th>깨진 지표 / 오류</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {logs.map((l) => (
+                    <tr key={l.id}>
+                      <td className="faint">{formatDateTime(l.started_at)}</td>
+                      <td>{l.datasource_name}</td>
+                      <td>
+                        <Badge tone={l.trigger === "auto" ? "info" : "primary"}>{l.trigger === "auto" ? "자동" : "수동"}</Badge>
+                      </td>
+                      <td>{l.status === "ok" ? <Badge tone="ok">성공</Badge> : <Badge tone="danger">실패</Badge>}</td>
+                      <td className="num">{l.table_count ?? "-"}</td>
+                      <td className="num">{l.column_count ?? "-"}</td>
+                      <td className="num">{l.relation_count ?? "-"}</td>
+                      <td>
+                        {l.error ? (
+                          <span className="faint">{l.error}</span>
+                        ) : l.broken_metrics.length ? (
+                          <span title={l.broken_metrics.map((b) => `${b.name}: ${b.reason}`).join("\n")}>
+                            <Badge tone="warn">{l.broken_metrics.map((b) => b.name).join(", ")}</Badge>
+                          </span>
+                        ) : (
+                          <span className="faint">-</span>
+                        )}
                       </td>
                     </tr>
                   ))}

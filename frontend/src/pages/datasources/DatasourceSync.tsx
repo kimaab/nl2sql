@@ -39,7 +39,20 @@ export function DatasourceSync() {
               tone: "warn",
               text: "접속은 됐지만 읽은 테이블이 0개입니다. 스키마 이름(Oracle은 owner)이 맞는지 확인하세요.",
             }
-          : { tone: "ok", text: `테이블 ${r.table_count}개, 컬럼 ${r.column_count}개를 읽었습니다` }
+          : r.broken_metrics.length > 0
+            ? {
+                tone: "warn",
+                text:
+                  `테이블 ${r.table_count}개, 컬럼 ${r.column_count}개를 읽었습니다. 깨진 지표 ${r.broken_metrics.length}개 — ` +
+                  r.broken_metrics.map((b) => `${b.name} (${b.reason})`).join(", "),
+              }
+            : {
+                tone: "ok",
+                text:
+                  `테이블 ${r.table_count}개, 컬럼 ${r.column_count}개` +
+                  (r.relation_count !== null ? `, FK 관계 ${r.relation_count}개` : " (FK는 읽지 못해 기존 관계를 유지)") +
+                  "를 읽었습니다",
+              }
       );
       setItems(await api.listDatasources());
     } catch (err) {

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import * as api from "../../api";
 import {
   Alert,
@@ -18,20 +18,59 @@ import {
   AGG_FUNCTIONS,
   definitionLines,
   EMPTY_METRIC,
+  formulaRefs,
+  isNoValue,
+  KIND_LABEL,
+  metricScope,
   newFilter,
   OPERATORS,
   SOURCES,
+  toInput,
 } from "../../lib/metrics";
 
-const STEPS = ["종류", "대상", "조건", "이름·설명"];
+const STEPS = ["종류", "대상", "조건", "예시", "이름·설명"];
+
+type ExampleDraft = { question: string; ast: string };
+
+/** 조인이 생기거나 사라질 때 컬럼 참조를 맞춘다.
+ *  조인이 있으면 모두 '테이블.컬럼', 없으면 기본 테이블의 컬럼 이름만 쓴다. */
+function requalify(form: api.MetricInput, joins: api.MetricJoin[]): api.MetricInput {
+  const base = form.table_name;
+  const qualify = joins.length > 0;
+  const fix = (ref: string | null) => {
+    if (!ref || ref === "*") return ref;
+    const dot = ref.indexOf(".");
+    if (qualify) return dot < 0 ? `${base}.${ref}` : ref;
+    if (dot < 0) return ref;
+    return ref.slice(0, dot).toLowerCase() === base.toLowerCase() ? ref.slice(dot + 1) : null;
+  };
+  const kept = new Set([base.toLowerCase(), ...joins.map((j) => j.table.toLowerCase())]);
+  const alive = (ref: string | null) =>
+    ref !== null && (ref.indexOf(".") < 0 || kept.has(ref.slice(0, ref.indexOf(".")).toLowerCase()));
+  return {
+    ...form,
+    joins,
+    agg_field: form.agg_field && alive(fix(form.agg_field)) ? fix(form.agg_field) : form.kind === "aggregate" ? "*" : null,
+    select_columns: form.select_columns.map(fix).filter(alive) as string[],
+    fixed_filters: form.fixed_filters
+      .map((f) => ({ ...f, field: fix(f.field) }))
+      .filter((f) => alive(f.field)),
+  };
+}
 
 export function MetricWizard() {
+  const { dsId: editDs, metricId } = useParams();
+  const editing = Boolean(editDs && metricId);
   const [params] = useSearchParams();
   const [datasources, setDatasources] = useState<api.Datasource[] | null>(null);
-  const [dsId, setDsId] = useState(params.get("ds") ?? "");
+  const [dsId, setDsId] = useState(editDs ?? params.get("ds") ?? "");
   const [tables, setTables] = useState<api.SchemaTable[]>([]);
-  const [step, setStep] = useState(0);
+  const [relations, setRelations] = useState<api.Relation[]>([]);
+  const [metrics, setMetrics] = useState<api.Metric[]>([]);
+  const [step, setStep] = useState(editing ? 1 : 0);
   const [form, setForm] = useState<api.MetricInput>(EMPTY_METRIC);
+  const [examples, setExamples] = useState<ExampleDraft[]>([]);
+  const [loaded, setLoaded] = useState(!editing);
   const [saving, setSaving] = useState(false);
   const toast = useToast();
   const navigate = useNavigate();
@@ -50,25 +89,55 @@ export function MetricWizard() {
   useEffect(() => {
     if (!dsId) {
       setTables([]);
+      setRelations([]);
+      setMetrics([]);
       return;
     }
-    api
-      .getSchema(dsId)
-      .then((s) => {
+    Promise.all([api.getSchema(dsId), api.listRelations(dsId), api.listMetrics(dsId)])
+      .then(([s, rels, ms]) => {
         setTables(s.tables);
-        setForm((prev) => ({ ...prev, table_name: prev.table_name || s.tables[0]?.name || "" }));
+        setRelations(rels);
+        setMetrics(ms);
+        if (editing) {
+          const current = ms.find((m) => m.id === metricId);
+          if (!current) {
+            toast("수정할 지표를 찾을 수 없습니다", "error");
+          } else {
+            setForm(toInput(current));
+            setExamples(
+              (current.examples ?? []).map((e) => ({
+                question: e.question,
+                ast: e.ast ? JSON.stringify(e.ast, null, 2) : "",
+              }))
+            );
+          }
+          setLoaded(true);
+        } else {
+          setForm((prev) => ({ ...prev, table_name: prev.table_name || s.tables[0]?.name || "" }));
+        }
       })
       .catch((err) => toast("스키마를 불러오지 못했습니다: " + errorMessage(err), "error"));
   }, [dsId]);
 
-  const columns = tables.find((t) => t.name === form.table_name)?.columns ?? [];
   const patch = (p: Partial<api.MetricInput>) => setForm((prev) => ({ ...prev, ...p }));
+  const qualified = form.joins.length > 0;
+
+  // 이 지표가 쓸 수 있는 컬럼. 조인이 있으면 '테이블.컬럼'.
+  const columnOptions = useMemo(() => {
+    const { scope } = metricScope(tables, form);
+    return scope.flatMap((t) =>
+      t.columns.map((c) => ({ value: qualified ? `${t.name}.${c.name}` : c.name, type: c.type, table: t.name }))
+    );
+  }, [tables, form.table_name, form.joins, qualified]);
+  const typeOf = (ref: string) => columnOptions.find((c) => c.value === ref)?.type ?? "";
 
   function setKind(kind: api.MetricKind) {
     if (kind === "aggregate") {
-      patch({ kind, agg_field: "*", agg_function: "COUNT", select_columns: [] });
+      patch({ kind, agg_field: "*", agg_function: "COUNT", select_columns: [], expression: null });
+    } else if (kind === "projection") {
+      patch({ kind, agg_field: null, agg_function: null, expression: null });
     } else {
-      patch({ kind, agg_field: null, agg_function: null });
+      patch({ kind, agg_field: null, agg_function: null, select_columns: [], expression: form.expression ?? "" });
     }
   }
 
@@ -78,39 +147,134 @@ export function MetricWizard() {
     patch({ fixed_filters: next });
   }
 
+  // ---- 조인
+  const scopeNames = [form.table_name, ...form.joins.map((j) => j.table)].filter(Boolean);
+
+  /** 범위 안의 테이블과 table 사이의 관계 → ON 쌍 */
+  function relationPairs(table: string, earlier: string[]) {
+    const pairs: { left: string; right: string }[] = [];
+    for (const r of relations) {
+      if (earlier.includes(r.left_table) && r.right_table === table)
+        pairs.push({ left: `${r.left_table}.${r.left_column}`, right: `${table}.${r.right_column}` });
+      else if (earlier.includes(r.right_table) && r.left_table === table)
+        pairs.push({ left: `${r.right_table}.${r.right_column}`, right: `${table}.${r.left_column}` });
+    }
+    return pairs;
+  }
+
+  function relatedTables(earlier: string[]) {
+    const names = new Set<string>();
+    for (const r of relations) {
+      if (earlier.includes(r.left_table) && !earlier.includes(r.right_table)) names.add(r.right_table);
+      if (earlier.includes(r.right_table) && !earlier.includes(r.left_table)) names.add(r.left_table);
+    }
+    return names;
+  }
+
+  function setJoins(joins: api.MetricJoin[]) {
+    setForm((prev) => requalify(prev, joins));
+  }
+
+  function setJoinTable(i: number, table: string) {
+    const earlier = scopeNames.slice(0, i + 1);
+    const next = [...form.joins];
+    const pairs = relationPairs(table, earlier);
+    next[i] = { ...next[i], table, on: pairs.length ? pairs : [{ left: "", right: "" }] };
+    setJoins(next);
+  }
+
+  function addJoin() {
+    const related = [...relatedTables(scopeNames)];
+    const table = related[0] ?? tables.find((t) => !scopeNames.includes(t.name))?.name ?? "";
+    const pairs = relationPairs(table, scopeNames);
+    setJoins([...form.joins, { table, type: "inner", on: pairs.length ? pairs : [{ left: "", right: "" }] }]);
+  }
+
+  function columnsOf(names: string[]) {
+    return tables
+      .filter((t) => names.includes(t.name))
+      .flatMap((t) => t.columns.map((c) => `${t.name}.${c.name}`));
+  }
+
+  // ---- 예시
+  function parsedExamples(): { value: api.MetricExample[]; error: string | null } {
+    const out: api.MetricExample[] = [];
+    for (const [i, e] of examples.entries()) {
+      if (!e.question.trim()) return { value: [], error: `예시 ${i + 1}의 질문이 비어 있습니다` };
+      if (!e.ast.trim()) {
+        out.push({ question: e.question.trim(), ast: null });
+        continue;
+      }
+      try {
+        const ast = JSON.parse(e.ast);
+        if (typeof ast !== "object" || Array.isArray(ast) || ast === null) throw new Error("객체가 아닙니다");
+        out.push({ question: e.question.trim(), ast });
+      } catch (err) {
+        return { value: [], error: `예시 ${i + 1}의 AST 가 JSON 객체가 아닙니다 (${errorMessage(err)})` };
+      }
+    }
+    return { value: out, error: null };
+  }
+  const exampleCheck = parsedExamples();
+
+  const aggregateMetrics = metrics.filter(
+    (m) => m.kind === "aggregate" && m.id !== metricId && scopeNames.includes(m.table_name)
+  );
+  const unknownRefs = formulaRefs(form.expression).filter(
+    (r) => !aggregateMetrics.some((m) => m.name.toLowerCase() === r.toLowerCase())
+  );
+
+  const joinsValid = form.joins.every((j) => j.table && j.on.length > 0 && j.on.every((p) => p.left && p.right));
   const stepValid = [
     true,
     Boolean(dsId && form.table_name) &&
-      (form.kind === "aggregate" || form.select_columns.length > 0),
+      joinsValid &&
+      (form.kind === "aggregate" ||
+        (form.kind === "projection" && form.select_columns.length > 0) ||
+        (form.kind === "derived" && Boolean(form.expression?.trim()) && formulaRefs(form.expression).length > 0)),
     form.fixed_filters.every(
-      (f) => f.field && ((f.source ?? "literal") === "question" || String(f.value ?? "") !== "")
+      (f) =>
+        f.field &&
+        ((f.source ?? "literal") === "question" || isNoValue(f.operator) || String(f.value ?? "") !== "")
     ),
+    exampleCheck.error === null,
     form.name.trim() !== "",
   ];
 
   async function handleSave() {
+    if (exampleCheck.error) {
+      toast(exampleCheck.error, "error");
+      return;
+    }
+    const body = { ...form, name: form.name.trim(), examples: exampleCheck.value };
     try {
       setSaving(true);
-      const created = await api.createMetric(dsId, { ...form, name: form.name.trim() });
-      toast("지표를 등록했습니다", "ok");
-      navigate(`/metrics/${dsId}/${created.id}`);
+      const saved = editing
+        ? await api.updateMetric(dsId, metricId!, body)
+        : await api.createMetric(dsId, body);
+      toast(editing ? `지표를 수정했습니다 (v${saved.version})` : "지표를 등록했습니다", "ok");
+      navigate(`/metrics/${dsId}/${saved.id}`);
     } catch (err) {
-      toast("지표 등록 실패: " + errorMessage(err), "error");
+      toast((editing ? "지표 수정 실패: " : "지표 등록 실패: ") + errorMessage(err), "error");
     } finally {
       setSaving(false);
     }
   }
 
-  if (datasources === null) return <Loading />;
+  if (datasources === null || !loaded) return <Loading />;
 
   const questionFilters = form.fixed_filters.filter((f) => (f.source ?? "literal") === "question").length;
 
   return (
     <div className="page wide">
       <PageHeader
-        back={{ to: "/metrics", label: "지표 목록" }}
-        title="새 지표 등록"
-        desc="스키마에서 자동으로 뽑을 수 없는 업무 개념을 정의합니다."
+        back={editing ? { to: `/metrics/${dsId}/${metricId}`, label: "지표 상세" } : { to: "/metrics", label: "지표 목록" }}
+        title={editing ? `지표 수정 — ${form.name}` : "새 지표 등록"}
+        desc={
+          editing
+            ? "저장하면 버전이 올라가고 이전 정의는 이력에 남습니다."
+            : "스키마에서 자동으로 뽑을 수 없는 업무 개념을 정의합니다."
+        }
       />
 
       <div className="steps">
@@ -152,6 +316,13 @@ export function MetricWizard() {
                     desc="컬럼 목록을 가져옵니다 (SELECT a, b, c)"
                     onClick={() => setKind("projection")}
                   />
+                  <OptionCard
+                    selected={form.kind === "derived"}
+                    icon="ƒ"
+                    title="파생"
+                    desc="집계 지표를 수식으로 잇습니다 ([매출] - [환불])"
+                    onClick={() => setKind("derived")}
+                  />
                 </div>
               </>
             )}
@@ -169,9 +340,10 @@ export function MetricWizard() {
                       <select
                         className="select"
                         value={dsId}
+                        disabled={editing}
                         onChange={(e) => {
                           setDsId(e.target.value);
-                          patch({ table_name: "", agg_field: "*", select_columns: [], fixed_filters: [] });
+                          patch({ table_name: "", joins: [], agg_field: "*", select_columns: [], fixed_filters: [] });
                         }}
                       >
                         <option value="">선택하세요</option>
@@ -182,7 +354,7 @@ export function MetricWizard() {
                         ))}
                       </select>
                     </Field>
-                    <Field label="테이블" required>
+                    <Field label="기본 테이블" required>
                       <select
                         className="select"
                         value={form.table_name}
@@ -190,6 +362,7 @@ export function MetricWizard() {
                         onChange={(e) =>
                           patch({
                             table_name: e.target.value,
+                            joins: [],
                             agg_field: form.kind === "aggregate" ? "*" : null,
                             select_columns: [],
                             fixed_filters: [],
@@ -207,13 +380,139 @@ export function MetricWizard() {
                   </div>
                 )}
 
+                {dsId && form.table_name && (
+                  <Field
+                    label="조인"
+                    hint="등록된 관계가 있으면 ON 조건이 자동으로 채워집니다. 관계는 '데이터소스 › 관계'에서 관리합니다."
+                  >
+                    <div className="stack" style={{ gap: 10 }}>
+                      {form.joins.map((j, i) => {
+                        const earlier = scopeNames.slice(0, i + 1);
+                        const related = relatedTables(earlier);
+                        return (
+                          <div key={i} className="filter-card">
+                            <div className="row" style={{ marginBottom: 10 }}>
+                              <strong>조인 {i + 1}</strong>
+                              <span className="spacer" />
+                              <Segmented
+                                value={j.type}
+                                options={[
+                                  { value: "inner", label: "INNER" },
+                                  { value: "left", label: "LEFT" },
+                                ]}
+                                onChange={(v) => {
+                                  const next = [...form.joins];
+                                  next[i] = { ...j, type: v };
+                                  setJoins(next);
+                                }}
+                              />
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                onClick={() => setJoins(form.joins.filter((_, k) => k !== i))}
+                              >
+                                삭제
+                              </Button>
+                            </div>
+                            <select className="select" value={j.table} onChange={(e) => setJoinTable(i, e.target.value)}>
+                              <option value="">테이블 선택</option>
+                              {tables
+                                .filter((t) => t.name === j.table || !scopeNames.includes(t.name))
+                                .sort((a, b) => Number(related.has(b.name)) - Number(related.has(a.name)))
+                                .map((t) => (
+                                  <option key={t.name} value={t.name}>
+                                    {related.has(t.name) ? "★ " : ""}
+                                    {t.name}
+                                    {t.description ? ` — ${t.description}` : ""}
+                                  </option>
+                                ))}
+                            </select>
+                            {j.on.map((p, k) => (
+                              <div key={k} className="filter-grid" style={{ marginTop: 8, gridTemplateColumns: "1fr auto 1fr auto" }}>
+                                <select
+                                  className="select"
+                                  value={p.left}
+                                  onChange={(e) => {
+                                    const next = [...form.joins];
+                                    const on = [...j.on];
+                                    on[k] = { ...p, left: e.target.value };
+                                    next[i] = { ...j, on };
+                                    setJoins(next);
+                                  }}
+                                >
+                                  <option value="">앞 테이블 컬럼</option>
+                                  {columnsOf(earlier).map((c) => (
+                                    <option key={c}>{c}</option>
+                                  ))}
+                                </select>
+                                <span>=</span>
+                                <select
+                                  className="select"
+                                  value={p.right}
+                                  onChange={(e) => {
+                                    const next = [...form.joins];
+                                    const on = [...j.on];
+                                    on[k] = { ...p, right: e.target.value };
+                                    next[i] = { ...j, on };
+                                    setJoins(next);
+                                  }}
+                                >
+                                  <option value="">{j.table || "조인 테이블"} 컬럼</option>
+                                  {columnsOf([j.table]).map((c) => (
+                                    <option key={c}>{c}</option>
+                                  ))}
+                                </select>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={j.on.length === 1}
+                                  onClick={() => {
+                                    const next = [...form.joins];
+                                    next[i] = { ...j, on: j.on.filter((_, x) => x !== k) };
+                                    setJoins(next);
+                                  }}
+                                >
+                                  ✕
+                                </Button>
+                              </div>
+                            ))}
+                            <div style={{ marginTop: 8 }}>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => {
+                                  const next = [...form.joins];
+                                  next[i] = { ...j, on: [...j.on, { left: "", right: "" }] };
+                                  setJoins(next);
+                                }}
+                              >
+                                + ON 조건
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div>
+                        <Button size="sm" onClick={addJoin} disabled={scopeNames.length >= tables.length}>
+                          + 조인 추가
+                        </Button>
+                      </div>
+                    </div>
+                  </Field>
+                )}
+
                 {dsId && form.table_name && form.kind === "aggregate" && (
                   <Field label="집계" hint="COUNT는 컬럼 대신 * 를 쓸 수 있습니다">
                     <div className="agg-sentence">
                       <select
                         className="select"
                         value={form.agg_function ?? "COUNT"}
-                        onChange={(e) => patch({ agg_function: e.target.value })}
+                        onChange={(e) =>
+                          patch({
+                            agg_function: e.target.value,
+                            agg_field: e.target.value !== "COUNT" && form.agg_field === "*" ? columnOptions[0]?.value ?? null : form.agg_field,
+                          })
+                        }
                       >
                         {AGG_FUNCTIONS.map((f) => (
                           <option key={f}>{f}</option>
@@ -225,10 +524,10 @@ export function MetricWizard() {
                         value={form.agg_field ?? "*"}
                         onChange={(e) => patch({ agg_field: e.target.value })}
                       >
-                        <option value="*">*</option>
-                        {columns.map((c) => (
-                          <option key={c.name} value={c.name}>
-                            {c.name} ({c.type})
+                        {form.agg_function === "COUNT" && <option value="*">*</option>}
+                        {columnOptions.map((c) => (
+                          <option key={c.value} value={c.value}>
+                            {c.value} ({c.type})
                           </option>
                         ))}
                       </select>
@@ -244,11 +543,11 @@ export function MetricWizard() {
                     hint="누른 순서대로 SELECT에 들어갑니다. 번호는 순서입니다."
                   >
                     <div className="chip-box">
-                      {columns.map((c) => {
-                        const idx = form.select_columns.indexOf(c.name);
+                      {columnOptions.map((c) => {
+                        const idx = form.select_columns.indexOf(c.value);
                         return (
                           <Chip
-                            key={c.name}
+                            key={c.value}
                             selected={idx >= 0}
                             order={idx + 1}
                             type={c.type}
@@ -256,16 +555,48 @@ export function MetricWizard() {
                               patch({
                                 select_columns:
                                   idx >= 0
-                                    ? form.select_columns.filter((x) => x !== c.name)
-                                    : [...form.select_columns, c.name],
+                                    ? form.select_columns.filter((x) => x !== c.value)
+                                    : [...form.select_columns, c.value],
                               })
                             }
                           >
-                            {c.name}
+                            {c.value}
                           </Chip>
                         );
                       })}
                     </div>
+                  </Field>
+                )}
+
+                {dsId && form.table_name && form.kind === "derived" && (
+                  <Field
+                    label="수식"
+                    required
+                    hint="[지표명] 과 숫자, + - * / ( ) 를 씁니다. 나눗셈은 0으로 나누지 않도록 자동 처리됩니다. 구성 지표는 이 지표의 테이블 범위에 있는 집계형만 쓸 수 있습니다."
+                  >
+                    <input
+                      className="input"
+                      value={form.expression ?? ""}
+                      onChange={(e) => patch({ expression: e.target.value })}
+                      placeholder="[취소주문수] / [주문수]"
+                    />
+                    <div className="chip-box" style={{ marginTop: 8 }}>
+                      {aggregateMetrics.length === 0 ? (
+                        <span className="muted">이 테이블 범위에 집계형 지표가 없습니다. 먼저 집계형 지표를 등록하세요.</span>
+                      ) : (
+                        aggregateMetrics.map((m) => (
+                          <Chip
+                            key={m.id}
+                            onClick={() => patch({ expression: `${form.expression ?? ""}${form.expression ? " " : ""}[${m.name}]` })}
+                          >
+                            [{m.name}]
+                          </Chip>
+                        ))
+                      )}
+                    </div>
+                    {unknownRefs.length > 0 && (
+                      <Alert tone="warn">쓸 수 없는 지표: {unknownRefs.join(", ")}</Alert>
+                    )}
                   </Field>
                 )}
               </>
@@ -309,24 +640,27 @@ export function MetricWizard() {
                           className="select"
                           value={f.field ?? ""}
                           onChange={(e) => {
-                            const col = columns.find((c) => c.name === e.target.value);
                             // 컬럼이 바뀌면 출처 기본값도 다시 정한다
-                            const fresh = newFilter(e.target.value, col?.type ?? "");
+                            const fresh = newFilter(e.target.value, typeOf(e.target.value));
                             const next = [...form.fixed_filters];
                             next[i] = fresh;
                             patch({ fixed_filters: next });
                           }}
                         >
-                          {columns.map((c) => (
-                            <option key={c.name} value={c.name}>
-                              {c.name}
+                          {columnOptions.map((c) => (
+                            <option key={c.value} value={c.value}>
+                              {c.value}
                             </option>
                           ))}
                         </select>
                         <select
                           className="select"
                           value={f.operator ?? "equals"}
-                          onChange={(e) => setFilter(i, { operator: e.target.value })}
+                          onChange={(e) =>
+                            setFilter(i, isNoValue(e.target.value)
+                              ? { operator: e.target.value, value: null, source: "literal" }
+                              : { operator: e.target.value })
+                          }
                         >
                           {OPERATORS.map((o) => (
                             <option key={o.value} value={o.value}>
@@ -334,7 +668,9 @@ export function MetricWizard() {
                             </option>
                           ))}
                         </select>
-                        {src === "question" ? (
+                        {isNoValue(f.operator) ? (
+                          <input className="input" value="값 없음" disabled />
+                        ) : src === "question" ? (
                           <input className="input" value="질문에서 받음" disabled />
                         ) : (
                           <input
@@ -354,13 +690,13 @@ export function MetricWizard() {
 
                 <div>
                   <Button
-                    disabled={columns.length === 0}
+                    disabled={columnOptions.length === 0}
                     onClick={() => {
-                      const first = columns[0];
+                      const first = columnOptions[0];
                       patch({
                         fixed_filters: [
                           ...form.fixed_filters,
-                          newFilter(first?.name ?? "", first?.type ?? ""),
+                          newFilter(first?.value ?? "", first?.type ?? ""),
                         ],
                       });
                     }}
@@ -373,13 +709,54 @@ export function MetricWizard() {
 
             {step === 3 && (
               <>
+                <div>
+                  <div className="card-title">예시 질문</div>
+                  <p className="muted">
+                    사용자가 이 지표를 찾을 법한 질문을 적어 두면 검색이 잘 걸립니다. AST 까지 적으면 모델에게 보여주는
+                    모범 답안이 되고, 저장할 때 실제로 컴파일되는지 검사합니다. 없으면 건너뛰어도 됩니다.
+                  </p>
+                </div>
+                {examples.map((e, i) => (
+                  <div key={i} className="filter-card stack" style={{ gap: 8 }}>
+                    <div className="row">
+                      <strong>예시 {i + 1}</strong>
+                      <span className="spacer" />
+                      <Button size="sm" variant="danger" onClick={() => setExamples(examples.filter((_, k) => k !== i))}>
+                        삭제
+                      </Button>
+                    </div>
+                    <input
+                      className="input"
+                      value={e.question}
+                      placeholder="지난달 카드 결제 매출"
+                      onChange={(ev) => setExamples(examples.map((x, k) => (k === i ? { ...x, question: ev.target.value } : x)))}
+                    />
+                    <textarea
+                      className="textarea"
+                      rows={4}
+                      style={{ fontFamily: "var(--mono)" }}
+                      value={e.ast}
+                      placeholder={`(선택) {"metric": "${form.name || "지표명"}", "filters": [...]}`}
+                      onChange={(ev) => setExamples(examples.map((x, k) => (k === i ? { ...x, ast: ev.target.value } : x)))}
+                    />
+                  </div>
+                ))}
+                {exampleCheck.error && <Alert tone="warn">{exampleCheck.error}</Alert>}
+                <div>
+                  <Button onClick={() => setExamples([...examples, { question: "", ast: "" }])}>+ 예시 추가</Button>
+                </div>
+              </>
+            )}
+
+            {step === 4 && (
+              <>
                 <div className="card-title">이름과 설명</div>
-                <Field label="이름" required hint="영문·숫자·밑줄을 권장합니다">
+                <Field label="이름" required hint="질문에 자주 나오는 말로 짓습니다. 파생 지표의 수식에서 [이름]으로 부릅니다.">
                   <input
                     className="input"
                     value={form.name}
                     onChange={(e) => patch({ name: e.target.value })}
-                    placeholder="active_revenue"
+                    placeholder="매출"
                     autoFocus
                   />
                 </Field>
@@ -408,8 +785,8 @@ export function MetricWizard() {
                 다음
               </Button>
             ) : (
-              <Button variant="primary" disabled={!stepValid[step] || saving} onClick={handleSave}>
-                {saving ? "등록 중..." : "지표 등록"}
+              <Button variant="primary" disabled={!stepValid.every(Boolean) || saving} onClick={handleSave}>
+                {saving ? "저장 중..." : editing ? "수정 저장" : "지표 등록"}
               </Button>
             )}
           </div>
@@ -423,12 +800,16 @@ export function MetricWizard() {
             <SqlBlock sql={definitionLines(form)} />
             <dl className="kv" style={{ margin: 0, gridTemplateColumns: "72px 1fr" }}>
               <dt>종류</dt>
-              <dd>{form.kind === "aggregate" ? "집계" : "조회"}</dd>
+              <dd>{KIND_LABEL[form.kind]}</dd>
+              <dt>조인</dt>
+              <dd>{form.joins.length}개</dd>
               <dt>필터</dt>
               <dd>
                 {form.fixed_filters.length}개
                 {questionFilters > 0 && <span className="muted"> (질문 값 {questionFilters}개)</span>}
               </dd>
+              <dt>예시</dt>
+              <dd>{examples.length}개</dd>
               {form.name && (
                 <>
                   <dt>이름</dt>

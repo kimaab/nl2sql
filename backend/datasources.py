@@ -1,9 +1,12 @@
+import json
 import logging
 from uuid import UUID, uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 import db
-from models import Datasource, DatasourceInput, ApiException, SyncResult, Driver
+from models import Datasource, DatasourceInput, ApiException, SyncResult, SyncLog, Driver
 from catalog import read_catalog
+from contract import broken_metric_list
+from relations import replace_fk_relations
 
 log = logging.getLogger("nl2sql.datasources")
 
@@ -121,20 +124,70 @@ def delete_datasource(datasource_id: UUID) -> None:
     log.info("datasource deleted: %s", datasource_id)
 
 
-def sync_datasource(datasource_id: UUID) -> SyncResult:
-    """스키마 동기화"""
+def sync_datasource(datasource_id: UUID, trigger: str = "manual") -> SyncResult:
+    """스키마 동기화. 성공·실패 모두 동기화 기록에 남고, 깨진 지표가 생기면 경고한다."""
     row = db.one("SELECT * FROM datasource WHERE id = %s", str(datasource_id))
     if row is None:
         raise ApiException(404, "데이터소스를 찾을 수 없습니다")
 
-    # 대상 DB에서 스키마 읽기
-    tables = read_catalog(row)
+    started = datetime.now(timezone.utc)
+    try:
+        # 대상 DB에서 스키마 읽기
+        tables, relations = read_catalog(row)
+        # 메타데이터 DB에 저장
+        result = _replace_schema(datasource_id, tables, relations)
+    except ApiException as error:
+        _write_sync_log(datasource_id, trigger, started, error=error.detail)
+        raise
+    except Exception as error:
+        _write_sync_log(datasource_id, trigger, started, error=str(error).strip().splitlines()[0] if str(error) else type(error).__name__)
+        raise
 
-    # 메타데이터 DB에 저장
-    return _replace_schema(datasource_id, tables)
+    result.broken_metrics = broken_metric_list(datasource_id)
+    for broken in result.broken_metrics:
+        log.warning("동기화 뒤 깨진 지표: %s / %s — %s", row["name"], broken["name"], broken["reason"])
+    _write_sync_log(datasource_id, trigger, started, result=result)
+    return result
 
 
-def _replace_schema(datasource_id: UUID, tables: list[dict]) -> SyncResult:
+def _write_sync_log(datasource_id: UUID, trigger: str, started, result: SyncResult | None = None,
+                    error: str | None = None) -> None:
+    with db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO datasource_sync_log
+                (datasource_id, trigger, status, table_count, column_count, relation_count, broken_metrics, error, started_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                str(datasource_id), trigger, "error" if error else "ok",
+                result.table_count if result else None,
+                result.column_count if result else None,
+                result.relation_count if result else None,
+                json.dumps(result.broken_metrics if result else [], ensure_ascii=False),
+                error, started,
+            ))
+
+
+def list_sync_logs(datasource_id: UUID | None = None, limit: int = 100) -> list[SyncLog]:
+    rows = db.query("""
+        SELECT l.*, d.name AS datasource_name
+          FROM datasource_sync_log l JOIN datasource d ON d.id = l.datasource_id
+         WHERE (%s::uuid IS NULL OR l.datasource_id = %s::uuid)
+         ORDER BY l.started_at DESC LIMIT %s
+    """, str(datasource_id) if datasource_id else None, str(datasource_id) if datasource_id else None, limit)
+    return [
+        SyncLog(
+            id=r["id"], datasource_id=r["datasource_id"], datasource_name=r["datasource_name"],
+            trigger=r["trigger"], status=r["status"], table_count=r["table_count"],
+            column_count=r["column_count"], relation_count=r["relation_count"],
+            broken_metrics=r["broken_metrics"] or [], error=r["error"],
+            started_at=r["started_at"].isoformat(), finished_at=r["finished_at"].isoformat(),
+        )
+        for r in rows
+    ]
+
+
+def _replace_schema(datasource_id: UUID, tables: list[dict], relations: list[dict] | None = None) -> SyncResult:
     """스키마를 통째로 교체"""
     table_rows, column_rows = [], []
     for table in tables:
@@ -167,13 +220,17 @@ def _replace_schema(datasource_id: UUID, tables: list[dict]) -> SyncResult:
                 (str(datasource_id),)
             )
             synced = cur.fetchone()
+            # 관계도 같은 트랜잭션에서 교체한다. None 이면 FK 를 읽지 못한 것이라 그대로 둔다.
+            if relations is not None:
+                replace_fk_relations(cur, datasource_id, relations)
         conn.commit()
 
     log.info("datasource %s synced: %d tables, %d columns", datasource_id, len(tables), len(column_rows))
     return SyncResult(
         table_count=len(tables),
         column_count=len(column_rows),
-        synced_at=synced[0].isoformat() if synced else datetime.now().isoformat()
+        synced_at=synced[0].isoformat() if synced else datetime.now().isoformat(),
+        relation_count=len(relations) if relations is not None else None,
     )
 
 

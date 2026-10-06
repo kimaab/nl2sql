@@ -1,0 +1,316 @@
+{
+  "name": "Shopingmall (샘플)",
+  "driver": "postgresql",
+  "tables": [
+    {
+      "name": "TB_MEMBER",
+      "description": "회원",
+      "columns": [
+        {
+          "name": "MEMBER_ID",
+          "type": "varchar(20)",
+          "description": "회원 ID"
+        },
+        {
+          "name": "MEMBER_NM",
+          "type": "varchar(50)",
+          "description": "회원 이름",
+          "synonyms": [
+            "고객명",
+            "이름"
+          ]
+        },
+        {
+          "name": "GRADE_CD",
+          "type": "varchar(2)",
+          "description": "회원 등급",
+          "codes": [
+            {
+              "code": "G1",
+              "label": "일반"
+            },
+            {
+              "code": "G2",
+              "label": "우수"
+            },
+            {
+              "code": "G3",
+              "label": "VIP"
+            }
+          ]
+        },
+        {
+          "name": "JOIN_DT",
+          "type": "date",
+          "description": "가입일"
+        }
+      ]
+    },
+    {
+      "name": "TB_ORDER",
+      "description": "주문",
+      "columns": [
+        {
+          "name": "ORDER_ID",
+          "type": "bigint",
+          "description": "주문 번호"
+        },
+        {
+          "name": "MEMBER_ID",
+          "type": "varchar(20)",
+          "description": "주문한 회원 ID"
+        },
+        {
+          "name": "ORDER_DTM",
+          "type": "timestamp without time zone",
+          "description": "주문 일시"
+        },
+        {
+          "name": "ORDER_STATUS",
+          "type": "varchar(2)",
+          "description": "주문 상태",
+          "codes": [
+            {
+              "code": "01",
+              "label": "주문접수"
+            },
+            {
+              "code": "02",
+              "label": "결제완료"
+            },
+            {
+              "code": "03",
+              "label": "배송완료"
+            },
+            {
+              "code": "99",
+              "label": "취소"
+            }
+          ]
+        },
+        {
+          "name": "TOTAL_AMT",
+          "type": "numeric(12,2)",
+          "description": "주문 금액"
+        },
+        {
+          "name": "PAY_METHOD",
+          "type": "varchar(10)",
+          "description": "결제 수단",
+          "codes": [
+            {
+              "code": "CARD",
+              "label": "카드"
+            },
+            {
+              "code": "BANK",
+              "label": "계좌이체"
+            },
+            {
+              "code": "POINT",
+              "label": "포인트"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "TB_ORDER_ITEM",
+      "description": "주문 상품",
+      "columns": [
+        {
+          "name": "ORDER_ID",
+          "type": "bigint",
+          "description": "주문 번호"
+        },
+        {
+          "name": "ITEM_SEQ",
+          "type": "integer",
+          "description": "주문 내 순번"
+        },
+        {
+          "name": "PRODUCT_ID",
+          "type": "bigint",
+          "description": "상품 번호"
+        },
+        {
+          "name": "QTY",
+          "type": "integer",
+          "description": "수량"
+        },
+        {
+          "name": "PRICE",
+          "type": "numeric(12,2)",
+          "description": "단가"
+        }
+      ]
+    },
+    {
+      "name": "TB_PRODUCT",
+      "description": "상품",
+      "columns": [
+        {
+          "name": "PRODUCT_ID",
+          "type": "bigint",
+          "description": "상품 번호"
+        },
+        {
+          "name": "PRODUCT_NM",
+          "type": "varchar(100)",
+          "description": "상품명"
+        },
+        {
+          "name": "CATEGORY_CD",
+          "type": "varchar(10)",
+          "description": "카테고리"
+        }
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "constraint": "FK_ORDER_MEMBER",
+      "left_table": "TB_ORDER",
+      "left_column": "MEMBER_ID",
+      "right_table": "TB_MEMBER",
+      "right_column": "MEMBER_ID"
+    },
+    {
+      "constraint": "FK_ITEM_ORDER",
+      "left_table": "TB_ORDER_ITEM",
+      "left_column": "ORDER_ID",
+      "right_table": "TB_ORDER",
+      "right_column": "ORDER_ID"
+    },
+    {
+      "constraint": "FK_ITEM_PRODUCT",
+      "left_table": "TB_ORDER_ITEM",
+      "left_column": "PRODUCT_ID",
+      "right_table": "TB_PRODUCT",
+      "right_column": "PRODUCT_ID"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "매출",
+      "description": "취소를 뺀 주문 금액 합계",
+      "table": "TB_ORDER",
+      "kind": "aggregate",
+      "aggregation": {
+        "field": "TOTAL_AMT",
+        "function": "SUM"
+      },
+      "fixed_filters": [
+        {
+          "field": "ORDER_STATUS",
+          "operator": "not_equals",
+          "value": "99",
+          "source": "literal"
+        }
+      ],
+      "examples": [
+        {
+          "question": "이번 달 매출",
+          "ast": {
+            "metric": "매출",
+            "filters": [
+              {
+                "field": "ORDER_DTM",
+                "operator": "greater_or_equal",
+                "value": "2026-10-01"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "주문수",
+      "description": "주문 건수",
+      "table": "TB_ORDER",
+      "kind": "aggregate",
+      "aggregation": {
+        "field": "*",
+        "function": "COUNT"
+      },
+      "fixed_filters": []
+    },
+    {
+      "name": "취소주문수",
+      "description": "취소된 주문 건수",
+      "table": "TB_ORDER",
+      "kind": "aggregate",
+      "aggregation": {
+        "field": "*",
+        "function": "COUNT"
+      },
+      "fixed_filters": [
+        {
+          "field": "ORDER_STATUS",
+          "operator": "equals",
+          "value": "99",
+          "source": "literal"
+        }
+      ]
+    },
+    {
+      "name": "취소율",
+      "description": "전체 주문 중 취소 비율",
+      "table": "TB_ORDER",
+      "kind": "derived",
+      "expression": "[취소주문수] / [주문수]",
+      "fixed_filters": []
+    },
+    {
+      "name": "주문상세",
+      "description": "주문과 주문 상품 목록",
+      "table": "TB_ORDER",
+      "kind": "projection",
+      "joins": [
+        {
+          "table": "TB_ORDER_ITEM",
+          "type": "inner",
+          "on": [
+            {
+              "left": "TB_ORDER.ORDER_ID",
+              "right": "TB_ORDER_ITEM.ORDER_ID"
+            }
+          ]
+        }
+      ],
+      "columns": [
+        "TB_ORDER.ORDER_ID",
+        "TB_ORDER.ORDER_DTM",
+        "TB_ORDER_ITEM.PRODUCT_ID",
+        "TB_ORDER_ITEM.QTY"
+      ],
+      "fixed_filters": [
+        {
+          "field": "TB_ORDER.MEMBER_ID",
+          "operator": "equals",
+          "source": "question"
+        }
+      ]
+    },
+    {
+      "name": "최근주문",
+      "description": "최근 일주일 주문 목록",
+      "table": "TB_ORDER",
+      "kind": "projection",
+      "columns": [
+        "ORDER_ID",
+        "MEMBER_ID",
+        "ORDER_DTM",
+        "TOTAL_AMT"
+      ],
+      "fixed_filters": [
+        {
+          "field": "ORDER_DTM",
+          "operator": "greater_or_equal",
+          "value": "-7d",
+          "source": "relative"
+        }
+      ]
+    }
+  ]
+}

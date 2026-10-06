@@ -1,0 +1,681 @@
+{
+  "datasource": "Shopingmall (샘플)",
+  "today": "2026-10-06",
+  "cases": [
+    {
+      "question": "전체 주문 건수",
+      "ast": {
+        "metric": "주문수"
+      },
+      "expected_sql": "SELECT COUNT(*) AS \"주문수\" FROM \"TB_ORDER\";"
+    },
+    {
+      "question": "지난달 매출",
+      "ast": {
+        "metric": "매출",
+        "filters": [
+          {
+            "field": "ORDER_DTM",
+            "operator": "greater_or_equal",
+            "value": "2026-09-01"
+          },
+          {
+            "field": "ORDER_DTM",
+            "operator": "less_or_equal",
+            "value": "2026-09-30"
+          }
+        ]
+      },
+      "expected_sql": "SELECT SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' AND \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01';"
+    },
+    {
+      "question": "9월 카드 결제 매출",
+      "ast": {
+        "metric": "매출",
+        "filters": [
+          {
+            "field": "ORDER_DTM",
+            "operator": "greater_or_equal",
+            "value": "2026-09-01"
+          },
+          {
+            "field": "ORDER_DTM",
+            "operator": "less_or_equal",
+            "value": "2026-09-30"
+          },
+          {
+            "field": "PAY_METHOD",
+            "operator": "equals",
+            "value": "CARD"
+          }
+        ]
+      },
+      "expected_sql": "SELECT SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' AND \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' AND \"PAY_METHOD\" = 'CARD';"
+    },
+    {
+      "question": "결제수단별 매출",
+      "ast": {
+        "metric": "매출",
+        "group_by": [
+          "PAY_METHOD"
+        ]
+      },
+      "expected_sql": "SELECT \"PAY_METHOD\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY \"PAY_METHOD\";"
+    },
+    {
+      "question": "결제수단별 매출 높은 순",
+      "ast": {
+        "metric": "매출",
+        "group_by": [
+          "PAY_METHOD"
+        ],
+        "order_by": [
+          {
+            "field": "매출",
+            "direction": "desc"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"PAY_METHOD\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY \"PAY_METHOD\" ORDER BY \"매출\" DESC;"
+    },
+    {
+      "question": "올해 월별 주문 수",
+      "ast": {
+        "metric": "주문수",
+        "filters": [
+          {
+            "field": "ORDER_DTM",
+            "operator": "greater_or_equal",
+            "value": "2026-01-01"
+          },
+          {
+            "field": "ORDER_DTM",
+            "operator": "less_or_equal",
+            "value": "2026-12-31"
+          }
+        ],
+        "group_by": [
+          {
+            "field": "ORDER_DTM",
+            "grain": "month"
+          }
+        ],
+        "order_by": [
+          {
+            "field": "ORDER_DTM_month",
+            "direction": "asc"
+          }
+        ]
+      },
+      "expected_sql": "SELECT DATE_TRUNC('month', \"ORDER_DTM\") AS \"ORDER_DTM_month\", COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-01-01' AND \"ORDER_DTM\" < DATE '2027-01-01' GROUP BY DATE_TRUNC('month', \"ORDER_DTM\") ORDER BY \"ORDER_DTM_month\" ASC;"
+    },
+    {
+      "question": "최근 주문 10건",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "columns": [
+          "ORDER_ID",
+          "MEMBER_ID",
+          "ORDER_DTM",
+          "TOTAL_AMT"
+        ],
+        "order_by": [
+          {
+            "field": "ORDER_DTM",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "expected_sql": "SELECT \"ORDER_ID\", \"MEMBER_ID\", \"ORDER_DTM\", \"TOTAL_AMT\" FROM \"TB_ORDER\" ORDER BY \"ORDER_DTM\" DESC LIMIT 10;"
+    },
+    {
+      "question": "매출 상위 5명 회원",
+      "ast": {
+        "metric": "매출",
+        "group_by": [
+          "MEMBER_ID"
+        ],
+        "order_by": [
+          {
+            "field": "매출",
+            "direction": "desc"
+          }
+        ],
+        "limit": 5
+      },
+      "expected_sql": "SELECT \"MEMBER_ID\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY \"MEMBER_ID\" ORDER BY \"매출\" DESC LIMIT 5;"
+    },
+    {
+      "question": "m001 회원의 주문상세",
+      "ast": {
+        "metric": "주문상세",
+        "filters": [
+          {
+            "field": "MEMBER_ID",
+            "operator": "equals",
+            "value": "m001"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"TB_ORDER\".\"ORDER_ID\", \"TB_ORDER\".\"ORDER_DTM\", \"TB_ORDER_ITEM\".\"PRODUCT_ID\", \"TB_ORDER_ITEM\".\"QTY\" FROM \"TB_ORDER\" INNER JOIN \"TB_ORDER_ITEM\" ON \"TB_ORDER\".\"ORDER_ID\" = \"TB_ORDER_ITEM\".\"ORDER_ID\" WHERE \"TB_ORDER\".\"MEMBER_ID\" = 'm001';"
+    },
+    {
+      "question": "m001 회원의 7월 주문상세",
+      "ast": {
+        "metric": "주문상세",
+        "filters": [
+          {
+            "field": "MEMBER_ID",
+            "operator": "equals",
+            "value": "m001"
+          },
+          {
+            "field": "ORDER_DTM",
+            "operator": "greater_or_equal",
+            "value": "2026-07-01"
+          },
+          {
+            "field": "ORDER_DTM",
+            "operator": "less_or_equal",
+            "value": "2026-07-31"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"TB_ORDER\".\"ORDER_ID\", \"TB_ORDER\".\"ORDER_DTM\", \"TB_ORDER_ITEM\".\"PRODUCT_ID\", \"TB_ORDER_ITEM\".\"QTY\" FROM \"TB_ORDER\" INNER JOIN \"TB_ORDER_ITEM\" ON \"TB_ORDER\".\"ORDER_ID\" = \"TB_ORDER_ITEM\".\"ORDER_ID\" WHERE \"TB_ORDER\".\"MEMBER_ID\" = 'm001' AND \"TB_ORDER\".\"ORDER_DTM\" >= DATE '2026-07-01' AND \"TB_ORDER\".\"ORDER_DTM\" < DATE '2026-08-01';"
+    },
+    {
+      "question": "배송완료된 주문 수",
+      "ast": {
+        "metric": "주문수",
+        "filters": [
+          {
+            "field": "ORDER_STATUS",
+            "operator": "equals",
+            "value": "배송완료"
+          }
+        ]
+      },
+      "expected_sql": "SELECT COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" = '03';"
+    },
+    {
+      "question": "취소되지 않은 주문 목록",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "columns": [
+          "ORDER_ID",
+          "ORDER_STATUS"
+        ],
+        "filters": [
+          {
+            "field": "ORDER_STATUS",
+            "operator": "not_equals",
+            "value": "취소"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"ORDER_ID\", \"ORDER_STATUS\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99';"
+    },
+    {
+      "question": "결제완료이거나 배송완료인 주문 수",
+      "ast": {
+        "metric": "주문수",
+        "filters": [
+          {
+            "field": "ORDER_STATUS",
+            "operator": "in",
+            "value": [
+              "결제완료",
+              "배송완료"
+            ]
+          }
+        ]
+      },
+      "expected_sql": "SELECT COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" IN ('02', '03');"
+    },
+    {
+      "question": "취소율",
+      "ast": {
+        "metric": "취소율"
+      },
+      "expected_sql": "SELECT COUNT(CASE WHEN \"ORDER_STATUS\" = '99' THEN 1 END) * 1.0 / NULLIF(COUNT(*), 0) AS \"취소율\" FROM \"TB_ORDER\";"
+    },
+    {
+      "question": "9월 결제수단별 취소율",
+      "ast": {
+        "metric": "취소율",
+        "filters": [
+          {
+            "field": "ORDER_DTM",
+            "operator": "greater_or_equal",
+            "value": "2026-09-01"
+          },
+          {
+            "field": "ORDER_DTM",
+            "operator": "less_or_equal",
+            "value": "2026-09-30"
+          }
+        ],
+        "group_by": [
+          "PAY_METHOD"
+        ]
+      },
+      "expected_sql": "SELECT \"PAY_METHOD\", COUNT(CASE WHEN \"ORDER_STATUS\" = '99' THEN 1 END) * 1.0 / NULLIF(COUNT(*), 0) AS \"취소율\" FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' GROUP BY \"PAY_METHOD\";"
+    },
+    {
+      "question": "이번달과 지난달 주문 수 비교",
+      "ast": {
+        "metric": "주문수",
+        "compare": {
+          "field": "ORDER_DTM",
+          "periods": [
+            {
+              "label": "이번달",
+              "from": "2026-10-01",
+              "to": "2026-10-31"
+            },
+            {
+              "label": "지난달",
+              "from": "2026-09-01",
+              "to": "2026-09-30"
+            }
+          ]
+        }
+      },
+      "expected_sql": "SELECT COUNT(CASE WHEN \"ORDER_DTM\" >= DATE '2026-10-01' AND \"ORDER_DTM\" < DATE '2026-11-01' THEN 1 END) AS \"주문수_이번달\", COUNT(CASE WHEN \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' THEN 1 END) AS \"주문수_지난달\", (COUNT(CASE WHEN \"ORDER_DTM\" >= DATE '2026-10-01' AND \"ORDER_DTM\" < DATE '2026-11-01' THEN 1 END) - COUNT(CASE WHEN \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' THEN 1 END)) * 1.0 / NULLIF(COUNT(CASE WHEN \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' THEN 1 END), 0) AS \"주문수_증감률\" FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-11-01';"
+    },
+    {
+      "question": "이번달과 지난달 매출 비교",
+      "ast": {
+        "metric": "매출",
+        "compare": {
+          "field": "ORDER_DTM",
+          "periods": [
+            {
+              "label": "이번달",
+              "from": "2026-10-01",
+              "to": "2026-10-31"
+            },
+            {
+              "label": "지난달",
+              "from": "2026-09-01",
+              "to": "2026-09-30"
+            }
+          ]
+        }
+      },
+      "expected_sql": "SELECT SUM(CASE WHEN \"ORDER_DTM\" >= DATE '2026-10-01' AND \"ORDER_DTM\" < DATE '2026-11-01' THEN \"TOTAL_AMT\" END) AS \"매출_이번달\", SUM(CASE WHEN \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' THEN \"TOTAL_AMT\" END) AS \"매출_지난달\", (SUM(CASE WHEN \"ORDER_DTM\" >= DATE '2026-10-01' AND \"ORDER_DTM\" < DATE '2026-11-01' THEN \"TOTAL_AMT\" END) - SUM(CASE WHEN \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' THEN \"TOTAL_AMT\" END)) * 1.0 / NULLIF(SUM(CASE WHEN \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' THEN \"TOTAL_AMT\" END), 0) AS \"매출_증감률\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' AND \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-11-01';"
+    },
+    {
+      "question": "VIP 회원 수",
+      "ast": {
+        "target_table": "TB_MEMBER",
+        "aggregations": [
+          {
+            "field": "*",
+            "function": "COUNT"
+          }
+        ],
+        "filters": [
+          {
+            "field": "GRADE_CD",
+            "operator": "equals",
+            "value": "VIP"
+          }
+        ]
+      },
+      "expected_sql": "SELECT COUNT(*) AS \"count_*\" FROM \"TB_MEMBER\" WHERE \"GRADE_CD\" = 'G3';"
+    },
+    {
+      "question": "등급별 회원 수",
+      "ast": {
+        "target_table": "TB_MEMBER",
+        "group_by": [
+          "GRADE_CD"
+        ],
+        "aggregations": [
+          {
+            "field": "*",
+            "function": "COUNT",
+            "alias": "회원수"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"GRADE_CD\", COUNT(*) AS \"회원수\" FROM \"TB_MEMBER\" GROUP BY \"GRADE_CD\";"
+    },
+    {
+      "question": "이름에 김이 들어가는 회원",
+      "ast": {
+        "target_table": "TB_MEMBER",
+        "columns": [
+          "MEMBER_ID",
+          "MEMBER_NM"
+        ],
+        "filters": [
+          {
+            "field": "MEMBER_NM",
+            "operator": "contains",
+            "value": "김"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"MEMBER_ID\", \"MEMBER_NM\" FROM \"TB_MEMBER\" WHERE \"MEMBER_NM\" LIKE '%김%' ESCAPE '!';"
+    },
+    {
+      "question": "가입일이 없는 회원",
+      "ast": {
+        "target_table": "TB_MEMBER",
+        "columns": [
+          "MEMBER_ID",
+          "MEMBER_NM"
+        ],
+        "filters": [
+          {
+            "field": "JOIN_DT",
+            "operator": "is_null"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"MEMBER_ID\", \"MEMBER_NM\" FROM \"TB_MEMBER\" WHERE \"JOIN_DT\" IS NULL;"
+    },
+    {
+      "question": "올해 가입한 회원 수",
+      "ast": {
+        "target_table": "TB_MEMBER",
+        "aggregations": [
+          {
+            "field": "*",
+            "function": "COUNT"
+          }
+        ],
+        "filters": [
+          {
+            "field": "JOIN_DT",
+            "operator": "greater_or_equal",
+            "value": "2026-01-01"
+          },
+          {
+            "field": "JOIN_DT",
+            "operator": "less_or_equal",
+            "value": "2026-12-31"
+          }
+        ]
+      },
+      "expected_sql": "SELECT COUNT(*) AS \"count_*\" FROM \"TB_MEMBER\" WHERE \"JOIN_DT\" >= DATE '2026-01-01' AND \"JOIN_DT\" <= DATE '2026-12-31';"
+    },
+    {
+      "question": "주문한 적 있는 회원 수",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "aggregations": [
+          {
+            "field": "MEMBER_ID",
+            "function": "COUNT_DISTINCT",
+            "alias": "구매회원수"
+          }
+        ]
+      },
+      "expected_sql": "SELECT COUNT(DISTINCT \"MEMBER_ID\") AS \"구매회원수\" FROM \"TB_ORDER\";"
+    },
+    {
+      "question": "주문이 3건 이상인 회원",
+      "ast": {
+        "metric": "주문수",
+        "group_by": [
+          "MEMBER_ID"
+        ],
+        "having": [
+          {
+            "alias": "주문수",
+            "operator": "greater_or_equal",
+            "value": 3
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"MEMBER_ID\", COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" GROUP BY \"MEMBER_ID\" HAVING COUNT(*) >= 3;"
+    },
+    {
+      "question": "주문 금액 합계가 100만원 넘는 회원",
+      "ast": {
+        "metric": "매출",
+        "group_by": [
+          "MEMBER_ID"
+        ],
+        "having": [
+          {
+            "alias": "매출",
+            "operator": "greater_than",
+            "value": 1000000
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"MEMBER_ID\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY \"MEMBER_ID\" HAVING SUM(\"TOTAL_AMT\") > 1000000;"
+    },
+    {
+      "question": "주문 금액 평균",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "aggregations": [
+          {
+            "field": "TOTAL_AMT",
+            "function": "AVG"
+          }
+        ]
+      },
+      "expected_sql": "SELECT AVG(\"TOTAL_AMT\") AS \"avg_TOTAL_AMT\" FROM \"TB_ORDER\";"
+    },
+    {
+      "question": "가장 큰 주문 금액",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "aggregations": [
+          {
+            "field": "TOTAL_AMT",
+            "function": "MAX"
+          }
+        ]
+      },
+      "expected_sql": "SELECT MAX(\"TOTAL_AMT\") AS \"max_TOTAL_AMT\" FROM \"TB_ORDER\";"
+    },
+    {
+      "question": "결제수단 종류",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "columns": [
+          "PAY_METHOD"
+        ],
+        "distinct": true
+      },
+      "expected_sql": "SELECT DISTINCT \"PAY_METHOD\" FROM \"TB_ORDER\";"
+    },
+    {
+      "question": "VIP 회원의 주문 수",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "joins": [
+          "TB_MEMBER"
+        ],
+        "aggregations": [
+          {
+            "field": "*",
+            "function": "COUNT"
+          }
+        ],
+        "filters": [
+          {
+            "field": "TB_MEMBER.GRADE_CD",
+            "operator": "equals",
+            "value": "VIP"
+          }
+        ]
+      },
+      "expected_sql": "SELECT COUNT(*) AS \"count_*\" FROM \"TB_ORDER\" INNER JOIN \"TB_MEMBER\" ON \"TB_ORDER\".\"MEMBER_ID\" = \"TB_MEMBER\".\"MEMBER_ID\" WHERE \"TB_MEMBER\".\"GRADE_CD\" = 'G3';"
+    },
+    {
+      "question": "카테고리별 판매 수량",
+      "ast": {
+        "target_table": "TB_ORDER_ITEM",
+        "joins": [
+          "TB_PRODUCT"
+        ],
+        "group_by": [
+          "TB_PRODUCT.CATEGORY_CD"
+        ],
+        "aggregations": [
+          {
+            "field": "QTY",
+            "function": "SUM",
+            "alias": "판매수량"
+          }
+        ],
+        "order_by": [
+          {
+            "field": "판매수량",
+            "direction": "desc"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"TB_PRODUCT\".\"CATEGORY_CD\", SUM(\"TB_ORDER_ITEM\".\"QTY\") AS \"판매수량\" FROM \"TB_ORDER_ITEM\" INNER JOIN \"TB_PRODUCT\" ON \"TB_ORDER_ITEM\".\"PRODUCT_ID\" = \"TB_PRODUCT\".\"PRODUCT_ID\" GROUP BY \"TB_PRODUCT\".\"CATEGORY_CD\" ORDER BY \"판매수량\" DESC;"
+    },
+    {
+      "question": "가장 많이 팔린 상품 3개",
+      "ast": {
+        "target_table": "TB_ORDER_ITEM",
+        "joins": [
+          "TB_PRODUCT"
+        ],
+        "group_by": [
+          "TB_PRODUCT.PRODUCT_NM"
+        ],
+        "aggregations": [
+          {
+            "field": "QTY",
+            "function": "SUM",
+            "alias": "판매수량"
+          }
+        ],
+        "order_by": [
+          {
+            "field": "판매수량",
+            "direction": "desc"
+          }
+        ],
+        "limit": 3
+      },
+      "expected_sql": "SELECT \"TB_PRODUCT\".\"PRODUCT_NM\", SUM(\"TB_ORDER_ITEM\".\"QTY\") AS \"판매수량\" FROM \"TB_ORDER_ITEM\" INNER JOIN \"TB_PRODUCT\" ON \"TB_ORDER_ITEM\".\"PRODUCT_ID\" = \"TB_PRODUCT\".\"PRODUCT_ID\" GROUP BY \"TB_PRODUCT\".\"PRODUCT_NM\" ORDER BY \"판매수량\" DESC LIMIT 3;"
+    },
+    {
+      "question": "등급별 주문 금액 합계",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "joins": [
+          "TB_MEMBER"
+        ],
+        "group_by": [
+          "TB_MEMBER.GRADE_CD"
+        ],
+        "aggregations": [
+          {
+            "field": "TB_ORDER.TOTAL_AMT",
+            "function": "SUM",
+            "alias": "주문금액"
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"TB_MEMBER\".\"GRADE_CD\", SUM(\"TB_ORDER\".\"TOTAL_AMT\") AS \"주문금액\" FROM \"TB_ORDER\" INNER JOIN \"TB_MEMBER\" ON \"TB_ORDER\".\"MEMBER_ID\" = \"TB_MEMBER\".\"MEMBER_ID\" GROUP BY \"TB_MEMBER\".\"GRADE_CD\";"
+    },
+    {
+      "question": "카드나 계좌이체로 10만원 넘게 결제한 주문",
+      "ast": {
+        "target_table": "TB_ORDER",
+        "columns": [
+          "ORDER_ID",
+          "PAY_METHOD",
+          "TOTAL_AMT"
+        ],
+        "filters": [
+          {
+            "field": "PAY_METHOD",
+            "operator": "in",
+            "value": [
+              "CARD",
+              "BANK"
+            ]
+          },
+          {
+            "field": "TOTAL_AMT",
+            "operator": "greater_than",
+            "value": 100000
+          }
+        ]
+      },
+      "expected_sql": "SELECT \"ORDER_ID\", \"PAY_METHOD\", \"TOTAL_AMT\" FROM \"TB_ORDER\" WHERE \"PAY_METHOD\" IN ('CARD', 'BANK') AND \"TOTAL_AMT\" > 100000;"
+    },
+    {
+      "question": "카드 결제이거나 금액이 50만원 이상인 주문 수",
+      "ast": {
+        "metric": "주문수",
+        "filters": [
+          {
+            "any_of": [
+              {
+                "field": "PAY_METHOD",
+                "operator": "equals",
+                "value": "CARD"
+              },
+              {
+                "field": "TOTAL_AMT",
+                "operator": "greater_or_equal",
+                "value": 500000
+              }
+            ]
+          }
+        ]
+      },
+      "expected_sql": "SELECT COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE (\"PAY_METHOD\" = 'CARD' OR \"TOTAL_AMT\" >= 500000);"
+    },
+    {
+      "question": "주간 주문 추이 (9월)",
+      "ast": {
+        "metric": "주문수",
+        "filters": [
+          {
+            "field": "ORDER_DTM",
+            "operator": "greater_or_equal",
+            "value": "2026-09-01"
+          },
+          {
+            "field": "ORDER_DTM",
+            "operator": "less_or_equal",
+            "value": "2026-09-30"
+          }
+        ],
+        "group_by": [
+          {
+            "field": "ORDER_DTM",
+            "grain": "week"
+          }
+        ],
+        "order_by": [
+          {
+            "field": "ORDER_DTM_week"
+          }
+        ]
+      },
+      "expected_sql": "SELECT DATE_TRUNC('week', \"ORDER_DTM\") AS \"ORDER_DTM_week\", COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' GROUP BY DATE_TRUNC('week', \"ORDER_DTM\") ORDER BY \"ORDER_DTM_week\" ASC;"
+    },
+    {
+      "question": "분기별 매출",
+      "ast": {
+        "metric": "매출",
+        "group_by": [
+          {
+            "field": "ORDER_DTM",
+            "grain": "quarter"
+          }
+        ]
+      },
+      "expected_sql": "SELECT DATE_TRUNC('quarter', \"ORDER_DTM\") AS \"ORDER_DTM_quarter\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY DATE_TRUNC('quarter', \"ORDER_DTM\");"
+    }
+  ]
+}

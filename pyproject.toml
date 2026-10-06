@@ -26,3 +26,12 @@ dependencies = [
 where = ["."]
 include = ["backend*"]
 exclude = ["frontend*", "tests*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["backend"]

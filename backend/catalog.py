@@ -11,8 +11,12 @@ log = logging.getLogger("nl2sql.catalog")
 CONNECT_TIMEOUT = 10
 
 
-def read_catalog(row: dict) -> list[dict]:
-    """대상 DB의 스키마 읽기"""
+def read_catalog(row: dict) -> tuple[list[dict], list[dict] | None]:
+    """대상 DB의 스키마와 FK 관계 읽기.
+
+    관계는 None 일 수 있다 — FK 카탈로그를 읽을 권한이 없을 때다. 그때 기존
+    FK 관계를 지우면 안 되므로 '빈 목록'과 구분한다.
+    """
     driver = Driver(row["driver"])
     if driver is Driver.MYSQL:
         return read_mysql(row)
@@ -68,9 +72,21 @@ def read_postgresql(row: dict) -> list[dict]:
                         "type": _text(data_type),
                         "description": _text(comment)
                     })
+        relations = _read_relations(row, connection, """
+            SELECT con.conname, cl.relname, att.attname, rcl.relname, ratt.attname
+              FROM pg_constraint con
+              JOIN pg_class cl ON cl.oid = con.conrelid
+              JOIN pg_namespace n ON n.oid = cl.relnamespace
+              JOIN pg_class rcl ON rcl.oid = con.confrelid
+              JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(attnum, refnum, ord) ON true
+              JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
+              JOIN pg_attribute ratt ON ratt.attrelid = con.confrelid AND ratt.attnum = k.refnum
+             WHERE con.contype = 'f' AND n.nspname = %s
+             ORDER BY con.conname, k.ord
+        """, (schema,), tables)
     finally:
         connection.close()
-    return list(tables.values())
+    return list(tables.values()), relations
 
 
 def read_mysql(row: dict) -> list[dict]:
@@ -116,9 +132,15 @@ def read_mysql(row: dict) -> list[dict]:
                         "type": _text(column_type),
                         "description": _text(comment)
                     })
+        relations = _read_relations(row, connection, """
+            SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+              FROM information_schema.KEY_COLUMN_USAGE
+             WHERE TABLE_SCHEMA = %s AND REFERENCED_TABLE_SCHEMA = %s AND REFERENCED_TABLE_NAME IS NOT NULL
+             ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
+        """, (row["db_name"], row["db_name"]), tables)
     finally:
         connection.close()
-    return list(tables.values())
+    return list(tables.values()), relations
 
 
 def read_oracle(row: dict) -> list[dict]:
@@ -169,9 +191,45 @@ def read_oracle(row: dict) -> list[dict]:
                         "type": _oracle_type(type_name, length, precision, scale),
                         "description": _text(comment)
                     })
+        relations = _read_relations(row, connection, """
+            SELECT c.constraint_name, cc.table_name, cc.column_name, rc.table_name, rcc.column_name
+              FROM all_constraints c
+              JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+              JOIN all_constraints rc ON rc.owner = c.r_owner AND rc.constraint_name = c.r_constraint_name
+              JOIN all_cons_columns rcc ON rcc.owner = rc.owner AND rcc.constraint_name = rc.constraint_name
+                                       AND rcc.position = cc.position
+             WHERE c.owner = :owner AND c.constraint_type = 'R'
+             ORDER BY c.constraint_name, cc.position
+        """, {"owner": owner}, tables)
     finally:
         connection.close()
-    return list(tables.values())
+    return list(tables.values()), relations
+
+
+def _read_relations(row: dict, connection, sql: str, params, tables: dict) -> list[dict] | None:
+    """FK 를 관계 목록으로. 두 테이블이 모두 읽은 범위에 있을 때만 남긴다.
+
+    실패해도 동기화는 계속한다 — 관계는 있으면 좋은 것이고, 테이블·컬럼이 본체다.
+    """
+    try:
+        with connection.cursor() as cur:
+            cur.execute(sql, params)
+            fetched = cur.fetchall()
+    except Exception as error:
+        log.warning("%s 의 FK 를 읽지 못했습니다 (기존 FK 관계를 유지합니다): %s", row["name"], error)
+        rollback = getattr(connection, "rollback", None)
+        if rollback:
+            rollback()
+        return None
+    out = []
+    for name, table, column, ref_table, ref_column in fetched:
+        table, ref_table = _text(table), _text(ref_table)
+        if table in tables and ref_table in tables:
+            out.append({
+                "constraint": _text(name), "left_table": table, "left_column": _text(column),
+                "right_table": ref_table, "right_column": _text(ref_column),
+            })
+    return out
 
 
 def _text(value) -> str:

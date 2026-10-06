@@ -5,9 +5,11 @@ from compiler import Compiler
 
 log = logging.getLogger("nl2sql.compile")
 
+CLARIFY_PREFIX = "CLARIFY:"
 
-def make_compile_tool(compiler: Compiler, question: str):
-    """compile_sql 도구 생성"""
+
+def make_compile_tool(compiler: Compiler, question: str, record: dict | None = None):
+    """compile_sql 도구 생성. 성공하면 record["ast"] 에 컴파일된 AST 를 남긴다."""
     attempt = {"n": 0}
 
     @tool("compile_sql")
@@ -15,7 +17,8 @@ def make_compile_tool(compiler: Compiler, question: str):
         """제안한 조회 명세(JSON AST)를 검증하고 SQL로 컴파일합니다.
 
         ast는 아래 키만 담은 JSON 객체를 문자열로 인코딩한 것입니다:
-        target_table 또는 metric, aggregations, filters, group_by.
+        metric 또는 target_table, columns, joins, aggregations, filters, group_by,
+        having, order_by, limit, distinct, compare.
 
         성공하면 "SQL: "로 시작하는 문자열을 돌려줍니다 — 그것이 최종 답이니
         이 도구를 더 부르지 말고 답변을 마치십시오.
@@ -50,8 +53,29 @@ def make_compile_tool(compiler: Compiler, question: str):
                      attempt["n"], question, payload, error)
             return f"error: {error}"
 
+        if record is not None:
+            record["ast"] = parsed
         log.info("attempt=%d outcome=success question=%r sql=%s",
                  attempt["n"], question, sql)
         return f"SQL: {sql}"
 
     return compile_sql
+
+
+def make_clarify_tool(question: str):
+    """ask_user 도구 생성. 부르면 이번 요청은 SQL 없이 되묻는 말로 끝난다."""
+
+    @tool("ask_user")
+    def ask_user(message: str) -> str:
+        """질문만으로는 조회를 정할 수 없을 때 사용자에게 한 번 되묻습니다.
+
+        어떤 지표·테이블을 말하는지 여러 갈래로 읽히거나, 지표가 질문에서 받아야 하는
+        값(예: 어느 회원인지)이 빠졌을 때만 씁니다. 전체 조회나 합리적인 기본값으로
+        답할 수 있으면 되묻지 말고 compile_sql 을 부르십시오.
+        message 에는 사용자에게 보여줄 짧은 질문 한 문장을 적습니다.
+        """
+        text = str(message or "").strip() or "질문을 조금 더 구체적으로 적어 주십시오."
+        log.info("outcome=clarify question=%r message=%s", question, text)
+        return f"{CLARIFY_PREFIX} {text}"
+
+    return ask_user

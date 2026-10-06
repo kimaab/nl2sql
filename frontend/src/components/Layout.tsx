@@ -1,7 +1,13 @@
 import { NavLink, Outlet } from "react-router-dom";
 
 const GROUPS: { label: string; links: { to: string; text: string; end?: boolean }[] }[] = [
-  { label: "질문", links: [{ to: "/ask", text: "SQL 생성" }] },
+  {
+    label: "질문",
+    links: [
+      { to: "/ask", text: "SQL 생성" },
+      { to: "/history", text: "질문 기록" },
+    ],
+  },
   {
     label: "데이터소스",
     links: [
@@ -9,6 +15,8 @@ const GROUPS: { label: string; links: { to: string; text: string; end?: boolean 
       { to: "/datasources/new", text: "등록" },
       { to: "/sync", text: "동기화", end: true },
       { to: "/sync/history", text: "동기화 현황" },
+      { to: "/relations", text: "관계" },
+      { to: "/glossary", text: "용어·코드 사전" },
     ],
   },
   {

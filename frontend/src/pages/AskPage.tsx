@@ -1,28 +1,29 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import * as api from "../api";
 import { Badge, Button, Chip, SqlBlock } from "../components/ui";
 import { useToast } from "../components/Toast";
 import { errorMessage } from "../lib/format";
 
-interface Entry {
+interface Entry extends api.AskResponse {
   question: string;
-  sql: string | null;
-  error: string | null;
-  attempts: number;
+  favorite: boolean;
+  feedback: api.Feedback | null;
 }
 
-const EXAMPLES = ["지난달 매출 합계는?", "상위 10개 고객 목록", "이번 주 신규 가입자 수"];
+const EXAMPLES = ["지난달 매출 합계는?", "매출 상위 10개 고객", "이번 달과 지난달 주문 수 비교"];
 
 export function AskPage() {
+  const [params] = useSearchParams();
   const [datasources, setDatasources] = useState<api.Datasource[] | null>(null);
-  const [datasourceId, setDatasourceId] = useState("");
-  const [question, setQuestion] = useState("");
+  const [datasourceId, setDatasourceId] = useState(params.get("ds") ?? "");
+  const [question, setQuestion] = useState(params.get("q") ?? "");
   const [history, setHistory] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const toast = useToast();
 
   useEffect(() => {
@@ -31,7 +32,7 @@ export function AskPage() {
       .then((data) => {
         const ready = data.filter((d) => d.synced_at); // 동기화된 것만
         setDatasources(ready);
-        if (ready.length === 1) setDatasourceId(ready[0].id);
+        if (ready.length === 1 && !params.get("ds")) setDatasourceId(ready[0].id);
       })
       .catch((err) => {
         toast("데이터소스 로드 실패: " + errorMessage(err), "error");
@@ -67,8 +68,14 @@ export function AskPage() {
     setPending(asked);
     setQuestion("");
     try {
+      // 서버는 이전 질문을 모른다 — body 에는 이번 질문 하나만 싣는다.
       const res = await api.ask(datasourceId, asked);
-      setHistory((prev) => [...prev, { question: asked, ...res }]);
+      setHistory((prev) => [...prev, { question: asked, ...res, favorite: false, feedback: null }]);
+      if (res.clarification) {
+        // 되물었으면 원래 질문을 돌려놓고, 답을 덧붙여 한 문장으로 다시 보내게 한다
+        setQuestion(asked + " ");
+        setTimeout(() => inputRef.current?.focus(), 0);
+      }
     } catch (err) {
       // 실패한 질문은 입력창에 되돌려서 다시 보낼 수 있게 한다
       setQuestion(asked);
@@ -76,6 +83,22 @@ export function AskPage() {
     } finally {
       setPending(null);
       setLoading(false);
+    }
+  }
+
+  async function update(index: number, patch: api.HistoryPatch) {
+    const entry = history[index];
+    if (!entry.id) {
+      toast("이 답은 기록되지 않아 평가할 수 없습니다", "error");
+      return;
+    }
+    try {
+      const saved = await api.patchHistory(entry.id, patch);
+      setHistory((prev) =>
+        prev.map((e, i) => (i === index ? { ...e, favorite: saved.favorite, feedback: saved.feedback } : e))
+      );
+    } catch (err) {
+      toast("저장 실패: " + errorMessage(err), "error");
     }
   }
 
@@ -94,6 +117,9 @@ export function AskPage() {
       <div className="ask-bar">
         <strong>SQL 생성</strong>
         <span className="spacer" />
+        <Link to={datasourceId ? `/history?ds=${datasourceId}` : "/history"} className="muted">
+          질문 기록 →
+        </Link>
         <select
           className="select"
           value={datasourceId}
@@ -141,11 +167,41 @@ export function AskPage() {
                 <div className="a-meta">
                   {entry.sql ? (
                     <Badge tone="ok">✓ 성공</Badge>
+                  ) : entry.clarification ? (
+                    <Badge tone="warn">? 확인 필요</Badge>
                   ) : (
                     <Badge tone="danger">✗ 실패</Badge>
                   )}
                   <span className="faint">{entry.attempts}번 시도</span>
                   <span className="spacer" />
+                  {entry.id && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      title="즐겨찾기"
+                      onClick={() => update(i, { favorite: !entry.favorite })}
+                    >
+                      {entry.favorite ? "★ 즐겨찾기" : "☆ 즐겨찾기"}
+                    </Button>
+                  )}
+                  {entry.sql && entry.id && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant={entry.feedback === "up" ? "primary" : "ghost"}
+                        onClick={() => update(i, { feedback: entry.feedback === "up" ? "" : "up" })}
+                      >
+                        맞음
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={entry.feedback === "down" ? "danger" : "ghost"}
+                        onClick={() => update(i, { feedback: entry.feedback === "down" ? "" : "down" })}
+                      >
+                        틀림
+                      </Button>
+                    </>
+                  )}
                   {entry.sql && (
                     <Button size="sm" onClick={() => copySql(i, entry.sql!)}>
                       {copiedIndex === i ? "복사됨" : "SQL 복사"}
@@ -154,6 +210,13 @@ export function AskPage() {
                 </div>
                 {entry.sql ? (
                   <SqlBlock sql={entry.sql} />
+                ) : entry.clarification ? (
+                  <div className="alert warn">
+                    {entry.clarification}
+                    <div className="field-hint" style={{ marginTop: 6 }}>
+                      원래 질문을 입력창에 돌려놓았습니다. 답을 덧붙여 한 문장으로 다시 보내세요.
+                    </div>
+                  </div>
                 ) : (
                   <div className="alert danger">{entry.error}</div>
                 )}
@@ -174,6 +237,7 @@ export function AskPage() {
       <div className="ask-input">
         <div className="ask-input-inner">
           <textarea
+            ref={inputRef}
             className="textarea"
             rows={2}
             value={question}

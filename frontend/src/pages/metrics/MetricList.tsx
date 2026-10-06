@@ -4,7 +4,7 @@ import * as api from "../../api";
 import { Badge, Button, EmptyState, Loading, PageHeader } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage } from "../../lib/format";
-import { brokenReason, definitionLines } from "../../lib/metrics";
+import { brokenReason, definitionLines, KIND_LABEL } from "../../lib/metrics";
 
 interface Loaded {
   datasource: api.Datasource;
@@ -58,7 +58,7 @@ export function MetricList() {
 
   const visible = filter ? rows.filter((r) => r.datasource.id === filter) : rows;
   const flat = visible.flatMap((r) =>
-    r.metrics.map((m) => ({ row: r, metric: m, broken: brokenReason(r.tables, m) }))
+    r.metrics.map((m) => ({ row: r, metric: m, broken: brokenReason(r.tables, m, r.metrics) }))
   );
   const brokenCount = flat.filter((f) => f.broken).length;
 
@@ -141,7 +141,7 @@ export function MetricList() {
                       <div className="cell-sub">{m.description || "설명 없음"}</div>
                     </td>
                     <td>
-                      <Badge tone="primary">{m.kind === "projection" ? "조회" : "집계"}</Badge>
+                      <Badge tone="primary">{KIND_LABEL[m.kind]}</Badge>
                     </td>
                     <td>{row.datasource.name}</td>
                     <td>
