@@ -144,3 +144,55 @@ def test_pruner_adds_related_neighbour_that_matches_question(contract):
     names = [t["name"] for t in pruned["tables"]]
     assert "TB_ORDER" in names and "TB_MEMBER" in names
     assert any(r["constraint"] == "FK_ORDER_MEMBER" for r in pruned["relations"])
+
+
+# ------------------------------------------------------------------ 의미 검색 결합 (RRF)
+
+def test_semantic_finds_metric_that_shares_no_letters(contract):
+    """글자가 하나도 안 겹치는 말투는 TF-IDF 로는 못 찾고, 의미 검색 점수가 오면 찾는다."""
+    question = "장사 얼마나 됐어"
+    assert Pruner(contract).prune(question)["metrics"] == []
+
+    pruned = Pruner(contract).prune(question, semantic={"매출": 0.82})
+    assert [m["name"] for m in pruned["metrics"]] == ["매출"]
+    assert "TB_ORDER" in [t["name"] for t in pruned["tables"]]
+
+
+def test_semantic_and_keyword_agreement_ranks_first(contract):
+    """양쪽 검색에서 모두 걸린 지표가 한쪽에서만 1위인 지표보다 앞선다."""
+    pruned = Pruner(contract).prune("취소 주문 건수", top_k=2, semantic={"취소주문수": 0.71, "매출": 0.9})
+    assert [m["name"] for m in pruned["metrics"]][0] == "취소주문수"
+    assert "매출" in [m["name"] for m in pruned["metrics"]]
+
+
+def test_semantic_unknown_metric_name_is_ignored(contract):
+    """깨져서 계약서에서 빠진 지표의 점수가 와도 후보가 되지 않는다."""
+    plain = Pruner(contract).prune("이번 달 매출")
+    mixed = Pruner(contract).prune("이번 달 매출", semantic={"없는지표": 0.99})
+    assert [m["name"] for m in mixed["metrics"]] == [m["name"] for m in plain["metrics"]]
+
+
+def test_semantic_below_min_is_not_a_candidate(contract):
+    pruned = Pruner(contract).prune("장사 얼마나 됐어", semantic={"매출": 0.42}, semantic_min=0.5)
+    assert pruned["metrics"] == []
+
+
+def test_search_log_shows_keyword_semantic_and_fused_scores(contract, caplog):
+    caplog.set_level("INFO", logger="nl2sql.pruner")
+    Pruner(contract).prune("취소 주문 건수", top_k=2,
+                           semantic={"취소주문수": 0.71, "매출": 0.62, "최근주문": 0.31}, semantic_min=0.5)
+    lines = [r.getMessage() for r in caplog.records]
+    row = next(line for line in lines if "[metric] 취소주문수" in line)
+    assert "TF-IDF 0." in row and "의미 0.710 (1위)" in row and "결합 0." in row and "✔" in row
+    below = [line for line in lines if "[metric] 최근주문" in line]
+    assert len(below) == 1 and "의미 0.310 (기준 미만)" in below[0]
+
+
+def test_metric_texts_and_hash_change_only_with_content():
+    from embedding import _hash, metric_texts
+
+    row = {"name": "매출", "description": "취소를 뺀 주문 금액 합계",
+           "examples": [{"question": "이번 달 매출"}, {"question": " "}]}
+    assert metric_texts(row) == [("definition", "매출: 취소를 뺀 주문 금액 합계"), ("example", "이번 달 매출")]
+    assert metric_texts({"name": "주문수", "description": ""}) == [("definition", "주문수")]
+    assert _hash("example", "이번 달 매출") == _hash("example", "이번 달 매출") != _hash("definition", "이번 달 매출")

@@ -109,7 +109,8 @@ def run_compile_only(contract: dict, data: dict) -> dict:
     return _summary(results, mode="compile-only")
 
 
-def run_model(contract: dict, data: dict, today: datetime.date | None) -> dict:
+def run_model(contract: dict, data: dict, today: datetime.date | None, semantic_for=None) -> dict:
+    """semantic_for: 질문 → ({지표 이름: 유사도}, 기준 유사도). 없으면 TF-IDF 만으로 후보를 고른다."""
     from langchain_openai import ChatOpenAI
     from ask import run_question
 
@@ -123,7 +124,9 @@ def run_model(contract: dict, data: dict, today: datetime.date | None) -> dict:
     for i, case in enumerate(data["cases"], start=1):
         started = time.monotonic()
         try:
-            outcome = run_question(contract, case["question"], model, today=today)
+            semantic, semantic_min = semantic_for(case["question"]) if semantic_for else (None, 0.0)
+            outcome = run_question(contract, case["question"], model, today=today,
+                                   semantic=semantic, semantic_min=semantic_min)
         except Exception as e:  # 한 문항의 장애가 평가 전체를 멈추지 않게
             outcome = {"sql": None, "error": f"{type(e).__name__}: {e}", "attempts": 0, "ast": None,
                        "clarification": None}
@@ -176,23 +179,38 @@ def main(argv=None) -> int:
     source.add_argument("--datasource-id", help="메타데이터 DB 의 데이터소스 id")
     parser.add_argument("--compile-only", action="store_true", help="모델 없이 ast → expected_sql 만 확인")
     parser.add_argument("--out", type=Path, help="리포트 경로 (기본: eval/reports/<시각>.json)")
+
+    parser.add_argument("--no-semantic", action="store_true",
+                        help="EMBED_MODEL 이 있어도 의미 검색을 끄고 TF-IDF 만으로 (비교용)")
     args = parser.parse_args(argv)
 
     data = load_cases(args.cases)
+    today = datetime.date.fromisoformat(data["today"]) if data.get("today") else None
     if args.contract:
         contract = json.loads(args.contract.read_text(encoding="utf-8"))
+        report = run_compile_only(contract, data) if args.compile_only else run_model(contract, data, today)
     else:
+        # 의미 검색은 메타데이터 DB 의 벡터를 쓰므로 데이터소스 모드에서만 된다
         import db
+        import embedding
         from contract import load_contract
         from uuid import UUID
+        datasource_id = UUID(args.datasource_id)
         db.init_pool()
         try:
-            contract = load_contract(UUID(args.datasource_id))
+            contract = load_contract(datasource_id)
+            if args.compile_only:
+                report = run_compile_only(contract, data)
+            else:
+                semantic_for = None
+                if embedding.enabled() and not args.no_semantic:
+                    semantic_for = lambda q: (embedding.semantic_scores(datasource_id, q),  # noqa: E731
+                                              embedding.min_score())
+                print(f"후보 검색: {'TF-IDF + 의미 검색(' + embedding.model_name() + ')' if semantic_for else 'TF-IDF'}")
+                report = run_model(contract, data, today, semantic_for)
         finally:
             db.close_pool()
-
-    today = datetime.date.fromisoformat(data["today"]) if data.get("today") else None
-    report = run_compile_only(contract, data) if args.compile_only else run_model(contract, data, today)
+        report["semantic"] = bool(not args.compile_only and embedding.enabled() and not args.no_semantic)
 
     out = args.out or REPORT_DIR / f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{report['mode']}.json"
     out.parent.mkdir(parents=True, exist_ok=True)

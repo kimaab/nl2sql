@@ -6,6 +6,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 log = logging.getLogger("nl2sql.pruner")
 
+# RRF 상수. 순위 차이를 완만하게 만든다 — 1위와 2위의 점수 차가 지나치게 벌어지지 않게.
+RRF_K = 60
+# 후보 표 로그의 최대 줄 수 (테이블이 많으면 TF-IDF 에 조금씩 걸린 후보가 길게 이어진다)
+MAX_LOG_ROWS = 15
+
 
 def korean_aware_tokens(text: str) -> list[str]:
     """영문/숫자는 통째로, 한글은 2-gram으로 토큰화"""
@@ -29,7 +34,7 @@ def _column_text(column: dict) -> list[str]:
 
 
 class Pruner:
-    """질문과 관련된 테이블/지표를 TF-IDF로 선택"""
+    """질문과 관련된 테이블/지표를 TF-IDF로 선택 (의미 검색 점수가 오면 지표 순위에 합친다)"""
 
     def __init__(self, contract: dict):
         self.entries = []
@@ -68,12 +73,19 @@ class Pruner:
                 log.info("테이블 사전: %s -> 단어 %d개 (컬럼 %d개) %s",
                          item["name"], len(words), len(item["columns"]), words)
 
-    def prune(self, question: str, top_k: int = 3) -> dict:
-        """질문과 관련된 항목 선택"""
+    def prune(self, question: str, top_k: int = 3, semantic: dict[str, float] | None = None,
+              semantic_min: float = 0.0) -> dict:
+        """질문과 관련된 항목 선택.
+
+        semantic: 의미 검색이 낸 {지표 이름: 유사도}. semantic_min 이상인 지표만 순위에 들고, TF-IDF 순위와
+        RRF 로 합친다 — 점수는 단위가 달라 더할 수 없으니 순위만 쓴다. None 이면 TF-IDF 만 쓴다.
+        """
         query_vec = self.vectorizer.transform([question])
         scores = cosine_similarity(query_vec, self.matrix).flatten()
-        order = np.argsort(scores)[::-1][:top_k]
-        self._log_search(question, scores, order)
+        passed = {k: v for k, v in (semantic or {}).items() if v >= semantic_min}
+        ranked, fused = self._rank(scores, passed)
+        order = ranked[:top_k]
+        self._log_search(question, scores, ranked, top_k, semantic, semantic_min, fused)
 
         tables, metrics, seen = [], [], set()
 
@@ -83,8 +95,6 @@ class Pruner:
                 seen.add(name)
 
         for idx in order:
-            if scores[idx] <= 0:
-                continue
             kind, item, _ = self.entries[idx]
             if kind == "table":
                 add_table(item["name"])
@@ -97,7 +107,7 @@ class Pruner:
 
         # 아무것도 걸리지 않으면 상위 몇 개라도 돌려준다
         if not tables:
-            for idx in order[:top_k]:
+            for idx in np.argsort(scores)[::-1][:top_k]:
                 kind, item, _ = self.entries[idx]
                 if kind == "table":
                     add_table(item["name"])
@@ -119,15 +129,72 @@ class Pruner:
         log.info("선택: 지표=%s 테이블=%s", [m["name"] for m in metrics], [t["name"] for t in tables])
         return {"tables": tables, "metrics": metrics, "relations": relations}
 
-    def _log_search(self, question: str, scores, order) -> None:
-        """질문 토큰 중 사전에 있어 비교에 쓰인 것과 사전에 없어 무시된 것, 상위 후보를 남긴다."""
+    def _rank(self, scores, semantic: dict[str, float]) -> tuple[list[int], dict[int, float]]:
+        """후보 순서와 RRF 점수. 어느 한쪽 검색에라도 걸린 항목만 후보가 된다."""
+        keyword = [int(i) for i in np.argsort(scores)[::-1] if scores[i] > 0]
+        if not semantic:
+            return keyword, {}
+        meaning = sorted(
+            (i for i, (kind, item, _) in enumerate(self.entries) if kind == "metric" and item["name"] in semantic),
+            key=lambda i: -semantic[self.entries[i][1]["name"]],
+        )
+        fused: dict[int, float] = {}
+        for ranking in (keyword, meaning):
+            for rank, idx in enumerate(ranking, start=1):
+                fused[idx] = fused.get(idx, 0.0) + 1 / (RRF_K + rank)
+        return sorted(fused, key=lambda i: (-fused[i], -scores[i])), fused
+
+    def _log_search(self, question: str, scores, ranked: list[int], top_k: int,
+                    semantic: dict[str, float] | None, semantic_min: float, fused: dict[int, float]) -> None:
+        """질문 토큰(사전에 있어 쓰인 것·없어 무시된 것)과 후보 표를 남긴다.
+
+        후보 한 줄: TF-IDF 점수(순위) | 의미 점수(순위) | 결합 점수(=두 순위 몫의 합) | 겹친 토큰.
+        의미 검색 기준 미만으로 빠진 지표도 '기준 미만' 으로 함께 남긴다 — 왜 못 찾았는지 보려고.
+        """
         vocab = self.vectorizer.vocabulary_
         tokens = korean_aware_tokens(question)
-        used = [t for t in tokens if t in vocab]
+        used = list(dict.fromkeys(t for t in tokens if t in vocab))
         log.info("질문=%r 토큰=%s 사용=%s 무시(사전에 없음)=%s", question, tokens, used,
                  [t for t in tokens if t not in vocab])
-        for rank, idx in enumerate(order, start=1):
+
+        keyword_rank = {idx: r for r, idx in enumerate((i for i in np.argsort(scores)[::-1] if scores[i] > 0), 1)}
+        passed = sorted((k for k, v in (semantic or {}).items() if v >= semantic_min), key=lambda k: -semantic[k])
+        meaning_rank = {name: r for r, name in enumerate(passed, start=1)}
+        below = {
+            i for i, (kind, item, _) in enumerate(self.entries)
+            if kind == "metric" and item["name"] in (semantic or {}) and item["name"] not in meaning_rank
+        }
+
+        if semantic is None:
+            log.info("후보 (TF-IDF 만, 의미 검색 꺼짐) — 상위 %d개 선택", top_k)
+        else:
+            log.info("후보 (결합 = 1/(%d+TF-IDF 순위) + 1/(%d+의미 순위), 의미 기준 %.2f) — 상위 %d개 선택",
+                     RRF_K, RRF_K, semantic_min, top_k)
+
+        # 기준 미만이어도 TF-IDF 로 걸렸으면 이미 순위 안에 있다 — 순위 밖인 것만 아래에 붙인다
+        rows = ranked + sorted(below - set(ranked), key=lambda i: -semantic[self.entries[i][1]["name"]])
+        for pos, idx in enumerate(rows[:MAX_LOG_ROWS]):
             kind, item, text = self.entries[idx]
-            doc = set(korean_aware_tokens(text))
-            log.info("후보 %d: [%s] %s 점수=%.3f 겹친 토큰=%s", rank, kind, item["name"], scores[idx],
-                     [t for t in dict.fromkeys(used) if t in doc])
+            mark = f"#{pos + 1:<2d} {'✔' if pos < top_k else ' '}" if pos < len(ranked) else "-    "
+            line = f"{mark} [{kind}] {item['name']}"
+            line += f"  TF-IDF {scores[idx]:.3f} ({keyword_rank[idx]}위)" if idx in keyword_rank else "  TF-IDF -"
+            if semantic is not None:
+                meaning = semantic.get(item["name"]) if kind == "metric" else None
+                if meaning is None:
+                    line += " | 의미 -"
+                elif item["name"] in meaning_rank:
+                    line += f" | 의미 {meaning:.3f} ({meaning_rank[item['name']]}위)"
+                else:
+                    line += f" | 의미 {meaning:.3f} (기준 미만)"
+                parts = []
+                if idx in keyword_rank:
+                    parts.append(1 / (RRF_K + keyword_rank[idx]))
+                if item["name"] in meaning_rank and kind == "metric":
+                    parts.append(1 / (RRF_K + meaning_rank[item["name"]]))
+                line += (f" | 결합 {sum(parts):.4f} (" + " + ".join(f"{p:.4f}" for p in parts) + ")") if parts else " | 결합 -"
+            overlap = [t for t in used if t in set(korean_aware_tokens(text))]
+            if overlap:
+                line += f" | 겹친 토큰 {overlap}"
+            log.info("  %s", line)
+        if len(rows) > MAX_LOG_ROWS:
+            log.info("  … 외 %d개", len(rows) - MAX_LOG_ROWS)

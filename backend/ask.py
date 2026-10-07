@@ -71,12 +71,15 @@ def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = No
 
 
 def run_question(contract: dict, question: str, model, top_k: int = 3,
-                 today: datetime.date | None = None) -> dict:
+                 today: datetime.date | None = None, semantic: dict[str, float] | None = None,
+                 semantic_min: float = 0.0) -> dict:
     """질문 하나를 처리한다. 상태는 이 호출 안에서만 산다.
 
+    semantic: 의미 검색이 낸 {지표 이름: 유사도}, semantic_min 미만은 후보에서 뺀다.
+    없으면 TF-IDF 만으로 후보를 고른다.
     돌려주는 것: {sql, error, attempts, ast, clarification}
     """
-    pruned = Pruner(contract).prune(question, top_k=top_k)
+    pruned = Pruner(contract).prune(question, top_k=top_k, semantic=semantic, semantic_min=semantic_min)
     record: dict = {}
     tools = [make_compile_tool(Compiler(contract), question, record), make_clarify_tool(question)]
     graph = build_graph(model, tools)

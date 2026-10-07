@@ -61,7 +61,9 @@ nl2sql/
 │   ├── relations.py        # 테이블 관계 (FK·수동)
 │   ├── annotations.py      # 용어·코드 사전
 │   ├── contract.py         # 계약서 로드, 깨진 지표 판정
-│   ├── pruner.py           # TF-IDF 프루닝
+│   ├── pruner.py           # TF-IDF 프루닝 (+ 의미 검색 순위 결합)
+│   ├── embedding.py        # 지표 임베딩 계산·저장·검색 (pgvector, 선택)
+│   ├── schema_vector.sql   # 의미 검색용 스키마 (EMBED_MODEL 이 있을 때만)
 │   ├── compiler.py         # AST 정규화·검증 + SQL 조립
 │   ├── tool.py             # compile_sql · ask_user 도구
 │   ├── graph.py            # LangGraph 에이전트 루프
@@ -87,6 +89,22 @@ nl2sql/
 | `LLM_API_KEY` | LLM API 키 |
 | `LLM_MODEL` | 모델 이름 (예: gpt-3.5-turbo) |
 | `AUTO_SYNC_MINUTES` | 자동 동기화 주기(분). 0 또는 비우면 끔 (기본) |
+| `EMBED_MODEL` | 지표 의미 검색용 임베딩 모델 (예: `BAAI/bge-m3`). 비우면 끔 (기본) — 아래 '지표 의미 검색' 참고 |
+| `EMBED_MIN_SCORE` | 의미 검색 최소 유사도. 이보다 낮은 지표는 후보에서 뺌 (기본 0.5) |
+| `EMBED_DEVICE` | 임베딩 실행 장치 (`cpu`, `cuda`). 비우면 자동 |
+
+## 지표 의미 검색 (선택)
+
+질문의 후보 지표를 TF-IDF(글자 조각 일치)와 임베딩(뜻이 비슷한 정도) 두 가지로 찾고, 두 순위를 RRF 로 합칩니다.
+"차 컨디션" 처럼 지표 설명과 글자가 겹치지 않는 말투도 지표를 찾습니다. 테이블 검색은 TF-IDF 그대로입니다.
+
+1. 메타데이터 DB 에 pgvector 확장 (Docker 라면 이미지를 `pgvector/pgvector:pg15` 처럼 바꿈)
+2. `uv sync --extra embedding` — sentence-transformers(torch 포함) 설치
+3. `backend/.env` 에 `EMBED_MODEL=BAAI/bge-m3`
+
+기동하면 `schema_vector.sql` 이 확장과 `datasource_metric_embedding` 표를 만들고, 백그라운드에서 모델을 올려 모든 지표의 벡터를 계산합니다.
+지표를 저장하면 그 데이터소스에서 바뀐 지표만 다시 계산합니다 (이름·설명 1개 + 예시 질문마다 1개).
+의미 검색이 실패하면 질문은 TF-IDF 만으로 계속 처리되고 로그에 남습니다. 후보별 TF-IDF·의미·결합 점수도 `nl2sql.pruner` 로그에 남습니다.
 
 ## API 엔드포인트
 
@@ -135,8 +153,11 @@ uv run python backend/evaluate.py --cases eval/shoppingmall_cases.json --contrac
 # 평가셋: 실제 LLM 으로 정확도 측정 (리포트는 eval/reports/)
 uv run python backend/evaluate.py --cases eval/shoppingmall_cases.json --contract eval/shoppingmall_contract.json
 
-# 질문 기록에서 내보낸 평가셋을 실제 데이터소스 계약서로
+# 질문 기록에서 내보낸 평가셋을 실제 데이터소스 계약서로 (EMBED_MODEL 이 있으면 의미 검색 포함)
 uv run python backend/evaluate.py --cases eval-내보낸파일.json --datasource-id <uuid>
+
+# 같은 평가셋을 TF-IDF 만으로 — 의미 검색 효과 비교용
+uv run python backend/evaluate.py --cases eval-내보낸파일.json --datasource-id <uuid> --no-semantic
 ```
 
 평가는 기대 SQL 과의 문자열 일치(`accuracy`)와 별칭 이름 차이를 무시한 일치(`accuracy_alias_insensitive`)를 함께 냅니다.

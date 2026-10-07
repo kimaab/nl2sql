@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import threading
 from pathlib import Path
 from uuid import UUID
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from fastapi.responses import JSONResponse
 from langchain_openai import ChatOpenAI
 
 import db
+import embedding
 from logging_config import configure_logging
 from models import (
     Annotation,
@@ -67,6 +69,8 @@ async def lifespan(app: FastAPI):
     """애플리케이션 생명주기"""
     db.init_pool()
     _init_schema()
+    if embedding.enabled():
+        threading.Thread(target=embedding.warm_up, name="embedding-warm-up", daemon=True).start()
     auto_sync = AutoSync.from_env(sync_datasource)
     auto_sync.start()
 
@@ -94,11 +98,15 @@ def _init_schema():
     실패하면 기동을 멈춘다. 로그만 남기고 계속 뜨면 화면은 멀쩡해 보이는데
     모든 요청이 깨지고, 원인이 기동 로그 한 줄에만 남는다.
     """
-    schema = (BASE_DIR / "schema.sql").read_text(encoding="utf-8")
+    files = ["schema.sql"]
+    # 의미 검색을 켰는데 pgvector 가 없으면 여기서 멈춘다 — 조용히 TF-IDF 로만 돌면 켠 줄 안다.
+    if embedding.enabled():
+        files.append("schema_vector.sql")
     with db.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(schema)
-    log.info("Database schema initialized")
+            for name in files:
+                cur.execute((BASE_DIR / name).read_text(encoding="utf-8"))
+    log.info("Database schema initialized (%s)", ", ".join(files))
 
 
 @app.exception_handler(ApiException)
@@ -233,7 +241,9 @@ def post_ask(req: AskRequest):
         model=os.environ.get("LLM_MODEL", "gpt-3.5-turbo"),
         temperature=0.0,
     )
-    outcome = run_question(contract, req.question, model)
+    outcome = run_question(contract, req.question, model,
+                           semantic=embedding.semantic_scores(req.datasource_id, req.question),
+                           semantic_min=embedding.min_score())
     elapsed_ms = (time.monotonic() - started) * 1000
 
     if outcome["sql"]:

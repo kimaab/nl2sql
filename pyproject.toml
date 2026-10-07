@@ -22,6 +22,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 
+[project.optional-dependencies]
+embedding = [
+    "sentence-transformers>=3.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["backend*"]

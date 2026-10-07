@@ -3,6 +3,7 @@ import logging
 from uuid import UUID, uuid4
 
 import db
+import embedding
 from compiler import (
     FILTER_SOURCES, Compiler, build_scope, compile_formula, is_numeric_type, parse_temporal, resolve_ref,
     resolve_relative, temporal_kind,
@@ -59,6 +60,7 @@ def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
             _record_history(cur, datasource_id, metric_id, 1, "create")
 
     log.info("metric created: %s (%s, kind=%s)", metric_id, input_data.name, input_data.kind.value)
+    embedding.refresh_quietly(datasource_id)
     return get_metric(datasource_id, metric_id)
 
 
@@ -83,6 +85,7 @@ def update_metric(datasource_id: UUID, metric_id: UUID, input_data: MetricInput)
             _record_history(cur, datasource_id, metric_id, version, "update")
 
     log.info("metric updated: %s (%s, v%d)", metric_id, input_data.name, version)
+    embedding.refresh_quietly(datasource_id)
     return get_metric(datasource_id, metric_id)
 
 
