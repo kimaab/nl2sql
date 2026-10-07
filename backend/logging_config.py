@@ -21,7 +21,7 @@ def configure_logging() -> None:
     # 파일 핸들러
     file_handler = logging.handlers.RotatingFileHandler(
         LOG_DIR / "nl2sql.log",
-        maxBytes=5_000_000,
+        maxBytes=5_000,
         backupCount=3,
         encoding="utf-8"
     )

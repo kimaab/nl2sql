@@ -1,7 +1,10 @@
+import logging
 import re
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+log = logging.getLogger("nl2sql.pruner")
 
 
 def korean_aware_tokens(text: str) -> list[str]:
@@ -54,11 +57,23 @@ class Pruner:
         )
         self.matrix = self.vectorizer.fit_transform([e[2] for e in self.entries])
 
+        vocab_size = len(self.vectorizer.vocabulary_)
+        log.info("단어 사전 %d개 (테이블 %d, 지표 %d)", vocab_size,
+                 sum(1 for e in self.entries if e[0] == "table"), sum(1 for e in self.entries if e[0] == "metric"))
+        for kind, item, text in self.entries:
+            words = sorted(set(korean_aware_tokens(text)))
+            if kind == "metric":
+                log.info("지표 사전: %s -> %s", item["name"], words)
+            else:
+                log.info("테이블 사전: %s -> 단어 %d개 (컬럼 %d개) %s",
+                         item["name"], len(words), len(item["columns"]), words)
+
     def prune(self, question: str, top_k: int = 3) -> dict:
         """질문과 관련된 항목 선택"""
         query_vec = self.vectorizer.transform([question])
         scores = cosine_similarity(query_vec, self.matrix).flatten()
         order = np.argsort(scores)[::-1][:top_k]
+        self._log_search(question, scores, order)
 
         tables, metrics, seen = [], [], set()
 
@@ -101,4 +116,18 @@ class Pruner:
             r for r in self._relations
             if r["left_table"] in seen and r["right_table"] in seen
         ]
+        log.info("선택: 지표=%s 테이블=%s", [m["name"] for m in metrics], [t["name"] for t in tables])
         return {"tables": tables, "metrics": metrics, "relations": relations}
+
+    def _log_search(self, question: str, scores, order) -> None:
+        """질문 토큰 중 사전에 있어 비교에 쓰인 것과 사전에 없어 무시된 것, 상위 후보를 남긴다."""
+        vocab = self.vectorizer.vocabulary_
+        tokens = korean_aware_tokens(question)
+        used = [t for t in tokens if t in vocab]
+        log.info("질문=%r 토큰=%s 사용=%s 무시(사전에 없음)=%s", question, tokens, used,
+                 [t for t in tokens if t not in vocab])
+        for rank, idx in enumerate(order, start=1):
+            kind, item, text = self.entries[idx]
+            doc = set(korean_aware_tokens(text))
+            log.info("후보 %d: [%s] %s 점수=%.3f 겹친 토큰=%s", rank, kind, item["name"], scores[idx],
+                     [t for t in dict.fromkeys(used) if t in doc])
