@@ -6,9 +6,9 @@ import { errorMessage, formatAgo, formatDateTime } from "../../lib/format";
 
 type Result = { tone: "info" | "ok" | "warn" | "danger"; text: string };
 
-export function DatasourceSync() {
+export function SystemSync() {
   const [params, setParams] = useSearchParams();
-  const [items, setItems] = useState<api.Datasource[] | null>(null);
+  const [items, setItems] = useState<api.System[] | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
 
@@ -17,11 +17,11 @@ export function DatasourceSync() {
 
   useEffect(() => {
     api
-      .listDatasources()
+      .listSystems()
       .then(setItems)
       .catch((err) => {
         setItems([]);
-        setResult({ tone: "danger", text: "데이터소스를 불러오지 못했습니다: " + errorMessage(err) });
+        setResult({ tone: "danger", text: "시스템을 불러오지 못했습니다: " + errorMessage(err) });
       });
   }, []);
 
@@ -30,7 +30,7 @@ export function DatasourceSync() {
     try {
       setSyncing(true);
       setResult({ tone: "info", text: "대상 DB에 접속해 스키마를 읽는 중입니다..." });
-      const r = await api.syncDatasource(selected.id);
+      const r = await api.syncSystem(selected.id);
       // 접속은 됐는데 0건이면 스키마 이름이나 Oracle owner 오타일 때가 많다.
       // 빨갛지 않아서 제일 오래 붙잡게 되는 실패라 경고로 띄운다.
       setResult(
@@ -54,7 +54,7 @@ export function DatasourceSync() {
                   "를 읽었습니다",
               }
       );
-      setItems(await api.listDatasources());
+      setItems(await api.listSystems());
     } catch (err) {
       setResult({ tone: "danger", text: "동기화 실패: " + errorMessage(err) });
     } finally {
@@ -74,10 +74,10 @@ export function DatasourceSync() {
       {items.length === 0 ? (
         <div className="card">
           <EmptyState
-            title="동기화할 데이터소스가 없습니다"
+            title="동기화할 시스템이 없습니다"
             action={
-              <Link to="/datasources/new">
-                <Button variant="primary">데이터소스 등록</Button>
+              <Link to="/systems/new">
+                <Button variant="primary">시스템 등록</Button>
               </Link>
             }
           />
@@ -85,7 +85,7 @@ export function DatasourceSync() {
       ) : (
         <div className="card">
           <div className="card-pad stack">
-            <Field label="데이터소스">
+            <Field label="시스템">
               <select
                 className="select"
                 value={selectedId}

@@ -8,56 +8,57 @@ from compiler import build_scope, compile_formula, resolve_ref
 log = logging.getLogger("nl2sql.contract")
 
 
-def load_tables(datasource_id: UUID) -> dict:
-    """저장된 스키마를 {테이블명: {name, description, columns}} 로. 컬럼에는 동의어·코드 사전이 붙는다."""
-    rows = db.query("""
-        SELECT t.name AS table_name, t.description AS table_note,
-               c.name AS column_name, c.data_type, c.description AS column_note
-          FROM datasource_table t
-          LEFT JOIN datasource_column c ON c.table_id = t.id
-         WHERE t.datasource_id = %s
-         ORDER BY t.name, c.ordinal
-    """, str(datasource_id))
+def load_tables(system_id: UUID) -> dict:
+    """살아 있는 스키마를 {테이블명: {id, name, description, purpose, card, card_line, columns}} 로.
 
-    annotations = {
-        (a["table_name"], a["column_name"]): a
-        for a in db.query(
-            "SELECT table_name, column_name, synonyms, codes FROM column_annotation WHERE datasource_id = %s",
-            str(datasource_id),
-        )
-    }
+    컬럼에는 동의어·코드 사전이 붙는다. 삭제 표시된 테이블·컬럼은 빠진다.
+    카드는 승인된 것만 싣는다 — 초안은 질문 처리에 쓰지 않는다.
+    """
+    rows = db.query("""
+        SELECT t.id AS table_id, t.name AS table_name, t.comment AS table_note, t.purpose,
+               t.card, t.card_line, t.card_status,
+               c.name AS column_name, c.data_type, c.comment AS column_note, c.is_pk, c.synonyms, c.codes
+          FROM meta_table t
+          LEFT JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
+         WHERE t.system_id = %s AND t.deleted_at IS NULL
+         ORDER BY t.name, c.ordinal
+    """, str(system_id))
 
     tables = {}
     for r in rows:
+        approved = r["card_status"] == "approved"
         table = tables.setdefault(r["table_name"], {
+            "id": str(r["table_id"]),
             "name": r["table_name"],
             "description": r["table_note"] or "",
-            "columns": []
+            "purpose": r["purpose"] or "",
+            "card": r["card"] if approved else "",
+            "card_line": r["card_line"] if approved else "",
+            "columns": [],
         })
         if r["column_name"] is not None:
-            column = {
-                "name": r["column_name"],
-                "type": r["data_type"] or "",
-                "description": r["column_note"] or ""
-            }
-            note = annotations.get((r["table_name"], r["column_name"]))
-            if note:
-                if note["synonyms"]:
-                    column["synonyms"] = note["synonyms"]
-                if note["codes"]:
-                    column["codes"] = note["codes"]
+            column = {"name": r["column_name"], "type": r["data_type"] or "", "description": r["column_note"] or ""}
+            if r["is_pk"]:
+                column["is_pk"] = True
+            if r["synonyms"]:
+                column["synonyms"] = r["synonyms"]
+            if r["codes"]:
+                column["codes"] = r["codes"]
             table["columns"].append(column)
     return tables
 
 
-def load_relations(datasource_id: UUID, tables: dict) -> list[dict]:
-    """두 테이블이 모두 스키마에 남아 있는 관계만 돌려준다."""
+def load_relations(system_id: UUID, tables: dict) -> list[dict]:
+    """두 테이블과 컬럼이 모두 살아 있는 관계만 돌려준다."""
     out = []
     for r in db.query("""
-        SELECT constraint_name, left_table, left_column, right_table, right_column
-          FROM datasource_relation WHERE datasource_id = %s
-         ORDER BY constraint_name, left_table, left_column
-    """, str(datasource_id)):
+        SELECT r.constraint_name, lt.name AS left_table, r.left_column, rt.name AS right_table, r.right_column
+          FROM meta_relation r
+          JOIN meta_table lt ON lt.id = r.left_table_id
+          JOIN meta_table rt ON rt.id = r.right_table_id
+         WHERE r.system_id = %s
+         ORDER BY r.constraint_name, lt.name, r.left_column
+    """, str(system_id)):
         left = tables.get(r["left_table"])
         right = tables.get(r["right_table"])
         if not left or not right:
@@ -74,43 +75,91 @@ def load_relations(datasource_id: UUID, tables: dict) -> list[dict]:
     return out
 
 
-def load_contract(datasource_id: UUID) -> dict:
-    """메타데이터 DB에서 계약서(스키마) 로드"""
-    row = db.one(
-        "SELECT id, name, driver FROM datasource WHERE id = %s",
-        str(datasource_id)
-    )
+def load_metric_rows(system_id: UUID) -> list[dict]:
+    """지표 행 + 기본 테이블 이름. table_name 키는 정의 검사·전개 코드가 그대로 쓴다."""
+    return db.query("""
+        SELECT m.*, t.name AS table_name
+          FROM metric m JOIN meta_table t ON t.id = m.base_table_id
+         WHERE m.system_id = %s ORDER BY m.name
+    """, str(system_id))
+
+
+def load_contract(system_id: UUID, active_only: bool = False) -> dict:
+    """메타데이터 DB에서 계약서 로드.
+
+    active_only=True 는 질문 처리용 — 승인된 예시 질문이 있는 active 지표만 싣는다.
+    False 는 컴파일·지표 검사용 — draft 도 싣는다. broken·retired 는 어느 쪽에도 없다.
+    """
+    row = db.one("SELECT id, code, name, domain_desc, driver FROM meta_system WHERE id = %s", str(system_id))
     if row is None:
-        raise ApiException(404, "데이터소스를 찾을 수 없습니다")
+        raise ApiException(404, "시스템을 찾을 수 없습니다")
 
-    tables = load_tables(datasource_id)
+    tables = load_tables(system_id)
     if not tables:
-        raise ApiException(
-            400,
-            f"'{row['name']}'의 스키마가 비어 있습니다. "
-            "데이터소스 화면에서 스키마 읽기를 먼저 실행하십시오"
-        )
+        raise ApiException(400, f"'{row['name']}'의 스키마가 비어 있습니다. 시스템 화면에서 동기화를 먼저 실행하십시오")
 
-    metric_rows = db.query(
-        "SELECT * FROM datasource_metric WHERE datasource_id = %s ORDER BY name",
-        str(datasource_id)
-    )
-    broken = broken_reasons(metric_rows, tables)
+    statuses = ("active",) if active_only else ("active", "draft")
+    metric_rows = [m for m in load_metric_rows(system_id) if m["status"] in statuses]
+    links: dict = {}
+    for r in db.query("""
+        SELECT mt.metric_id, t.name FROM metric_table mt
+          JOIN metric m ON m.id = mt.metric_id JOIN meta_table t ON t.id = mt.table_id
+         WHERE m.system_id = %s AND t.deleted_at IS NULL ORDER BY mt.role, t.name
+    """, str(system_id)):
+        links.setdefault(r["metric_id"], []).append(r["name"])
+    examples: dict = {}
+    for r in db.query("""
+        SELECT e.metric_id, e.question, e.ast FROM metric_example e JOIN metric m ON m.id = e.metric_id
+         WHERE m.system_id = %s AND e.status = 'approved' ORDER BY e.id
+    """, str(system_id)):
+        examples.setdefault(r["metric_id"], []).append({"question": r["question"], "ast": r["ast"]})
+
     metrics = []
     for m in metric_rows:
-        # 모델에게 보여주면 컴파일 단계에서 반드시 실패하는 AST를 유도한다.
-        if m["name"] in broken:
-            log.warning("깨진 지표를 제외합니다: %s — %s", m["name"], broken[m["name"]])
-            continue
-        metrics.append(metric_entry(m))
+        entry = metric_entry({**m, "examples": examples.get(m["id"], [])})
+        entry["tables"] = links.get(m["id"], [m["table_name"]])
+        if m.get("synonyms"):
+            entry["synonyms"] = m["synonyms"]
+        metrics.append(entry)
 
+    from glossary import load_for_contract
     return {
         "name": row["name"],
+        "code": row["code"],
+        "domain": row["domain_desc"],
         "driver": row["driver"],
         "tables": list(tables.values()),
-        "relations": load_relations(datasource_id, tables),
-        "metrics": metrics
+        "relations": load_relations(system_id, tables),
+        "metrics": metrics,
+        "glossary": load_for_contract(system_id),
     }
+
+
+def metric_tables(m: dict, by_name: dict) -> list[tuple[str, str]]:
+    """지표가 쓰는 테이블 [(이름, role)]. 기본 테이블 → base, 조인 → join, 파생은 구성 지표의 테이블 → join.
+
+    metric_table 의 정의(origin=definition) 행을 만드는 규칙이다.
+    """
+    out = [(m["table_name"], "base")]
+    for j in m.get("joins") or []:
+        if j.get("table"):
+            out.append((j["table"], "join"))
+    if m.get("kind") == "derived" and m.get("expression"):
+        names: list = []
+        try:
+            compile_formula(m["expression"], lambda n: names.append(n) or "x")
+        except ValueError:
+            pass
+        for n in names:
+            comp = by_name.get(n.lower())
+            if comp:
+                out.append((comp["table_name"], "join"))
+    seen, unique = set(), []
+    for name, role in out:
+        if name.lower() not in seen:
+            seen.add(name.lower())
+            unique.append((name, role))
+    return unique
 
 
 def metric_entry(m: dict) -> dict:
@@ -230,8 +279,3 @@ def _broken_reason(m: dict, columns: dict) -> str | None:
     return None
 
 
-def broken_metric_list(datasource_id: UUID) -> list[dict]:
-    """동기화 직후 알림용: [{name, reason}]"""
-    tables = load_tables(datasource_id)
-    rows = db.query("SELECT * FROM datasource_metric WHERE datasource_id = %s", str(datasource_id))
-    return [{"name": k, "reason": v} for k, v in sorted(broken_reasons(rows, tables).items())]

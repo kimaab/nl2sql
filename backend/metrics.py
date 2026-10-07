@@ -7,165 +7,254 @@ from compiler import (
     FILTER_SOURCES, Compiler, build_scope, compile_formula, is_numeric_type, parse_temporal, resolve_ref,
     resolve_relative, temporal_kind,
 )
-from contract import load_contract, load_tables, metric_entry
-from models import ApiException, Metric, MetricHistoryEntry, MetricInput, MetricKind
+from contract import broken_reasons, load_contract, load_metric_rows, load_tables, metric_entry, metric_tables
+from models import ApiException, Metric, MetricExample, MetricHistoryEntry, MetricInput, MetricKind
 
 log = logging.getLogger("nl2sql.metrics")
 
 
-def list_metrics(datasource_id: UUID) -> list[Metric]:
-    """지표 목록"""
-    rows = db.query(
-        "SELECT * FROM datasource_metric WHERE datasource_id = %s ORDER BY created_at DESC",
-        str(datasource_id)
-    )
-    return [_row_to_metric(r) for r in rows]
+def list_metrics(system_id: UUID) -> list[Metric]:
+    rows = db.query("""
+        SELECT m.*, t.name AS table_name FROM metric m JOIN meta_table t ON t.id = m.base_table_id
+         WHERE m.system_id = %s ORDER BY m.created_at DESC
+    """, str(system_id))
+    examples = _examples([r["id"] for r in rows])
+    return [_row_to_metric(r, examples.get(r["id"], {})) for r in rows]
 
 
-def get_metric(datasource_id: UUID, metric_id: UUID) -> Metric:
-    """지표 조회"""
-    return _row_to_metric(_get_row(datasource_id, metric_id))
+def get_metric(system_id: UUID, metric_id: UUID) -> Metric:
+    row = _get_row(system_id, metric_id)
+    return _row_to_metric(row, _examples([row["id"]]).get(row["id"], {}))
 
 
-def _get_row(datasource_id: UUID, metric_id: UUID) -> dict:
-    row = db.one(
-        "SELECT * FROM datasource_metric WHERE id = %s AND datasource_id = %s",
-        str(metric_id),
-        str(datasource_id)
-    )
+def _get_row(system_id: UUID, metric_id: UUID) -> dict:
+    row = db.one("""
+        SELECT m.*, t.name AS table_name FROM metric m JOIN meta_table t ON t.id = m.base_table_id
+         WHERE m.id = %s AND m.system_id = %s
+    """, str(metric_id), str(system_id))
     if row is None:
         raise ApiException(404, "지표를 찾을 수 없습니다")
     return row
 
 
-def create_metric(datasource_id: UUID, input_data: MetricInput) -> Metric:
-    """지표 생성.
+def _examples(metric_ids: list) -> dict:
+    """{metric_id: {"approved": [..], "drafts": n}}"""
+    out: dict = {}
+    if not metric_ids:
+        return out
+    for r in db.query("""
+        SELECT metric_id, question, ast, origin, status FROM metric_example
+         WHERE metric_id = ANY(%s) AND status IN ('approved', 'draft') ORDER BY id
+    """, [str(i) for i in metric_ids]):
+        slot = out.setdefault(r["metric_id"], {"approved": [], "drafts": 0})
+        if r["status"] == "approved":
+            slot["approved"].append(MetricExample(question=r["question"], ast=r["ast"], origin=r["origin"]))
+        else:
+            slot["drafts"] += 1
+    return out
 
-    가리키는 테이블·컬럼이 저장된 스키마에 실제로 있는지 여기서 확인한다.
-    질문 시점에 발견하면 사용자는 왜 실패하는지 알 수 없다.
-    """
-    _guard_duplicate_name(datasource_id, input_data.name)
-    table_name = _validate(datasource_id, input_data)
+
+def create_metric(system_id: UUID, data: MetricInput, actor: str | None = None) -> Metric:
+    """지표 생성. 가리키는 테이블·컬럼이 저장된 스키마에 실제로 있는지 여기서 확인한다."""
+    _guard_duplicate_name(system_id, data.name)
+    table_name = _validate(system_id, data)
+    tables = load_tables(system_id)
 
     metric_id = uuid4()
     with db.connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO datasource_metric
-                (id, datasource_id, name, description, kind, table_name,
-                 joins, agg_field, agg_function, select_columns, expression, fixed_filters, examples, series)
+                INSERT INTO metric (id, system_id, name, description, kind, base_table_id, joins, agg_field,
+                                    agg_function, select_columns, expression, series, fixed_filters, synonyms)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (str(metric_id), str(datasource_id), *_values(input_data, table_name)))
-            _record_history(cur, datasource_id, metric_id, 1, "create")
+            """, (str(metric_id), str(system_id), *_values(data, tables[table_name]["id"])))
+            _save_examples(cur, metric_id, data.examples)
+            _record_history(cur, system_id, metric_id, 1, "create", actor)
+    _after_save(system_id, metric_id)
+    log.info("metric created: %s (%s, kind=%s)", metric_id, data.name, data.kind.value)
+    return get_metric(system_id, metric_id)
 
-    log.info("metric created: %s (%s, kind=%s)", metric_id, input_data.name, input_data.kind.value)
-    return get_metric(datasource_id, metric_id)
 
-
-def update_metric(datasource_id: UUID, metric_id: UUID, input_data: MetricInput) -> Metric:
+def update_metric(system_id: UUID, metric_id: UUID, data: MetricInput, actor: str | None = None) -> Metric:
     """지표 수정. 버전을 올리고 이전 정의는 이력에 남는다."""
-    current = _get_row(datasource_id, metric_id)
-    _guard_duplicate_name(datasource_id, input_data.name, except_id=metric_id)
-    if current["name"].lower() != input_data.name.lower() or input_data.kind is not MetricKind.AGGREGATE:
-        _guard_not_referenced(datasource_id, current["name"], "이름을 바꾸거나 집계형이 아니게 바꿀")
-    table_name = _validate(datasource_id, input_data)
+    current = _get_row(system_id, metric_id)
+    _guard_duplicate_name(system_id, data.name, except_id=metric_id)
+    if current["name"].lower() != data.name.lower() or data.kind is not MetricKind.AGGREGATE:
+        _guard_not_referenced(system_id, current["name"], "이름을 바꾸거나 집계형이 아니게 바꿀")
+    table_name = _validate(system_id, data)
+    tables = load_tables(system_id)
 
     version = current["version"] + 1
     with db.connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE datasource_metric SET
-                    name = %s, description = %s, kind = %s, table_name = %s, joins = %s,
-                    agg_field = %s, agg_function = %s, select_columns = %s, expression = %s,
-                    fixed_filters = %s, examples = %s, series = %s, version = %s, updated_at = now()
-                WHERE id = %s AND datasource_id = %s
-            """, (*_values(input_data, table_name), version, str(metric_id), str(datasource_id)))
-            _record_history(cur, datasource_id, metric_id, version, "update")
+                UPDATE metric SET name = %s, description = %s, kind = %s, base_table_id = %s, joins = %s,
+                       agg_field = %s, agg_function = %s, select_columns = %s, expression = %s, series = %s,
+                       fixed_filters = %s, synonyms = %s, version = %s, updated_at = now()
+                 WHERE id = %s AND system_id = %s
+            """, (*_values(data, tables[table_name]["id"]), version, str(metric_id), str(system_id)))
+            _save_examples(cur, metric_id, data.examples)
+            _record_history(cur, system_id, metric_id, version, "update", actor)
+    _after_save(system_id, metric_id)
+    log.info("metric updated: %s (%s, v%d)", metric_id, data.name, version)
+    return get_metric(system_id, metric_id)
 
-    log.info("metric updated: %s (%s, v%d)", metric_id, input_data.name, version)
-    return get_metric(datasource_id, metric_id)
 
-
-def delete_metric(datasource_id: UUID, metric_id: UUID) -> None:
+def delete_metric(system_id: UUID, metric_id: UUID, actor: str | None = None) -> None:
     """지표 삭제. 마지막 정의는 이력에 남는다."""
-    row = db.one(
-        "SELECT name, version FROM datasource_metric WHERE id = %s AND datasource_id = %s",
-        str(metric_id), str(datasource_id),
-    )
+    row = db.one("SELECT name, version FROM metric WHERE id = %s AND system_id = %s", str(metric_id), str(system_id))
     if row is None:
         return
-    _guard_not_referenced(datasource_id, row["name"], "지울")
+    _guard_not_referenced(system_id, row["name"], "지울")
     with db.connection() as conn:
         with conn.cursor() as cur:
-            _record_history(cur, datasource_id, metric_id, row["version"], "delete")
-            cur.execute(
-                "DELETE FROM datasource_metric WHERE id = %s AND datasource_id = %s",
-                (str(metric_id), str(datasource_id))
-            )
-
+            _record_history(cur, system_id, metric_id, row["version"], "delete", actor)
+            cur.execute("DELETE FROM metric WHERE id = %s AND system_id = %s", (str(metric_id), str(system_id)))
     log.info("metric deleted: %s", metric_id)
 
 
-def list_metric_history(datasource_id: UUID, metric_id: UUID) -> list[MetricHistoryEntry]:
+def list_metric_history(system_id: UUID, metric_id: UUID) -> list[MetricHistoryEntry]:
     rows = db.query("""
-        SELECT version, action, snapshot, created_at FROM datasource_metric_history
-         WHERE datasource_id = %s AND metric_id = %s ORDER BY id DESC
-    """, str(datasource_id), str(metric_id))
+        SELECT version, action, snapshot, created_at FROM metric_history
+         WHERE system_id = %s AND metric_id = %s ORDER BY id DESC
+    """, str(system_id), str(metric_id))
     if not rows:
         raise ApiException(404, "지표 이력을 찾을 수 없습니다")
-    return [
-        MetricHistoryEntry(version=r["version"], action=r["action"], snapshot=r["snapshot"],
-                           created_at=r["created_at"].isoformat())
-        for r in rows
-    ]
+    return [MetricHistoryEntry(version=r["version"], action=r["action"], snapshot=r["snapshot"],
+                               created_at=r["created_at"].isoformat()) for r in rows]
 
 
-def _record_history(cur, datasource_id: UUID, metric_id: UUID, version: int, action: str) -> None:
+# ── 저장 뒤처리: 테이블 연결 · 상태 · 보강 대기열 ───────────────────────────
+
+def _after_save(system_id: UUID, metric_id: UUID) -> None:
+    rebuild_metric_tables(system_id, metric_id)
+    refresh_statuses(system_id)
+    with db.connection() as conn:
+        conn.execute("""
+            INSERT INTO enrich_job (target_type, target_id, reason) VALUES ('metric', %s, 'changed')
+            ON CONFLICT (target_type, target_id) WHERE status = 'queued' DO NOTHING
+        """, (str(metric_id),))
+
+
+def rebuild_metric_tables(system_id: UUID, metric_id: UUID) -> None:
+    """정의에서 metric_table(origin=definition) 을 다시 만든다. 사람이 더한 manual 행은 남긴다."""
+    rows = load_metric_rows(system_id)
+    by_name = {r["name"].lower(): r for r in rows}
+    target = next((r for r in rows if str(r["id"]) == str(metric_id)), None)
+    if target is None:
+        return
+    tables = load_tables(system_id)
+    links = [(tables[n]["id"], role) for n, role in metric_tables(target, by_name) if n in tables]
+    with db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM metric_table WHERE metric_id = %s AND origin = 'definition'", (str(metric_id),))
+            cur.executemany("""
+                INSERT INTO metric_table (metric_id, table_id, role, origin) VALUES (%s, %s, %s, 'definition')
+                ON CONFLICT (metric_id, table_id) DO NOTHING
+            """, [(str(metric_id), tid, role) for tid, role in links])
+
+
+def refresh_statuses(system_id: UUID) -> list[dict]:
+    """지표 상태를 다시 매긴다: 깨졌으면 broken, 승인된 예시 질문이 있으면 active, 아니면 draft.
+
+    retired 는 사람이 정한 것이라 건드리지 않는다. 깨진 지표 [{name, reason}] 를 돌려준다.
+    """
+    rows = [r for r in load_metric_rows(system_id) if r["status"] != "retired"]
+    broken = broken_reasons(rows, load_tables(system_id))
+    with_examples = {r["metric_id"] for r in db.query("""
+        SELECT DISTINCT e.metric_id FROM metric_example e JOIN metric m ON m.id = e.metric_id
+         WHERE m.system_id = %s AND e.status = 'approved'
+    """, str(system_id))}
+    updates = []
+    for r in rows:
+        if r["name"] in broken:
+            status, reason = "broken", broken[r["name"]]
+        else:
+            status, reason = ("active" if r["id"] in with_examples else "draft"), None
+        if status != r["status"] or reason != r["broken_reason"]:
+            updates.append((status, reason, str(r["id"])))
+    if updates:
+        with db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany("UPDATE metric SET status = %s, broken_reason = %s WHERE id = %s", updates)
+    return [{"name": k, "reason": v} for k, v in sorted(broken.items())]
+
+
+def _save_examples(cur, metric_id: UUID, examples: list[MetricExample]) -> None:
+    """화면에서 온 예시 목록으로 승인된 예시를 맞춘다. 검수 대기(draft) 초안은 건드리지 않는다.
+
+    같은 질문이 이미 있으면 출처(origin)를 지킨다 — LLM 초안을 승인한 것이 사람이 쓴 것으로 바뀌지 않게.
+    """
+    cur.execute("SELECT id, lower(question), origin FROM metric_example WHERE metric_id = %s AND status = 'approved'",
+                (str(metric_id),))
+    existing = {q: (i, origin) for i, q, origin in cur.fetchall()}
+    keep = set()
+    for e in examples:
+        key = e.question.lower()
+        if key in existing:
+            keep.add(existing[key][0])
+            cur.execute("UPDATE metric_example SET question = %s, ast = %s WHERE id = %s",
+                        (e.question, json.dumps(e.ast, ensure_ascii=False) if e.ast else None, existing[key][0]))
+        else:
+            cur.execute("""
+                INSERT INTO metric_example (metric_id, question, ast, origin, status, reviewed_at)
+                VALUES (%s, %s, %s, %s, 'approved', now()) RETURNING id
+            """, (str(metric_id), e.question, json.dumps(e.ast, ensure_ascii=False) if e.ast else None,
+                  e.origin if e.origin != "llm" else "human"))
+            keep.add(cur.fetchone()[0])
+    gone = [i for i, _ in existing.values() if i not in keep]
+    if gone:
+        cur.execute("DELETE FROM metric_example WHERE id = ANY(%s)", (gone,))
+
+
+def _record_history(cur, system_id: UUID, metric_id: UUID, version: int, action: str, actor: str | None) -> None:
     cur.execute("""
-        INSERT INTO datasource_metric_history (datasource_id, metric_id, version, action, snapshot)
-        SELECT datasource_id, id, %s, %s,
-               jsonb_build_object('name', name, 'description', description, 'kind', kind,
-                                  'table_name', table_name, 'joins', joins, 'agg_field', agg_field,
-                                  'agg_function', agg_function, 'select_columns', select_columns,
-                                  'expression', expression, 'fixed_filters', fixed_filters,
-                                  'examples', examples, 'series', series)
-          FROM datasource_metric WHERE id = %s AND datasource_id = %s
-    """, (version, action, str(metric_id), str(datasource_id)))
+        INSERT INTO metric_history (system_id, metric_id, version, action, actor, snapshot)
+        SELECT m.system_id, m.id, %s, %s, %s,
+               jsonb_build_object('name', m.name, 'description', m.description, 'kind', m.kind,
+                                  'table_name', t.name, 'joins', m.joins, 'agg_field', m.agg_field,
+                                  'agg_function', m.agg_function, 'select_columns', m.select_columns,
+                                  'expression', m.expression, 'fixed_filters', m.fixed_filters,
+                                  'series', m.series, 'synonyms', m.synonyms,
+                                  'examples', COALESCE((SELECT jsonb_agg(jsonb_build_object('question', e.question,
+                                                         'ast', e.ast, 'origin', e.origin) ORDER BY e.id)
+                                                        FROM metric_example e
+                                                       WHERE e.metric_id = m.id AND e.status = 'approved'), '[]'))
+          FROM metric m JOIN meta_table t ON t.id = m.base_table_id
+         WHERE m.id = %s AND m.system_id = %s
+    """, (version, action, actor, str(metric_id), str(system_id)))
 
 
-def _values(input_data: MetricInput, table_name: str) -> tuple:
+def _values(data: MetricInput, base_table_id: str) -> tuple:
     return (
-        input_data.name,
-        input_data.description,
-        input_data.kind.value,
-        table_name,
-        json.dumps([j.model_dump() for j in input_data.joins]),
-        input_data.agg_field,
-        input_data.agg_function,
-        json.dumps(input_data.select_columns),
-        input_data.expression,
-        json.dumps(input_data.fixed_filters),
-        json.dumps([e.model_dump() for e in input_data.examples], ensure_ascii=False),
-        json.dumps(input_data.series.model_dump()) if input_data.series else None,
+        data.name,
+        data.description,
+        data.kind.value,
+        base_table_id,
+        json.dumps([j.model_dump() for j in data.joins]),
+        data.agg_field,
+        data.agg_function,
+        json.dumps(data.select_columns),
+        data.expression,
+        json.dumps(data.series.model_dump()) if data.series else None,
+        json.dumps(data.fixed_filters),
+        json.dumps(data.synonyms, ensure_ascii=False),
     )
 
 
-def _guard_duplicate_name(datasource_id: UUID, name: str, except_id: UUID | None = None) -> None:
+def _guard_duplicate_name(system_id: UUID, name: str, except_id: UUID | None = None) -> None:
     existing = db.one(
-        "SELECT id FROM datasource_metric WHERE datasource_id = %s AND lower(name) = lower(%s) AND id <> %s",
-        str(datasource_id), name, str(except_id or uuid4()),
+        "SELECT id FROM metric WHERE system_id = %s AND lower(name) = lower(%s) AND id <> %s",
+        str(system_id), name, str(except_id or uuid4()),
     )
     if existing:
         raise ApiException(409, f"'{name}' 이름의 지표가 이미 있습니다")
 
 
-def _guard_not_referenced(datasource_id: UUID, name: str, what: str) -> None:
+def _guard_not_referenced(system_id: UUID, name: str, what: str) -> None:
     """파생 지표가 쓰는 지표를 지우거나 바꾸면 그 파생 지표가 조용히 깨진다."""
     users = []
-    for r in db.query(
-        "SELECT name, expression FROM datasource_metric WHERE datasource_id = %s AND kind = 'derived'",
-        str(datasource_id),
-    ):
+    for r in db.query("SELECT name, expression FROM metric WHERE system_id = %s AND kind = 'derived'", str(system_id)):
         try:
             _, refs = compile_formula(r["expression"], lambda n: "x")
         except ValueError:
@@ -178,14 +267,14 @@ def _guard_not_referenced(datasource_id: UUID, name: str, what: str) -> None:
         )
 
 
-def _validate(datasource_id: UUID, data: MetricInput) -> str:
+def _validate(system_id: UUID, data: MetricInput) -> str:
     """정의를 저장된 스키마와 대조한다. 정규화된 기본 테이블 이름을 돌려준다."""
-    tables = load_tables(datasource_id)
+    tables = load_tables(system_id)
     if not tables:
         raise ApiException(400, "스키마가 비어 있습니다. 동기화를 먼저 실행하십시오")
     columns = {name: [c["name"] for c in t["columns"]] for name, t in tables.items()}
     types = {(t["name"], c["name"]): c["type"] for t in tables.values() for c in t["columns"]}
-    driver = db.one("SELECT driver FROM datasource WHERE id = %s", str(datasource_id))["driver"]
+    driver = db.one("SELECT driver FROM meta_system WHERE id = %s", str(system_id))["driver"]
 
     try:
         scope, _ = build_scope(data.table_name, [j.model_dump() for j in data.joins], columns)
@@ -210,7 +299,7 @@ def _validate(datasource_id: UUID, data: MetricInput) -> str:
         for column in data.select_columns:
             require(column, "조회")
     else:
-        _validate_formula(datasource_id, data, scope)
+        _validate_formula(system_id, data, scope)
 
     for filter_spec in data.fixed_filters:
         table, column = require(filter_spec.get("field"), "필터")
@@ -255,7 +344,7 @@ def _validate(datasource_id: UUID, data: MetricInput) -> str:
                 "(자정인 행만 걸립니다). greater_or_equal 과 less_or_equal 로 기간을 지정하십시오",
             )
 
-    _validate_examples(datasource_id, data, base)
+    _validate_examples(system_id, data, base)
     return base
 
 
@@ -283,14 +372,8 @@ def _validate_series(data: MetricInput, scope: dict, base: str, types: dict, dri
         raise ApiException(400, f"순서 컬럼은 날짜·시각이나 숫자 컬럼이어야 합니다 -> {base}.{resolved['순서'][1]}")
 
 
-def _validate_formula(datasource_id: UUID, data: MetricInput, scope: dict) -> None:
-    rows = {
-        r["name"].lower(): r
-        for r in db.query(
-            "SELECT name, kind, table_name, fixed_filters FROM datasource_metric WHERE datasource_id = %s",
-            str(datasource_id),
-        )
-    }
+def _validate_formula(system_id: UUID, data: MetricInput, scope: dict) -> None:
+    rows = {r["name"].lower(): r for r in load_metric_rows(system_id)}
 
     def check(name):
         comp = rows.get(name.lower())
@@ -310,12 +393,12 @@ def _validate_formula(datasource_id: UUID, data: MetricInput, scope: dict) -> No
         raise ApiException(400, str(error)) from None
 
 
-def _validate_examples(datasource_id: UUID, data: MetricInput, base: str) -> None:
+def _validate_examples(system_id: UUID, data: MetricInput, base: str) -> None:
     """예시에 AST 가 있으면 실제로 컴파일되는지 확인한다 — 틀린 모범 답안은 모델을 틀리게 가르친다."""
     with_ast = [e for e in data.examples if e.ast is not None]
     if not with_ast:
         return
-    contract = load_contract(datasource_id)
+    contract = load_contract(system_id)
     draft = metric_entry({
         "name": data.name, "description": data.description, "kind": data.kind.value, "table_name": base,
         "joins": [j.model_dump() for j in data.joins], "select_columns": data.select_columns,
@@ -332,8 +415,7 @@ def _validate_examples(datasource_id: UUID, data: MetricInput, base: str) -> Non
             raise ApiException(400, f"예시 '{example.question}' 의 AST 가 컴파일되지 않습니다: {error}") from None
 
 
-def _row_to_metric(row: dict) -> Metric:
-    """DB 행을 Metric 모델로 변환"""
+def _row_to_metric(row: dict, examples: dict) -> Metric:
     return Metric(
         id=row["id"],
         name=row["name"],
@@ -347,7 +429,11 @@ def _row_to_metric(row: dict) -> Metric:
         expression=row.get("expression"),
         series=row.get("series"),
         fixed_filters=row["fixed_filters"] or [],
-        examples=row.get("examples") or [],
+        examples=examples.get("approved", []),
+        draft_example_count=examples.get("drafts", 0),
+        synonyms=row.get("synonyms") or [],
+        status=row["status"],
+        broken_reason=row.get("broken_reason"),
         version=row.get("version") or 1,
         updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
     )

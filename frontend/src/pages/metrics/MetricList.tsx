@@ -4,12 +4,11 @@ import * as api from "../../api";
 import { Badge, Button, EmptyState, Loading, PageHeader } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage } from "../../lib/format";
-import { brokenReason, definitionLines, KIND_LABEL } from "../../lib/metrics";
+import { definitionLines, KIND_LABEL, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
 
 interface Loaded {
-  datasource: api.Datasource;
+  system: api.System;
   metrics: api.Metric[];
-  tables: api.SchemaTable[] | null;
 }
 
 export function MetricList() {
@@ -25,21 +24,9 @@ export function MetricList() {
 
   async function load() {
     try {
-      const datasources = await api.listDatasources();
+      const systems = await api.listSystems();
       const loaded = await Promise.all(
-        datasources.map(async (datasource) => {
-          const metrics = await api.listMetrics(datasource.id);
-          // 스키마는 깨진 지표를 가려내는 데만 쓴다. 지표가 없으면 읽을 이유가 없다.
-          let tables: api.SchemaTable[] | null = null;
-          if (metrics.length > 0 && datasource.synced_at) {
-            try {
-              tables = (await api.getSchema(datasource.id)).tables;
-            } catch {
-              tables = null;
-            }
-          }
-          return { datasource, metrics, tables };
-        })
+        systems.map(async (system) => ({ system, metrics: await api.listMetrics(system.id) }))
       );
       setRows(loaded);
     } catch (err) {
@@ -56,11 +43,10 @@ export function MetricList() {
     );
   }
 
-  const visible = filter ? rows.filter((r) => r.datasource.id === filter) : rows;
-  const flat = visible.flatMap((r) =>
-    r.metrics.map((m) => ({ row: r, metric: m, broken: brokenReason(r.tables, m, r.metrics) }))
-  );
-  const brokenCount = flat.filter((f) => f.broken).length;
+  const visible = filter ? rows.filter((r) => r.system.id === filter) : rows;
+  const flat = visible.flatMap((r) => r.metrics.map((m) => ({ row: r, metric: m })));
+  const brokenCount = flat.filter((f) => f.metric.status === "broken").length;
+  const draftCount = flat.filter((f) => f.metric.status === "draft").length;
 
   return (
     <div className="page wide">
@@ -84,15 +70,20 @@ export function MetricList() {
           value={filter}
           onChange={(e) => setParams(e.target.value ? { ds: e.target.value } : {})}
         >
-          <option value="">전체 데이터소스</option>
+          <option value="">전체 시스템</option>
           {rows.map((r) => (
-            <option key={r.datasource.id} value={r.datasource.id}>
-              {r.datasource.name}
+            <option key={r.system.id} value={r.system.id}>
+              {r.system.name}
             </option>
           ))}
         </select>
         <span className="muted">지표 {flat.length}개</span>
-        {brokenCount > 0 && <Badge tone="warn">깨진 지표 {brokenCount}개</Badge>}
+        {brokenCount > 0 && <Badge tone="danger">깨진 지표 {brokenCount}개</Badge>}
+        {draftCount > 0 && (
+          <span title="승인된 예시 질문이 있어야 질문에 쓰입니다">
+            <Badge tone="warn">검수 대기 {draftCount}개</Badge>
+          </span>
+        )}
         <span className="spacer" />
         <Button size="sm" variant="ghost" onClick={load}>
           새로고침
@@ -105,15 +96,15 @@ export function MetricList() {
             title="등록된 지표가 없습니다"
             desc={
               rows.length === 0
-                ? "먼저 데이터소스를 등록하고 스키마를 동기화하세요."
+                ? "먼저 시스템을 등록하고 스키마를 동기화하세요."
                 : "자주 쓰는 집계나 조회를 지표로 등록해 두면 질문 정확도가 올라갑니다."
             }
             action={
               <Button
                 variant="primary"
-                onClick={() => navigate(rows.length === 0 ? "/datasources/new" : "/metrics/new")}
+                onClick={() => navigate(rows.length === 0 ? "/systems/new" : "/metrics/new")}
               >
-                {rows.length === 0 ? "데이터소스 등록" : "지표 등록"}
+                {rows.length === 0 ? "시스템 등록" : "지표 등록"}
               </Button>
             }
           />
@@ -124,17 +115,17 @@ export function MetricList() {
                 <tr>
                   <th style={{ width: "26%" }}>이름</th>
                   <th>종류</th>
-                  <th>데이터소스</th>
+                  <th>시스템</th>
                   <th>정의</th>
                   <th>상태</th>
                 </tr>
               </thead>
               <tbody>
-                {flat.map(({ row, metric: m, broken }) => (
+                {flat.map(({ row, metric: m }) => (
                   <tr
                     key={m.id}
                     className="clickable"
-                    onClick={() => navigate(`/metrics/${row.datasource.id}/${m.id}`)}
+                    onClick={() => navigate(`/metrics/${row.system.id}/${m.id}`)}
                   >
                     <td>
                       <div className="cell-title">{m.name}</div>
@@ -143,18 +134,15 @@ export function MetricList() {
                     <td>
                       <Badge tone="primary">{KIND_LABEL[m.kind]}</Badge>
                     </td>
-                    <td>{row.datasource.name}</td>
+                    <td>{row.system.name}</td>
                     <td>
                       <code className="muted">{definitionLines(m).replace(/\n\s*/g, " ")}</code>
                     </td>
                     <td>
-                      {broken ? (
-                        <span title={broken}>
-                          <Badge tone="warn">스키마 불일치</Badge>
-                        </span>
-                      ) : (
-                        <Badge tone="ok">정상</Badge>
-                      )}
+                      <span title={m.broken_reason ?? (m.status === "draft" ? "승인된 예시 질문이 있어야 질문에 쓰입니다" : "")}>
+                        <Badge tone={STATUS_TONE[m.status]}>{STATUS_LABEL[m.status]}</Badge>
+                      </span>
+                      {m.draft_example_count > 0 && <div className="cell-sub">예시 초안 {m.draft_example_count}개</div>}
                     </td>
                   </tr>
                 ))}

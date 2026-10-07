@@ -9,14 +9,16 @@ const GROUPS: { label: string; links: { to: string; text: string; end?: boolean 
     ],
   },
   {
-    label: "데이터소스",
+    label: "시스템",
     links: [
-      { to: "/datasources", text: "목록", end: true },
-      { to: "/datasources/new", text: "등록" },
+      { to: "/systems", text: "목록", end: true },
+      { to: "/systems/new", text: "등록" },
       { to: "/sync", text: "동기화", end: true },
       { to: "/sync/history", text: "동기화 현황" },
+      { to: "/tables", text: "테이블 용도·카드" },
       { to: "/relations", text: "관계" },
-      { to: "/glossary", text: "용어·코드 사전" },
+      { to: "/dictionary", text: "컬럼 사전" },
+      { to: "/glossary", text: "업무 용어" },
     ],
   },
   {
@@ -25,6 +27,10 @@ const GROUPS: { label: string; links: { to: string; text: string; end?: boolean 
       { to: "/metrics", text: "목록", end: true },
       { to: "/metrics/new", text: "등록" },
     ],
+  },
+  {
+    label: "보강",
+    links: [{ to: "/review", text: "보강 · 검수 · 평가" }],
   },
 ];
 

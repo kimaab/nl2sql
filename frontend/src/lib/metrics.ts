@@ -61,6 +61,20 @@ export const EMPTY_METRIC: MetricInput = {
   series: null,
   fixed_filters: [],
   examples: [],
+  synonyms: [],
+};
+
+export const STATUS_LABEL: Record<string, string> = {
+  draft: "검수 대기",
+  active: "사용 중",
+  broken: "깨짐",
+  retired: "사용 안 함",
+};
+export const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | undefined> = {
+  draft: "warn",
+  active: "ok",
+  broken: "danger",
+  retired: undefined,
 };
 
 /** 저장된 지표를 수정 폼의 입력으로 */
@@ -78,6 +92,7 @@ export function toInput(m: Metric): MetricInput {
     series: m.series ?? null,
     fixed_filters: m.fixed_filters,
     examples: m.examples ?? [],
+    synonyms: m.synonyms ?? [],
   };
 }
 

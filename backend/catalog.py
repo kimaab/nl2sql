@@ -72,6 +72,15 @@ def read_postgresql(row: dict) -> list[dict]:
                         "type": _text(data_type),
                         "description": _text(comment)
                     })
+            cur.execute("""
+                SELECT c.relname, a.attname
+                  FROM pg_index i
+                  JOIN pg_class c ON c.oid = i.indrelid
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+                 WHERE i.indisprimary AND n.nspname = %s
+            """, (schema,))
+            _mark_keys(tables, cur.fetchall())
         relations = _read_relations(row, connection, """
             SELECT con.conname, cl.relname, att.attname, rcl.relname, ratt.attname
               FROM pg_constraint con
@@ -119,18 +128,19 @@ def read_mysql(row: dict) -> list[dict]:
             }
 
             cur.execute(
-                "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT"
+                "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT, COLUMN_KEY"
                 "  FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = %s"
                 " ORDER BY TABLE_NAME, ORDINAL_POSITION",
                 (row["db_name"],)
             )
-            for table_name, column, column_type, comment in cur.fetchall():
+            for table_name, column, column_type, comment, key in cur.fetchall():
                 table = tables.get(_text(table_name))
                 if table is not None:
                     table["columns"].append({
                         "name": _text(column),
                         "type": _text(column_type),
-                        "description": _text(comment)
+                        "description": _text(comment),
+                        "is_pk": _text(key) == "PRI",
                     })
         relations = _read_relations(row, connection, """
             SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
@@ -147,7 +157,7 @@ def read_oracle(row: dict) -> list[dict]:
     """Oracle 스키마 읽기"""
     owner = (row["db_schema"] or row["username"] or "").strip().upper()
     if not owner:
-        raise ApiException(400, "Oracle 데이터소스는 스키마나 계정 중 하나가 필요합니다")
+        raise ApiException(400, "Oracle 시스템은 스키마나 계정 중 하나가 필요합니다")
 
     try:
         connection = oracledb.connect(
@@ -191,6 +201,13 @@ def read_oracle(row: dict) -> list[dict]:
                         "type": _oracle_type(type_name, length, precision, scale),
                         "description": _text(comment)
                     })
+            cur.execute("""
+                SELECT cc.table_name, cc.column_name
+                  FROM all_constraints c
+                  JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
+                 WHERE c.owner = :owner AND c.constraint_type = 'P'
+            """, owner=owner)
+            _mark_keys(tables, [(_text(t), _text(c)) for t, c in cur.fetchall()])
         relations = _read_relations(row, connection, """
             SELECT c.constraint_name, cc.table_name, cc.column_name, rc.table_name, rcc.column_name
               FROM all_constraints c
@@ -230,6 +247,14 @@ def _read_relations(row: dict, connection, sql: str, params, tables: dict) -> li
                 "right_table": ref_table, "right_column": _text(ref_column),
             })
     return out
+
+
+def _mark_keys(tables: dict, pairs) -> None:
+    """기본키 컬럼 표시. SQL 생성 단계에서 컬럼을 골라 실을 때 항상 포함한다."""
+    keys = {(t, c) for t, c in pairs}
+    for table in tables.values():
+        for column in table["columns"]:
+            column["is_pk"] = (table["name"], column["name"]) in keys
 
 
 def _text(value) -> str:

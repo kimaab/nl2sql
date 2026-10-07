@@ -9,11 +9,11 @@ type Draft = { synonyms: string; codes: api.CodeValue[] };
 
 const key = (table: string, column: string) => `${table}\u0000${column}`;
 
-export function GlossaryPage() {
+export function ColumnDictionaryPage() {
   const [params, setParams] = useSearchParams();
   const dsId = params.get("ds") ?? "";
   const tableName = params.get("table") ?? "";
-  const [datasources, setDatasources] = useState<api.Datasource[] | null>(null);
+  const [systems, setSystems] = useState<api.System[] | null>(null);
   const [tables, setTables] = useState<api.SchemaTable[]>([]);
   const [saved, setSaved] = useState<Record<string, api.Annotation>>({});
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
@@ -22,13 +22,13 @@ export function GlossaryPage() {
 
   useEffect(() => {
     api
-      .listDatasources()
+      .listSystems()
       .then((list) => {
         const ready = list.filter((d) => d.synced_at);
-        setDatasources(ready);
+        setSystems(ready);
         if (!dsId && ready.length === 1) setParams({ ds: ready[0].id });
       })
-      .catch(() => setDatasources([]));
+      .catch(() => setSystems([]));
   }, []);
 
   useEffect(() => {
@@ -85,7 +85,7 @@ export function GlossaryPage() {
     }
   }
 
-  if (datasources === null) return <Loading />;
+  if (systems === null) return <Loading />;
 
   return (
     <div className="page wide">
@@ -96,8 +96,8 @@ export function GlossaryPage() {
 
       <div className="row" style={{ marginBottom: 16 }}>
         <select className="select" style={{ width: 240 }} value={dsId} onChange={(e) => setParams(e.target.value ? { ds: e.target.value } : {})}>
-          <option value="">데이터소스 선택</option>
-          {datasources.map((d) => (
+          <option value="">시스템 선택</option>
+          {systems.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name}
             </option>
@@ -118,7 +118,7 @@ export function GlossaryPage() {
 
       {!dsId ? (
         <div className="card">
-          <EmptyState title="데이터소스를 고르세요" />
+          <EmptyState title="시스템을 고르세요" />
         </div>
       ) : loading || !table ? (
         <Loading />

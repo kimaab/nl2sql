@@ -10,7 +10,7 @@ const EMPTY: api.RelationInput = { left_table: "", left_column: "", right_table:
 export function RelationsPage() {
   const [params, setParams] = useSearchParams();
   const dsId = params.get("ds") ?? "";
-  const [datasources, setDatasources] = useState<api.Datasource[] | null>(null);
+  const [systems, setSystems] = useState<api.System[] | null>(null);
   const [tables, setTables] = useState<api.SchemaTable[]>([]);
   const [relations, setRelations] = useState<api.Relation[] | null>(null);
   const [form, setForm] = useState<api.RelationInput>(EMPTY);
@@ -19,13 +19,13 @@ export function RelationsPage() {
 
   useEffect(() => {
     api
-      .listDatasources()
+      .listSystems()
       .then((list) => {
         const ready = list.filter((d) => d.synced_at);
-        setDatasources(ready);
+        setSystems(ready);
         if (!dsId && ready.length === 1) setParams({ ds: ready[0].id });
       })
-      .catch(() => setDatasources([]));
+      .catch(() => setSystems([]));
   }, []);
 
   useEffect(() => {
@@ -69,7 +69,7 @@ export function RelationsPage() {
     }
   }
 
-  if (datasources === null) return <Loading />;
+  if (systems === null) return <Loading />;
 
   const valid = form.left_table && form.left_column && form.right_table && form.right_column && form.left_table !== form.right_table;
 
@@ -82,8 +82,8 @@ export function RelationsPage() {
 
       <div className="row" style={{ marginBottom: 16 }}>
         <select className="select" style={{ width: 260 }} value={dsId} onChange={(e) => setParams(e.target.value ? { ds: e.target.value } : {})}>
-          <option value="">데이터소스 선택</option>
-          {datasources.map((d) => (
+          <option value="">시스템 선택</option>
+          {systems.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name} ({d.driver})
             </option>
@@ -93,7 +93,7 @@ export function RelationsPage() {
 
       {!dsId ? (
         <div className="card">
-          <EmptyState title="데이터소스를 고르세요" desc="스키마를 동기화한 데이터소스만 표시됩니다." />
+          <EmptyState title="시스템을 고르세요" desc="스키마를 동기화한 시스템만 표시됩니다." />
         </div>
       ) : relations === null ? (
         <Loading />

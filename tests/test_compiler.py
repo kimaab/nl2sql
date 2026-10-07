@@ -209,6 +209,23 @@ def test_any_of_renders_parenthesised_or(compiler):
     assert out.endswith("WHERE (\"PAY_METHOD\" = 'CARD' OR (\"PAY_METHOD\" = 'BANK' AND \"TOTAL_AMT\" > 100));")
 
 
+def test_groups_get_parentheses_only_when_they_change_meaning(compiler):
+    a = {"field": "PAY_METHOD", "operator": "equals", "value": "CARD"}
+    b = {"field": "TOTAL_AMT", "operator": "greater_than", "value": 100}
+    c = {"field": "ORDER_STATUS", "operator": "equals", "value": "99"}
+    where = lambda filters: sql(compiler, {"target_table": "TB_ORDER", "columns": ["ORDER_ID"],
+                                           "filters": filters}).split(" WHERE ", 1)[1]
+    # 모델이 filters 전체를 all_of 로 감싸 보내도 괄호 없이 (filters 는 원래 AND)
+    assert where([{"all_of": [a, b]}]) == "\"PAY_METHOD\" = 'CARD' AND \"TOTAL_AMT\" > 100;"
+    # 조건 하나짜리 묶음, OR 안의 OR 도 풀어 쓴다
+    assert where([{"any_of": [a]}, b]) == "\"PAY_METHOD\" = 'CARD' AND \"TOTAL_AMT\" > 100;"
+    assert where([{"any_of": [a, {"any_of": [b, c]}]}]) == (
+        "(\"PAY_METHOD\" = 'CARD' OR \"TOTAL_AMT\" > 100 OR \"ORDER_STATUS\" = '99');")
+    # AND 사이의 OR 은 괄호가 있어야 뜻이 맞다
+    assert where([{"any_of": [a, b]}, c]) == (
+        "(\"PAY_METHOD\" = 'CARD' OR \"TOTAL_AMT\" > 100) AND \"ORDER_STATUS\" = '99';")
+
+
 def test_question_filter_satisfied_inside_any_of(compiler):
     out = sql(compiler, {"metric": "주문상세", "filters": [{"any_of": [
         {"field": "MEMBER_ID", "operator": "equals", "value": "a"},

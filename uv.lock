@@ -764,6 +764,7 @@ name = "nl2sql"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "langchain-core" },
     { name = "langchain-openai" },
@@ -786,6 +787,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.104.0" },
     { name = "langchain-core", specifier = ">=0.1.0" },
     { name = "langchain-openai", specifier = ">=0.0.10" },

@@ -72,7 +72,7 @@ def test_retry_then_success_records_ast(contract):
         ("compile_sql", {"ast": json.dumps({"metric": "없는지표"})}),
         ("compile_sql", {"ast": json.dumps({"metric": "주문수"})}),
     ])
-    out = run_question(contract, "주문 수", model)
+    out = run_question(contract, "주문 수", model, selector="tfidf")
     assert out["sql"] == 'SELECT COUNT(*) AS "주문수" FROM "TB_ORDER";'
     assert out["attempts"] == 2 and out["ast"] == {"metric": "주문수"}
     # 두 번째 호출은 첫 오류를 보고 있다
@@ -81,14 +81,14 @@ def test_retry_then_success_records_ast(contract):
 
 def test_clarification_ends_without_sql(contract):
     model = ScriptedModel([("ask_user", {"message": "어느 회원의 주문상세인가요?"})])
-    out = run_question(contract, "주문상세 보여줘", model)
-    assert out == {"sql": None, "error": None, "attempts": 0, "ast": None,
-                   "clarification": "어느 회원의 주문상세인가요?"}
+    out = run_question(contract, "주문상세 보여줘", model, selector="tfidf")
+    assert (out["sql"], out["error"], out["attempts"], out["ast"]) == (None, None, 0, None)
+    assert out["clarification"] == "어느 회원의 주문상세인가요?"
 
 
 def test_max_attempts_returns_last_error(contract):
     model = ScriptedModel([("compile_sql", {"ast": json.dumps({"metric": f"x{i}"})}) for i in range(4)])
-    out = run_question(contract, "?", model)
+    out = run_question(contract, "?", model, selector="tfidf")
     assert out["sql"] is None and out["attempts"] == 4 and "'x3'" in out["error"]
 
 

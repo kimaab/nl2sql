@@ -10,7 +10,7 @@ log = logging.getLogger("nl2sql.scheduler")
 
 
 class AutoSync:
-    """한 번이라도 동기화한 데이터소스를 주기적으로 다시 동기화한다.
+    """한 번이라도 동기화한 시스템을 주기적으로 다시 동기화한다.
 
     AUTO_SYNC_MINUTES 가 0(기본)이면 돌지 않는다. 결과는 동기화 기록에 trigger='auto' 로
     남고, 깨진 지표가 생기면 경고 로그와 동기화 현황 화면에 드러난다.
@@ -48,7 +48,7 @@ class AutoSync:
             self._thread.join(timeout=5)
 
     def run_once(self) -> None:
-        for row in db.query("SELECT id, name FROM datasource WHERE synced_at IS NOT NULL ORDER BY name"):
+        for row in db.query("SELECT id, name FROM meta_system WHERE synced_at IS NOT NULL ORDER BY name"):
             if self._stop.is_set():
                 return
             try:

@@ -8,9 +8,15 @@ log = logging.getLogger("nl2sql.compile")
 CLARIFY_PREFIX = "CLARIFY:"
 
 
-def make_compile_tool(compiler: Compiler, question: str, record: dict | None = None):
-    """compile_sql 도구 생성. 성공하면 record["ast"] 에 컴파일된 AST 를 남긴다."""
+def make_compile_tool(compiler: Compiler, question: str, record: dict | None = None,
+                      expected_metrics: list | None = None):
+    """compile_sql 도구 생성. 성공하면 record["ast"] 에 컴파일된 AST 를 남긴다.
+
+    expected_metrics: 지표 선택 단계가 고른 지표. 첫 시도가 그 지표를 쓰지 않으면 한 번 되돌려 보낸다 —
+    지표를 두고 원본 컬럼을 직접 집계하면 오류 없이 틀린 답이 나온다. 두 번째부터는 모델 판단을 따른다.
+    """
     attempt = {"n": 0}
+    expected = [m.lower() for m in expected_metrics or []]
 
     @tool("compile_sql")
     def compile_sql(ast: str) -> str:
@@ -44,6 +50,15 @@ def make_compile_tool(compiler: Compiler, question: str, record: dict | None = N
             detail = f"ast는 JSON 객체여야 합니다 (받은 것: {type(parsed).__name__})"
             log.info("attempt=%d outcome=error question=%r detail=%s",
                      attempt["n"], question, detail)
+            return f"error: {detail}"
+
+        used = parsed.get("metric")
+        used = [used] if isinstance(used, str) else used if isinstance(used, list) else []
+        if expected and attempt["n"] == 1 and not any(str(u).lower() in expected for u in used):
+            detail = (f"이 질문에는 지표 선택 단계에서 {', '.join(expected_metrics)} 을(를) 골랐습니다. "
+                      "metric 에 그 지표를 쓰고 정렬·기간·필터만 덧붙이십시오. 지표로 정말 답할 수 없을 때만 "
+                      "같은 ast 를 다시 보내십시오.")
+            log.info("attempt=%d outcome=error question=%r detail=지표 미사용 %s", attempt["n"], question, payload)
             return f"error: {detail}"
 
         try:

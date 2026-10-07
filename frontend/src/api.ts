@@ -2,10 +2,12 @@ const API_BASE = "http://localhost:8000/api";
 
 export type Driver = "mysql" | "postgresql" | "oracle";
 
-export interface Datasource {
+/** 시스템 = 조회 대상 DB. 질문할 때 먼저 고른다. */
+export interface System {
   id: string;
+  code: string;
   name: string;
-  description: string;
+  domain_desc: string;
   driver: Driver;
   host: string;
   port: number;
@@ -15,11 +17,13 @@ export interface Datasource {
   synced_at: string | null;
   table_count: number;
   metric_count: number;
+  active_metric_count: number;
 }
 
-export interface DatasourceInput {
+export interface SystemInput {
+  code: string;
   name: string;
-  description: string;
+  domain_desc: string;
   driver: Driver;
   host: string;
   port: number;
@@ -30,6 +34,7 @@ export interface DatasourceInput {
 }
 
 export type MetricKind = "aggregate" | "projection" | "derived";
+export type MetricStatus = "draft" | "active" | "broken" | "retired";
 
 export interface MetricJoin {
   table: string;
@@ -48,6 +53,7 @@ export interface SeriesSpec {
 export interface MetricExample {
   question: string;
   ast: Record<string, any> | null;
+  origin?: "llm" | "human" | "feedback";
 }
 
 export interface MetricInput {
@@ -63,17 +69,21 @@ export interface MetricInput {
   series: SeriesSpec | null;
   fixed_filters: Record<string, any>[];
   examples: MetricExample[];
+  synonyms: string[];
 }
 
 export interface Metric extends MetricInput {
   id: string;
+  status: MetricStatus;
+  broken_reason: string | null;
+  draft_example_count: number;
   version: number;
   updated_at: string | null;
 }
 
 export interface MetricHistoryEntry {
   version: number;
-  action: "create" | "update" | "delete";
+  action: "create" | "update" | "delete" | "retire";
   snapshot: Partial<MetricInput>;
   created_at: string;
 }
@@ -92,7 +102,20 @@ export interface SchemaColumn {
 export interface SchemaTable {
   name: string;
   description: string;
+  purpose?: string;
   columns: SchemaColumn[];
+}
+
+export interface TableInfo {
+  id: string;
+  name: string;
+  comment: string;
+  purpose: string;
+  card: string;
+  card_line: string;
+  card_status: "none" | "draft" | "approved";
+  column_count: number;
+  metric_count: number;
 }
 
 export interface RelationInput {
@@ -115,12 +138,38 @@ export interface Annotation {
   codes: CodeValue[];
 }
 
+export interface GlossaryInput {
+  term: string;
+  synonyms: string[];
+  meaning: string;
+  maps_to: Record<string, string>[];
+  status: "draft" | "approved";
+}
+
+export interface GlossaryTerm extends GlossaryInput {
+  id: number;
+  system_id: string | null;
+}
+
+export interface AskStep {
+  stage: "table" | "metric" | "sql";
+  candidates: string[];
+  selected: string[];
+  reason: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  elapsed_ms: number;
+}
+
 export interface AskResponse {
   id: string | null;
   sql: string | null;
   error: string | null;
   attempts: number;
   clarification: string | null;
+  selected_tables: string[];
+  selected_metrics: string[];
+  steps: AskStep[];
 }
 
 export interface CompileResponse {
@@ -136,6 +185,9 @@ export interface BrokenMetric {
 export interface SyncResult {
   table_count: number;
   column_count: number;
+  tables_added: number;
+  tables_changed: number;
+  tables_removed: number;
   synced_at: string;
   relation_count: number | null;
   broken_metrics: BrokenMetric[];
@@ -143,13 +195,13 @@ export interface SyncResult {
 
 export interface SyncLog {
   id: number;
-  datasource_id: string;
-  datasource_name: string;
+  system_id: string;
+  system_name: string;
   trigger: "manual" | "auto";
   status: "ok" | "error";
-  table_count: number | null;
-  column_count: number | null;
-  relation_count: number | null;
+  tables_added: number | null;
+  tables_changed: number | null;
+  tables_removed: number | null;
   broken_metrics: BrokenMetric[];
   error: string | null;
   started_at: string;
@@ -160,9 +212,12 @@ export type Feedback = "up" | "down";
 
 export interface HistoryEntry {
   id: string;
-  datasource_id: string;
-  datasource_name: string;
+  system_id: string;
+  system_name: string;
   question: string;
+  selected_tables: string[];
+  selected_metrics: string[];
+  total_tokens: number;
   sql: string | null;
   ast: Record<string, any> | null;
   error: string | null;
@@ -179,6 +234,48 @@ export interface HistoryPatch {
   favorite?: boolean;
   feedback?: Feedback | "";
   feedback_note?: string;
+}
+
+export interface EnrichStatus {
+  queued: number;
+  running: number;
+  failed: number;
+  draft_cards: number;
+  draft_examples: number;
+  draft_eval_cases: number;
+}
+
+export type ReviewKind = "table_card" | "metric_example" | "eval_case";
+
+export interface ReviewItem {
+  kind: ReviewKind;
+  id: string;
+  target_name: string;
+  context: string;
+  draft: string;
+  draft_line: string;
+}
+
+export interface ReviewDecision {
+  action: "approve" | "reject";
+  note?: string;
+  card?: string;
+  card_line?: string;
+  question?: string;
+}
+
+export interface EvalRun {
+  id: string;
+  label: string;
+  config: Record<string, any>;
+  case_count: number;
+  table_recall: number | null;
+  metric_accuracy: number | null;
+  sql_accuracy: number | null;
+  avg_tokens: number | null;
+  avg_elapsed_ms: number | null;
+  started_at: string;
+  finished_at: string | null;
 }
 
 async function request<T>(path: string, init?: { method?: string; body?: unknown }): Promise<T> {
@@ -198,58 +295,81 @@ const q = (params: Record<string, string | number | boolean | null | undefined>)
   return text ? `?${text}` : "";
 };
 
-// 데이터소스
-export const listDatasources = () => request<Datasource[]>("/datasources");
-export const getDatasource = (id: string) => request<Datasource>(`/datasources/${id}`);
-export const createDatasource = (input: DatasourceInput) =>
-  request<Datasource>("/datasources", { method: "POST", body: input });
-export const updateDatasource = (id: string, input: DatasourceInput) =>
-  request<Datasource>(`/datasources/${id}`, { method: "PUT", body: input });
-export const deleteDatasource = (id: string) => request<void>(`/datasources/${id}`, { method: "DELETE" });
-export const syncDatasource = (id: string) => request<SyncResult>(`/datasources/${id}/sync`, { method: "POST" });
-export const listSyncLogs = (datasourceId?: string, limit = 100) =>
-  request<SyncLog[]>(`/sync-logs${q({ datasource_id: datasourceId, limit })}`);
-export const getSchema = (id: string) => request<{ tables: SchemaTable[] }>(`/datasources/${id}/schema`);
+// 시스템 · 동기화
+export const listSystems = () => request<System[]>("/systems");
+export const getSystem = (id: string) => request<System>(`/systems/${id}`);
+export const createSystem = (input: SystemInput) => request<System>("/systems", { method: "POST", body: input });
+export const updateSystem = (id: string, input: SystemInput) =>
+  request<System>(`/systems/${id}`, { method: "PUT", body: input });
+export const deleteSystem = (id: string) => request<void>(`/systems/${id}`, { method: "DELETE" });
+export const syncSystem = (id: string) => request<SyncResult>(`/systems/${id}/sync`, { method: "POST" });
+export const listSyncLogs = (systemId?: string, limit = 100) =>
+  request<SyncLog[]>(`/sync-logs${q({ system_id: systemId, limit })}`);
+export const getSchema = (id: string) => request<{ tables: SchemaTable[] }>(`/systems/${id}/schema`);
+export const listTables = (id: string) => request<TableInfo[]>(`/systems/${id}/tables`);
+export const setTablePurpose = (id: string, tableId: string, purpose: string) =>
+  request<TableInfo>(`/systems/${id}/tables/${tableId}/purpose`, { method: "PUT", body: { purpose } });
 
 // 관계
-export const listRelations = (dsId: string) => request<Relation[]>(`/datasources/${dsId}/relations`);
-export const createRelation = (dsId: string, input: RelationInput) =>
-  request<Relation>(`/datasources/${dsId}/relations`, { method: "POST", body: input });
-export const deleteRelation = (dsId: string, id: string) =>
-  request<void>(`/datasources/${dsId}/relations/${id}`, { method: "DELETE" });
+export const listRelations = (sysId: string) => request<Relation[]>(`/systems/${sysId}/relations`);
+export const createRelation = (sysId: string, input: RelationInput) =>
+  request<Relation>(`/systems/${sysId}/relations`, { method: "POST", body: input });
+export const deleteRelation = (sysId: string, id: string) =>
+  request<void>(`/systems/${sysId}/relations/${id}`, { method: "DELETE" });
 
-// 용어·코드 사전
-export const listAnnotations = (dsId: string) => request<Annotation[]>(`/datasources/${dsId}/annotations`);
-export const putAnnotation = (dsId: string, table: string, column: string, body: { synonyms: string[]; codes: CodeValue[] }) =>
+// 컬럼 사전 (동의어 · 코드값)
+export const listAnnotations = (sysId: string) => request<Annotation[]>(`/systems/${sysId}/annotations`);
+export const putAnnotation = (sysId: string, table: string, column: string, body: { synonyms: string[]; codes: CodeValue[] }) =>
   request<Annotation>(
-    `/datasources/${dsId}/annotations/${encodeURIComponent(table)}/${encodeURIComponent(column)}`,
+    `/systems/${sysId}/annotations/${encodeURIComponent(table)}/${encodeURIComponent(column)}`,
     { method: "PUT", body }
   );
 
+// 업무 용어 (sysId 가 없으면 전사 공통)
+const glossaryBase = (sysId: string | null) => (sysId ? `/systems/${sysId}/glossary` : "/glossary");
+export const listGlossary = (sysId: string | null) => request<GlossaryTerm[]>(glossaryBase(sysId));
+export const createGlossary = (sysId: string | null, input: GlossaryInput) =>
+  request<GlossaryTerm>(glossaryBase(sysId), { method: "POST", body: input });
+export const updateGlossary = (sysId: string | null, id: number, input: GlossaryInput) =>
+  request<GlossaryTerm>(`${glossaryBase(sysId)}/${id}`, { method: "PUT", body: input });
+export const deleteGlossary = (sysId: string | null, id: number) =>
+  request<void>(`${glossaryBase(sysId)}/${id}`, { method: "DELETE" });
+
 // 지표
-export const listMetrics = (dsId: string) => request<Metric[]>(`/datasources/${dsId}/metrics`);
-export const createMetric = (dsId: string, input: MetricInput) =>
-  request<Metric>(`/datasources/${dsId}/metrics`, { method: "POST", body: input });
-export const updateMetric = (dsId: string, id: string, input: MetricInput) =>
-  request<Metric>(`/datasources/${dsId}/metrics/${id}`, { method: "PUT", body: input });
-export const deleteMetric = (dsId: string, id: string) =>
-  request<void>(`/datasources/${dsId}/metrics/${id}`, { method: "DELETE" });
-export const metricHistory = (dsId: string, id: string) =>
-  request<MetricHistoryEntry[]>(`/datasources/${dsId}/metrics/${id}/history`);
-export const compileAst = (dsId: string, ast: Record<string, any>) =>
-  request<CompileResponse>(`/datasources/${dsId}/compile`, { method: "POST", body: { ast } });
+export const listMetrics = (sysId: string) => request<Metric[]>(`/systems/${sysId}/metrics`);
+export const createMetric = (sysId: string, input: MetricInput) =>
+  request<Metric>(`/systems/${sysId}/metrics`, { method: "POST", body: input });
+export const updateMetric = (sysId: string, id: string, input: MetricInput) =>
+  request<Metric>(`/systems/${sysId}/metrics/${id}`, { method: "PUT", body: input });
+export const deleteMetric = (sysId: string, id: string) =>
+  request<void>(`/systems/${sysId}/metrics/${id}`, { method: "DELETE" });
+export const metricHistory = (sysId: string, id: string) =>
+  request<MetricHistoryEntry[]>(`/systems/${sysId}/metrics/${id}/history`);
+export const compileAst = (sysId: string, ast: Record<string, any>) =>
+  request<CompileResponse>(`/systems/${sysId}/compile`, { method: "POST", body: { ast } });
+
+// 보강 · 검수 · 평가
+export const enrichStatus = (sysId: string) => request<EnrichStatus>(`/systems/${sysId}/enrich`);
+export const startEnrich = (sysId: string, enqueueAll: boolean) =>
+  request<EnrichStatus>(`/systems/${sysId}/enrich`, { method: "POST", body: { enqueue_all: enqueueAll } });
+export const listReview = (sysId: string) => request<ReviewItem[]>(`/systems/${sysId}/review`);
+export const decideReview = (sysId: string, kind: ReviewKind, id: string, decision: ReviewDecision) =>
+  request<void>(`/systems/${sysId}/review/${kind}/${encodeURIComponent(id)}`, { method: "POST", body: decision });
+export const listEvalRuns = (sysId: string) => request<EvalRun[]>(`/systems/${sysId}/eval-runs`);
 
 // 질문
-export const ask = (datasourceId: string, question: string) =>
-  request<AskResponse>("/ask", { method: "POST", body: { datasource_id: datasourceId, question } });
+export const ask = (systemId: string, question: string) =>
+  request<AskResponse>("/ask", { method: "POST", body: { system_id: systemId, question } });
 
 // 질문 기록
-export const listHistory = (params: { datasourceId?: string; favorite?: boolean; feedback?: Feedback; limit?: number; offset?: number }) =>
+export const listHistory = (params: { systemId?: string; favorite?: boolean; feedback?: Feedback; limit?: number; offset?: number }) =>
   request<HistoryEntry[]>(
-    `/history${q({ datasource_id: params.datasourceId, favorite: params.favorite, feedback: params.feedback, limit: params.limit, offset: params.offset })}`
+    `/history${q({ system_id: params.systemId, favorite: params.favorite, feedback: params.feedback, limit: params.limit, offset: params.offset })}`
   );
+export const historyTrace = (id: string) => request<AskStep[]>(`/history/${id}/trace`);
+export const promoteToEvalCase = (id: string) => request<{ id: number }>(`/history/${id}/eval-case`, { method: "POST" });
 export const patchHistory = (id: string, patch: HistoryPatch) =>
   request<HistoryEntry>(`/history/${id}`, { method: "PATCH", body: patch });
 export const deleteHistory = (id: string) => request<void>(`/history/${id}`, { method: "DELETE" });
-export const exportHistory = (dsId: string) =>
-  request<{ datasource: string; cases: unknown[] }>(`/history/export${q({ datasource_id: dsId })}`);
+export const exportHistory = (sysId: string) =>
+  request<{ system: string; cases: unknown[] }>(`/history/export${q({ system_id: sysId })}`);

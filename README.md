@@ -2,40 +2,64 @@
 
 자연어 질문을 SQL 쿼리로 변환하는 웹 애플리케이션입니다. SQL 은 만들어서 보여주기만 하고 대상 DB 에 실행하지 않습니다.
 
+## 질문 처리 흐름
+
+지표 전체를 한 번에 검색(RAG 식)하지 않고, 범위를 좁히면서 단계마다 LLM 이 판단합니다.
+
+```
+(사용자가 시스템 선택)
+ ① 테이블 추론 (LLM)   업무 영역 설명 + 테이블 한 줄 요약 목록 → 3~5개와 이유
+ ② 지표 후보 조회      고른 테이블에 연결된 지표 (metric_table — 검색이 아니라 조회)
+ ③ 지표 선택 (LLM)     지표 이름·설명·예시 질문만 보고 1~2개 또는 '없음' (애매하면 되묻기)
+ ④ 조회 명세 (LLM)     고른 지표의 정의 + 필요한 테이블 → JSON AST
+ ⑤ 컴파일 · 검증       화이트리스트 · 지표 전개 · 날짜 → SQL (실패하면 오류 메시지로 재시도, 최대 4회)
+```
+
+단계마다 후보·선택·이유·토큰이 `ask_trace` 에 남아, 틀렸을 때 어느 단계에서 틀렸는지 보입니다.
+설계 문서는 `docs/to-be/` (플로우차트 · 프로세스 플로우 · 테이블 정의서).
+
 ## 기능
 
 - **여러 데이터베이스 지원**: MySQL, PostgreSQL, Oracle
-- **스키마 자동 동기화**: 대상 DB에서 테이블·컬럼·FK 관계를 읽어 메타데이터 DB에 저장. `AUTO_SYNC_MINUTES` 로 주기 실행, 실행마다 기록과 깨진 지표 알림
-- **자연어 → SQL**: LLM이 조회 명세(JSON AST)를 만들고 컴파일러가 검증·조립
-- **조회 표현**: 집계·목록 조회, 정렬·개수 제한, 날짜 기간 단위 묶음(일/주/월/분기/년), NULL·부분 일치·OR 조건, HAVING, DISTINCT·COUNT_DISTINCT, 기간 비교(증감률)
-- **조인**: 지표 정의의 조인, 등록된 관계(FK·수동)를 따라가는 질의 조인 — ON 조건은 모델이 아니라 관계 정의에서 옴
-- **업무 지표**: 집계형·조회형·파생형(`[매출] - [환불]`), 고정 필터 강제, 예시 질문(few-shot), 수정·버전 이력
-- **시계열 지표**: 누적 카운터의 기간 증가분(`DELTA_SUM`)과 상태 발생 횟수(`CHANGE_COUNT`)를 화면에서 등록. 구분 컬럼(예: 차량)과 순서 컬럼(예: 수집 일시)을 지정하면 컴파일러가 `LAG` 서브쿼리로 펼침 — DB 에 뷰를 만들 필요 없음
-- **용어·코드 사전**: 컬럼 동의어와 코드값 뜻(`03`=배송완료). 질문의 업무 용어를 코드로 바꾸고 사전에 없는 값은 거부
-- **되묻기**: 질문만으로 조회를 정할 수 없으면 모델이 되묻고, 사용자는 질문을 완성해 다시 보냄 (서버는 이전 질문을 기억하지 않음)
-- **질문 기록·평가**: 질문 이력·즐겨찾기·맞음/틀림 피드백, '맞음' 기록을 평가셋으로 내보내 회귀 평가
+- **스키마 동기화**: 대상 DB 의 테이블·컬럼·PK·FK 를 읽어 **이름 기준 병합** — 테이블 id 가 유지되어 지표 연결이 끊기지 않고, 사라진 테이블·컬럼은 지우지 않고 표시(soft delete). `AUTO_SYNC_MINUTES` 로 주기 실행
+- **메타데이터 보강**: LLM 이 테이블 카드(무엇을 기록하나 · 주요 컬럼 · 한 줄 요약)와 지표 예시 질문 초안을 만들고, 사람이 검수 화면에서 승인한 것만 질문 처리에 씀
+- **업무 지표**: 집계형·조회형·파생형(`[매출] - [환불]`), 시계열(`DELTA_SUM`·`CHANGE_COUNT` → `LAG` 서브쿼리), 고정 필터 강제, 동의어, 버전 이력. 승인된 예시 질문이 있어야 `active` 가 되어 질문에 쓰임
+- **사전**: 컬럼 동의어·코드값(`03`=배송완료), 업무 용어(`운행시간 = 가동시간 → bms_log.eg_time`) — 질문에 나온 용어만 프롬프트에 실음
+- **조회 표현**: 집계·목록, 정렬·개수 제한, 기간 단위 묶음, NULL·부분 일치·OR, HAVING, DISTINCT, 기간 비교(증감률), 관계를 따라가는 조인
+- **되묻기**: 테이블·지표를 정할 수 없으면 후보를 보여주고 되묻기 (서버는 이전 질문을 기억하지 않음)
+- **질문 기록·평가**: 이력·즐겨찾기·맞음/틀림, 단계별 선택 기록, '맞음' 기록을 평가 문항으로. 평가는 단계별(테이블 재현율 · 지표 정확도 · SQL 일치)로 재고 방식끼리(LLM 선택 / TF-IDF) 비교
 
 ## 설치
 
 ### 요구사항
 - Python 3.12+ ([uv](https://docs.astral.sh/uv/) 권장)
 - Node.js 18+
-- PostgreSQL (메타데이터 DB로 사용)
+- PostgreSQL (메타데이터 DB)
+- OpenAI 호환 LLM 엔드포인트 (개발 환경: gemma-4-31B-it on vLLM, 컨텍스트 16K)
 
 ### 백엔드 설정
 
 ```bash
-# 의존성 설치 (개발 도구 pytest 포함)
-uv sync
+uv sync                           # 의존성 (개발 도구 pytest 포함)
+cp .env.example backend/.env      # DB_URL, LLM 정보, NL2SQL_SECRET_KEY 채우기
+# 암호화 키 만들기
+uv run python -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
 
-# 환경변수 설정
-cp .env.example backend/.env
-# backend/.env 수정: DB_URL, LLM 정보 등
-
-# 백엔드 실행
 cd backend
 uv run python -m uvicorn app:app --reload
 ```
+
+### AS-IS 에서 옮기기
+
+AS-IS 메타데이터(`datasource_*`)가 있는 DB 라면 한 번 옮깁니다. AS-IS 표는 지우지 않습니다.
+
+```bash
+uv run python backend/migrate_v2.py           # 무엇을 옮길지 보기
+uv run python backend/migrate_v2.py --apply   # 옮기기 (비밀번호는 암호화, 지표 연결·상태 재계산, 보강 대기열 등록)
+```
+
+`schema.sql` 은 AS-IS `ask_log` 를 `ask_log_v1` 로 이름을 바꿔 두고, 마이그레이션이 새 `ask_log` 로 옮깁니다.
+옮긴 뒤에는 보강·검수 화면에서 카드·예시 질문을 만들고 승인해야 지표가 질문에 쓰입니다.
 
 ### 프론트엔드 설정
 
@@ -50,32 +74,34 @@ npm run dev
 ```
 nl2sql/
 ├── backend/
-│   ├── app.py              # FastAPI 애플리케이션 (엔드포인트)
-│   ├── schema.sql          # 메타데이터 DB 스키마 (여러 번 실행해도 안전한 이행 포함)
+│   ├── app.py              # FastAPI 엔드포인트
+│   ├── schema.sql          # 메타데이터 DB 스키마 (여러 번 실행해도 안전)
+│   ├── migrate_v2.py       # AS-IS → TO-BE 데이터 이전
 │   ├── models.py           # Pydantic 모델
-│   ├── db.py               # DB 커넥션 풀
-│   ├── catalog.py          # 드라이버별 카탈로그·FK 읽기
-│   ├── datasources.py      # 데이터소스 CRUD + 동기화 + 동기화 기록
+│   ├── db.py · secret.py   # DB 커넥션 풀 · 비밀번호 암호화 (AES-256-GCM)
+│   ├── catalog.py          # 드라이버별 카탈로그·PK·FK 읽기
+│   ├── systems.py          # 시스템 CRUD + 이름 기준 병합 동기화 + 테이블 용도
 │   ├── scheduler.py        # 자동 동기화 (AUTO_SYNC_MINUTES)
-│   ├── metrics.py          # 업무 지표 CRUD + 검증 + 버전 이력
+│   ├── metrics.py          # 지표 CRUD · 검증 · 테이블 연결 · 상태 · 이력
 │   ├── relations.py        # 테이블 관계 (FK·수동)
-│   ├── annotations.py      # 용어·코드 사전
+│   ├── annotations.py      # 컬럼 사전 (동의어·코드값)
+│   ├── glossary.py         # 업무 용어 사전
 │   ├── contract.py         # 계약서 로드, 깨진 지표 판정
-│   ├── pruner.py           # TF-IDF 프루닝
+│   ├── selector.py         # 테이블 추론 → 지표 후보 → 지표 선택 (TF-IDF 기준선 포함)
+│   ├── pruner.py           # TF-IDF 검색 (비교 기준)
 │   ├── compiler.py         # AST 정규화·검증 + SQL 조립
-│   ├── tool.py             # compile_sql · ask_user 도구
-│   ├── graph.py            # LangGraph 에이전트 루프
-│   ├── ask.py              # 질문 하나 처리 (프롬프트 + 루프), 앱과 평가가 함께 씀
-│   ├── history.py          # 질문 기록·피드백·평가셋 내보내기
-│   ├── evaluate.py         # 평가셋 실행기
-│   └── logging_config.py   # 로깅 설정
+│   ├── tool.py · graph.py  # compile_sql · ask_user 도구, LangGraph 루프
+│   ├── ask.py              # 질문 하나 처리, 앱과 평가가 함께 씀
+│   ├── enrich.py           # 보강 대기열 · LLM 초안 · 검수
+│   ├── history.py          # 질문 기록 · 단계 기록 · 피드백 · 평가 문항
+│   ├── evaluate.py         # 평가 실행기
+│   └── llm.py · logging_config.py
+├── docs/to-be/             # TO-BE 설계 문서
 ├── eval/                   # 샘플 계약서와 평가셋 (reports/ 는 실행 결과, 커밋 안 함)
 ├── tests/                  # pytest (통합 테스트는 TEST_DB_URL 이 있을 때만)
 └── frontend/src/
-    ├── App.tsx             # 라우팅
     ├── api.ts              # API 클라이언트
-    ├── lib/metrics.ts      # 지표 정의 표시·깨진 지표 판정 (백엔드와 같은 규칙)
-    └── pages/              # 질문, 질문 기록, 데이터소스·동기화·관계·사전, 지표
+    └── pages/              # 질문 · 기록 · 시스템(동기화·테이블·관계·사전·용어) · 지표 · 보강·검수
 ```
 
 ## 환경변수
@@ -83,73 +109,74 @@ nl2sql/
 | 변수 | 설명 |
 |------|------|
 | `DB_URL` | 메타데이터 DB 연결 문자열 (PostgreSQL) |
+| `NL2SQL_SECRET_KEY` | 대상 DB 비밀번호 암호화 키 (32바이트 base64). 없으면 기동하지 않음. 잃으면 비밀번호를 다시 입력해야 함 |
 | `LLM_BASE_URL` | LLM API 엔드포인트 (OpenAI 호환) |
 | `LLM_API_KEY` | LLM API 키 |
-| `LLM_MODEL` | 모델 이름 (예: gpt-3.5-turbo) |
+| `LLM_MODEL` | 모델 이름 |
 | `AUTO_SYNC_MINUTES` | 자동 동기화 주기(분). 0 또는 비우면 끔 (기본) |
 
 ## API 엔드포인트
 
-### 데이터소스·동기화
-- `GET /api/datasources` - 목록
-- `POST /api/datasources` - 등록
-- `GET /api/datasources/{id}` - 조회
-- `PUT /api/datasources/{id}` - 수정
-- `DELETE /api/datasources/{id}` - 삭제
-- `POST /api/datasources/{id}/sync` - 스키마·FK 동기화 (결과에 깨진 지표 목록 포함)
-- `GET /api/sync-logs?datasource_id=` - 동기화 실행 기록
-- `GET /api/datasources/{id}/schema` - 저장된 스키마 조회
+### 시스템 · 동기화 · 테이블
+- `GET|POST /api/systems`, `GET|PUT|DELETE /api/systems/{id}` - 시스템 (비밀번호는 응답에 없음, 수정 때 비우면 유지)
+- `POST /api/systems/{id}/sync` - 동기화 (추가·변경·삭제 건수, 깨진 지표)
+- `GET /api/sync-logs?system_id=` - 동기화 기록
+- `GET /api/systems/{id}/schema` - 저장된 스키마
+- `GET /api/systems/{id}/tables`, `PUT /api/systems/{id}/tables/{table_id}/purpose` - 테이블 용도·카드 상태
 
-### 관계·사전
-- `GET|POST /api/datasources/{id}/relations`, `DELETE /api/datasources/{id}/relations/{relation_id}` - 관계 (FK 관계는 지울 수 없음)
-- `GET /api/datasources/{id}/annotations` - 용어·코드 사전 목록
-- `PUT /api/datasources/{id}/annotations/{table}/{column}` - 컬럼 사전 저장 (둘 다 비우면 삭제)
+### 관계 · 사전 · 용어
+- `GET|POST /api/systems/{id}/relations`, `DELETE .../relations/{relation_id}` - 관계 (FK 관계는 지울 수 없음)
+- `GET /api/systems/{id}/annotations`, `PUT .../annotations/{table}/{column}` - 컬럼 동의어·코드값
+- `GET|POST /api/systems/{id}/glossary`, `PUT|DELETE .../glossary/{term_id}` - 업무 용어 (전사 공통은 `/api/glossary`)
 
 ### 지표
-- `GET /api/datasources/{id}/metrics` - 지표 목록
-- `POST /api/datasources/{id}/metrics` - 지표 등록
-- `PUT /api/datasources/{id}/metrics/{metric_id}` - 지표 수정 (버전 증가)
-- `GET /api/datasources/{id}/metrics/{metric_id}/history` - 변경 이력
-- `DELETE /api/datasources/{id}/metrics/{metric_id}` - 지표 삭제 (파생 지표가 쓰는 지표는 거부)
-- `POST /api/datasources/{id}/compile` - 모델 없이 AST 를 SQL 로 컴파일
+- `GET|POST /api/systems/{id}/metrics`, `PUT|DELETE .../metrics/{metric_id}` - 지표 (파생 지표가 쓰는 지표는 삭제 거부)
+- `GET .../metrics/{metric_id}/history` - 변경 이력
+- `POST /api/systems/{id}/compile` - 모델 없이 AST 를 SQL 로
 
-### 질문·기록
-- `POST /api/ask` - 질문에서 SQL 생성 (`clarification` 이 있으면 모델이 되물은 것)
-- `GET /api/history?datasource_id=&favorite=&feedback=` - 질문 기록
-- `PATCH /api/history/{id}` - 즐겨찾기·피드백(`up`/`down`)·메모
-- `DELETE /api/history/{id}` - 기록 삭제
-- `GET /api/history/export?datasource_id=` - '맞음' 기록을 평가셋 형식으로
+### 보강 · 검수 · 평가
+- `GET /api/systems/{id}/enrich` - 대기열 상태, `POST` - 처리 시작 (`{"enqueue_all": true}` 면 카드·예시 없는 것 모두)
+- `GET /api/systems/{id}/review` - 검수 대기 초안, `POST .../review/{kind}/{item_id}` - 승인·반려 (`table_card` · `metric_example` · `eval_case`)
+- `GET /api/systems/{id}/eval-runs` - 평가 실행 기록
+
+### 질문 · 기록
+- `POST /api/ask` - `{system_id, question}` → SQL, 고른 테이블·지표, 단계별 기록
+- `GET /api/history?system_id=&favorite=&feedback=`, `PATCH|DELETE /api/history/{id}`
+- `GET /api/history/{id}/trace` - 단계별 선택 기록
+- `POST /api/history/{id}/eval-case` - '맞음' 기록을 평가 문항으로
+- `GET /api/history/export?system_id=` - '맞음' 기록을 평가셋 파일 형식으로
 
 ## 테스트와 평가
 
 ```bash
-# 단위 테스트 (컴파일러, 프루닝, 에이전트 흐름, 평가셋 일관성)
-uv run pytest
+uv run pytest                                          # 단위 테스트
+TEST_DB_URL=postgresql://user:pw@host:5432/nl2sql_itest uv run pytest   # + API 통합 테스트 (전용 DB)
 
-# API 통합 테스트 — 비어 있는 PostgreSQL 을 하나 준비해서
-TEST_DB_URL=postgresql://postgres:pw@localhost:55432/postgres uv run pytest
+# 평가 문항 초안 만들기 (활성 지표마다 N개) → 보강·검수 화면의 '평가 문항' 에서 승인
+uv run python backend/evaluate.py --system-id <uuid> --generate 3
 
-# 평가셋: 모델 없이 AST → 기대 SQL 확인
+# 승인된 평가 문항으로 실행 → eval_run · eval_result 에 남고 보강·검수 화면에 표시
+uv run python backend/evaluate.py --system-id <uuid>                    # TO-BE (LLM 선택)
+uv run python backend/evaluate.py --system-id <uuid> --selector tfidf   # 비교 기준 (한 번에 검색)
+
+# 샘플 계약서·평가셋 (DB 없이)
 uv run python backend/evaluate.py --cases eval/shoppingmall_cases.json --contract eval/shoppingmall_contract.json --compile-only
-
-# 평가셋: 실제 LLM 으로 정확도 측정 (리포트는 eval/reports/)
-uv run python backend/evaluate.py --cases eval/shoppingmall_cases.json --contract eval/shoppingmall_contract.json
-
-# 질문 기록에서 내보낸 평가셋을 실제 데이터소스 계약서로
-uv run python backend/evaluate.py --cases eval-내보낸파일.json --datasource-id <uuid>
 ```
 
-평가는 기대 SQL 과의 문자열 일치(`accuracy`)와 별칭 이름 차이를 무시한 일치(`accuracy_alias_insensitive`)를 함께 냅니다.
-조인 순서, `IN`/`OR`, 조회 컬럼 수처럼 의미가 같은 변형은 둘 다 오답으로 셉니다 — 리포트의 실패 목록을 사람이 확인하십시오.
+평가는 단계별로 냅니다: 테이블 재현율(정답 테이블이 후보에 들었나), 지표 정확도('맞는 지표 없음' 이 정답이면 안 고른 게 맞음),
+SQL 일치(별칭 이름 차이 무시). 평가 문항은 지표 예시 질문과 따로 만듭니다 — 예시 질문으로 평가하면 점수가 부풀려집니다.
 
 ## 주요 설계 원칙
 
-1. **SQL 문자열은 모델이 생성하지 않음** - JSON AST만 생성하고 컴파일러가 검증 후 SQL 조립. 조인의 ON 조건도 관계 정의에서 옴
-2. **등록과 동기화는 분리** - 실패의 성격이 다르므로 별도 엔드포인트
-3. **동기화는 통째로 교체** - 병합하지 않음 (테이블·FK 삭제를 반영하기 위해). 사람이 등록한 관계·사전은 이름으로 들고 있어 남음
-4. **요청 간 격리** - 다음 질문은 이전 질문을 모름. 되묻기도 사용자가 질문을 완성해 새로 보내는 방식
-5. **지표의 고정 필터는 컴파일러가 강제** - 프롬프트만으로 신뢰하지 않음. 파생 지표는 구성 지표의 필터를 CASE WHEN 으로 품음
-6. **오류 메시지가 다음 시도의 프롬프트** - 무엇이 가능한지(사용 가능한 테이블, 연산자, 코드값, 필요한 joins)를 함께 실음
+1. **넓게 고르고 점점 좁힌다** - 시스템 → 테이블 → 지표. 앞 단계는 놓치지 않기(재현율), 뒤 단계는 정확히
+2. **구조로 알 수 있는 것은 LLM 에 묻지 않는다** - 테이블 → 지표는 `metric_table` 조회. 지표를 저장하면 정의에서 자동으로 만든다
+3. **판단할 때 필요한 것만 보낸다** - 고를 때는 요약(이름·설명·예시 질문), SQL 을 만들 때만 상세
+4. **초안은 LLM, 책임은 사람** - 카드·예시 질문·평가 문항은 승인한 것만 쓴다
+5. **SQL 문자열은 모델이 생성하지 않음** - JSON AST 만 만들고 컴파일러가 검증 후 조립. 조인 ON 조건도 관계 정의에서 옴
+6. **고른 지표는 지킨다** - 지표를 고른 뒤 원본 컬럼을 직접 집계하면 오류 없이 틀린 답이 나온다. 첫 시도가 지표를 쓰지 않으면 되돌려 보낸다
+7. **동기화는 병합** - id 를 유지하고 사라진 것은 표시만. 지표 연결과 이력이 끊기지 않는다
+8. **오류 메시지가 다음 시도의 프롬프트** - 무엇이 가능한지를 함께 실음
+9. **요청 간 격리** - 다음 질문은 이전 질문을 모름
 
 ## 라이선스
 

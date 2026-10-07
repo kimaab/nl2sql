@@ -13,10 +13,43 @@ interface Entry extends api.AskResponse {
 
 const EXAMPLES = ["지난달 매출 합계는?", "매출 상위 10개 고객", "이번 달과 지난달 주문 수 비교"];
 
+const STAGE_LABEL = { table: "테이블 추론", metric: "지표 선택", sql: "조회 명세" } as const;
+
+/** 단계별로 무엇을 골랐고 왜 골랐는지 — 틀렸을 때 어느 단계에서 틀렸는지 보인다. */
+export function Steps({ steps }: { steps: api.AskStep[] }) {
+  const tokens = steps.reduce((n, s) => n + s.prompt_tokens + s.completion_tokens, 0);
+  const ms = steps.reduce((n, s) => n + s.elapsed_ms, 0);
+  return (
+    <details className="steps">
+      <summary>
+        선택 과정 · {steps.map((s) => STAGE_LABEL[s.stage]).join(" → ")} · 토큰 {tokens.toLocaleString()} ·{" "}
+        {(ms / 1000).toFixed(1)}초
+      </summary>
+      {steps.map((s, i) => (
+        <div key={i} className="step">
+          <span className="step-name">{STAGE_LABEL[s.stage]}</span>
+          <div>
+            {s.stage === "sql" ? (
+              <code>{s.selected[0] ?? "-"}</code>
+            ) : (
+              <>
+                {s.selected.length ? s.selected.join(", ") : <span className="faint">없음</span>}
+                <span className="faint"> / 후보 {s.candidates.length}개</span>
+              </>
+            )}
+            {s.reason && <div className="step-reason">{s.reason}</div>}
+          </div>
+          <span className="faint">{(s.prompt_tokens + s.completion_tokens).toLocaleString()} 토큰</span>
+        </div>
+      ))}
+    </details>
+  );
+}
+
 export function AskPage() {
   const [params] = useSearchParams();
-  const [datasources, setDatasources] = useState<api.Datasource[] | null>(null);
-  const [datasourceId, setDatasourceId] = useState(params.get("ds") ?? "");
+  const [systems, setSystems] = useState<api.System[] | null>(null);
+  const [systemId, setSystemId] = useState(params.get("ds") ?? "");
   const [question, setQuestion] = useState(params.get("q") ?? "");
   const [history, setHistory] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -28,15 +61,15 @@ export function AskPage() {
 
   useEffect(() => {
     api
-      .listDatasources()
+      .listSystems()
       .then((data) => {
         const ready = data.filter((d) => d.synced_at); // 동기화된 것만
-        setDatasources(ready);
-        if (ready.length === 1 && !params.get("ds")) setDatasourceId(ready[0].id);
+        setSystems(ready);
+        if (ready.length === 1 && !params.get("ds")) setSystemId(ready[0].id);
       })
       .catch((err) => {
-        toast("데이터소스 로드 실패: " + errorMessage(err), "error");
-        setDatasources([]);
+        toast("시스템 로드 실패: " + errorMessage(err), "error");
+        setSystems([]);
       });
   }, []);
 
@@ -58,8 +91,8 @@ export function AskPage() {
 
   async function handleSubmit() {
     const asked = question.trim();
-    if (!datasourceId) {
-      toast("데이터소스를 먼저 선택하세요", "error");
+    if (!systemId) {
+      toast("시스템을 먼저 선택하세요", "error");
       return;
     }
     if (!asked || loading) return;
@@ -69,7 +102,7 @@ export function AskPage() {
     setQuestion("");
     try {
       // 서버는 이전 질문을 모른다 — body 에는 이번 질문 하나만 싣는다.
-      const res = await api.ask(datasourceId, asked);
+      const res = await api.ask(systemId, asked);
       setHistory((prev) => [...prev, { question: asked, ...res, favorite: false, feedback: null }]);
       if (res.clarification) {
         // 되물었으면 원래 질문을 돌려놓고, 답을 덧붙여 한 문장으로 다시 보내게 한다
@@ -110,24 +143,24 @@ export function AskPage() {
     }
   }
 
-  const noDatasource = datasources !== null && datasources.length === 0;
+  const noSystem = systems !== null && systems.length === 0;
 
   return (
     <div className="ask">
       <div className="ask-bar">
         <strong>SQL 생성</strong>
         <span className="spacer" />
-        <Link to={datasourceId ? `/history?ds=${datasourceId}` : "/history"} className="muted">
+        <Link to={systemId ? `/history?ds=${systemId}` : "/history"} className="muted">
           질문 기록 →
         </Link>
         <select
           className="select"
-          value={datasourceId}
-          onChange={(e) => setDatasourceId(e.target.value)}
+          value={systemId}
+          onChange={(e) => setSystemId(e.target.value)}
           disabled={loading}
         >
-          <option value="">데이터소스 선택</option>
-          {(datasources ?? []).map((d) => (
+          <option value="">시스템 선택</option>
+          {(systems ?? []).map((d) => (
             <option key={d.id} value={d.id}>
               {d.name} ({d.driver})
             </option>
@@ -140,9 +173,9 @@ export function AskPage() {
           {history.length === 0 && !pending && (
             <div className="empty">
               <div className="empty-title">무엇이 궁금하세요?</div>
-              {noDatasource ? (
+              {noSystem ? (
                 <p className="empty-desc">
-                  동기화된 데이터소스가 없습니다. <Link to="/datasources/new">데이터소스를 등록</Link>하고
+                  동기화된 시스템이 없습니다. <Link to="/systems/new">시스템을 등록</Link>하고
                   스키마를 동기화하세요.
                 </p>
               ) : (
@@ -220,6 +253,7 @@ export function AskPage() {
                 ) : (
                   <div className="alert danger">{entry.error}</div>
                 )}
+                {entry.steps?.length > 0 && <Steps steps={entry.steps} />}
               </div>
             </div>
           ))}

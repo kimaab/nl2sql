@@ -4,6 +4,7 @@ import * as api from "../api";
 import { Badge, Button, EmptyState, Loading, PageHeader, Segmented, SqlBlock } from "../components/ui";
 import { useToast } from "../components/Toast";
 import { errorMessage, formatDateTime } from "../lib/format";
+import { Steps } from "./AskPage";
 
 const PAGE = 50;
 type View = "all" | "favorite" | "up" | "down";
@@ -12,15 +13,16 @@ export function HistoryPage() {
   const [params, setParams] = useSearchParams();
   const dsId = params.get("ds") ?? "";
   const view = (params.get("view") as View) ?? "all";
-  const [datasources, setDatasources] = useState<api.Datasource[]>([]);
+  const [systems, setSystems] = useState<api.System[]>([]);
   const [items, setItems] = useState<api.HistoryEntry[] | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
+  const [traces, setTraces] = useState<Record<string, api.AskStep[]>>({});
   const toast = useToast();
   const navigate = useNavigate();
 
   useEffect(() => {
-    api.listDatasources().then(setDatasources).catch(() => setDatasources([]));
+    api.listSystems().then(setSystems).catch(() => setSystems([]));
   }, []);
 
   useEffect(() => {
@@ -31,7 +33,7 @@ export function HistoryPage() {
   async function load(offset: number) {
     try {
       const page = await api.listHistory({
-        datasourceId: dsId || undefined,
+        systemId: dsId || undefined,
         favorite: view === "favorite" ? true : undefined,
         feedback: view === "up" || view === "down" ? view : undefined,
         limit: PAGE,
@@ -62,6 +64,27 @@ export function HistoryPage() {
     }
   }
 
+  async function toggle(id: string) {
+    setOpen(open === id ? null : id);
+    if (open !== id && !traces[id]) {
+      try {
+        const steps = await api.historyTrace(id);
+        setTraces((t) => ({ ...t, [id]: steps }));
+      } catch {
+        setTraces((t) => ({ ...t, [id]: [] }));
+      }
+    }
+  }
+
+  async function promote(entry: api.HistoryEntry) {
+    try {
+      await api.promoteToEvalCase(entry.id);
+      toast("평가 문항으로 만들었습니다 (승인됨)", "ok");
+    } catch (err) {
+      toast("만들지 못했습니다: " + errorMessage(err), "error");
+    }
+  }
+
   async function remove(entry: api.HistoryEntry) {
     if (!confirm("이 질문 기록을 지우시겠습니까?")) return;
     try {
@@ -82,7 +105,7 @@ export function HistoryPage() {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = `eval-${data.datasource}.json`;
+      a.download = `eval-${data.system}.json`;
       a.click();
       URL.revokeObjectURL(a.href);
       toast(`평가셋 ${data.cases.length}건을 내려받았습니다`, "ok");
@@ -97,7 +120,7 @@ export function HistoryPage() {
         title="질문 기록"
         desc="지난 질문과 결과입니다. 맞음/틀림을 표시해 두면 '맞음' 기록을 평가셋으로 내보내 회귀 테스트에 쓸 수 있습니다."
         actions={
-          <Button onClick={exportCases} disabled={!dsId} title={dsId ? "" : "데이터소스를 먼저 고르세요"}>
+          <Button onClick={exportCases} disabled={!dsId} title={dsId ? "" : "시스템을 먼저 고르세요"}>
             평가셋 내보내기
           </Button>
         }
@@ -110,8 +133,8 @@ export function HistoryPage() {
           value={dsId}
           onChange={(e) => setFilter({ ds: e.target.value })}
         >
-          <option value="">전체 데이터소스</option>
-          {datasources.map((d) => (
+          <option value="">전체 시스템</option>
+          {systems.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name}
             </option>
@@ -141,7 +164,7 @@ export function HistoryPage() {
                 <tr>
                   <th style={{ width: "40%" }}>질문</th>
                   <th>결과</th>
-                  <th>데이터소스</th>
+                  <th>시스템</th>
                   <th>시각</th>
                   <th />
                 </tr>
@@ -149,14 +172,16 @@ export function HistoryPage() {
               <tbody>
                 {items.map((e) => (
                   <Fragment key={e.id}>
-                    <tr className="clickable" onClick={() => setOpen(open === e.id ? null : e.id)}>
+                    <tr className="clickable" onClick={() => toggle(e.id)}>
                       <td>
                         <div className="cell-title">
                           {e.favorite && "★ "}
                           {e.question}
                         </div>
                         <div className="cell-sub">
-                          {e.attempts}번 시도 · {Math.round(e.elapsed_ms)}ms
+                          {e.attempts}번 시도 · {Math.round(e.elapsed_ms)}ms · 토큰 {e.total_tokens.toLocaleString()}
+                          {e.selected_metrics.length > 0 && <> · 지표 {e.selected_metrics.join(", ")}</>}
+                          {e.selected_tables.length > 0 && <> · 테이블 {e.selected_tables.join(", ")}</>}
                         </div>
                       </td>
                       <td>
@@ -170,7 +195,7 @@ export function HistoryPage() {
                         {e.feedback === "up" && <Badge tone="ok">맞음</Badge>}
                         {e.feedback === "down" && <Badge tone="danger">틀림</Badge>}
                       </td>
-                      <td>{e.datasource_name}</td>
+                      <td>{e.system_name}</td>
                       <td className="faint">{formatDateTime(e.created_at)}</td>
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }} onClick={(ev) => ev.stopPropagation()}>
                         <Button size="sm" variant="ghost" onClick={() => update(e, { favorite: !e.favorite })}>
@@ -179,7 +204,7 @@ export function HistoryPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => navigate(`/ask?ds=${e.datasource_id}&q=${encodeURIComponent(e.question)}`)}
+                          onClick={() => navigate(`/ask?ds=${e.system_id}&q=${encodeURIComponent(e.question)}`)}
                         >
                           다시 묻기
                         </Button>
@@ -197,6 +222,7 @@ export function HistoryPage() {
                               </div>
                             )}
                             {e.ast && <pre className="sql">{JSON.stringify(e.ast)}</pre>}
+                            {traces[e.id]?.length ? <Steps steps={traces[e.id]} /> : null}
                             <div className="row">
                               {e.sql && (
                                 <>
@@ -207,6 +233,15 @@ export function HistoryPage() {
                                   >
                                     맞음
                                   </Button>
+                                  {e.feedback === "up" && (
+                                    <Button
+                                      size="sm"
+                                      title="이 질문과 고른 테이블·지표·SQL 을 정답으로 하는 평가 문항을 만듭니다"
+                                      onClick={() => promote(e)}
+                                    >
+                                      평가 문항으로
+                                    </Button>
+                                  )}
                                   <Button
                                     size="sm"
                                     variant={e.feedback === "down" ? "danger" : "secondary"}

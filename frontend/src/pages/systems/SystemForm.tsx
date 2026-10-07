@@ -5,9 +5,10 @@ import { Button, Field, Loading, PageHeader } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage } from "../../lib/format";
 
-const EMPTY: api.DatasourceInput = {
+const EMPTY: api.SystemInput = {
+  code: "",
   name: "",
-  description: "",
+  domain_desc: "",
   driver: "postgresql",
   host: "",
   port: 0,
@@ -17,10 +18,10 @@ const EMPTY: api.DatasourceInput = {
   password: "",
 };
 
-export function DatasourceForm() {
+export function SystemForm() {
   const { id } = useParams();
   const editing = Boolean(id);
-  const [form, setForm] = useState<api.DatasourceInput>(EMPTY);
+  const [form, setForm] = useState<api.SystemInput>(EMPTY);
   const [loading, setLoading] = useState(editing);
   const [saving, setSaving] = useState(false);
   const toast = useToast();
@@ -29,11 +30,12 @@ export function DatasourceForm() {
   useEffect(() => {
     if (!id) return;
     api
-      .getDatasource(id)
+      .getSystem(id)
       .then((ds) =>
         setForm({
+          code: ds.code,
           name: ds.name,
-          description: ds.description,
+          domain_desc: ds.domain_desc,
           driver: ds.driver,
           host: ds.host,
           port: ds.port,
@@ -44,13 +46,13 @@ export function DatasourceForm() {
         })
       )
       .catch((err) => {
-        toast("데이터소스를 불러오지 못했습니다: " + errorMessage(err), "error");
-        navigate("/datasources");
+        toast("시스템을 불러오지 못했습니다: " + errorMessage(err), "error");
+        navigate("/systems");
       })
       .finally(() => setLoading(false));
   }, [id]);
 
-  const set = <K extends keyof api.DatasourceInput>(key: K, value: api.DatasourceInput[K]) =>
+  const set = <K extends keyof api.SystemInput>(key: K, value: api.SystemInput[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
 
   async function handleSubmit(e: FormEvent) {
@@ -58,11 +60,11 @@ export function DatasourceForm() {
     try {
       setSaving(true);
       if (id) {
-        await api.updateDatasource(id, form);
+        await api.updateSystem(id, form);
         toast("수정했습니다", "ok");
-        navigate("/datasources");
+        navigate("/systems");
       } else {
-        const created = await api.createDatasource(form);
+        const created = await api.createSystem(form);
         toast("등록했습니다. 이어서 스키마를 동기화하세요", "ok");
         navigate(`/sync?ds=${created.id}`);
       }
@@ -78,14 +80,23 @@ export function DatasourceForm() {
   return (
     <div className="page narrow">
       <PageHeader
-        back={{ to: "/datasources", label: "데이터소스 목록" }}
-        title={editing ? "데이터소스 편집" : "새 데이터소스 등록"}
+        back={{ to: "/systems", label: "시스템 목록" }}
+        title={editing ? "시스템 편집" : "새 시스템 등록"}
         desc="읽기 전용 계정을 권장합니다. 비밀번호는 저장 후 다시 표시되지 않습니다."
       />
 
       <form className="card" onSubmit={handleSubmit} autoComplete="off">
         <div className="card-pad">
           <div className="form-grid">
+            <Field label="코드" required hint="영문·숫자·_·- (API·로그에서 부르는 이름)">
+              <input
+                className="input"
+                value={form.code}
+                onChange={(e) => set("code", e.target.value)}
+                pattern="[A-Za-z0-9_\-]{1,40}"
+                required
+              />
+            </Field>
             <Field label="이름" required>
               <input
                 className="input"
@@ -98,18 +109,24 @@ export function DatasourceForm() {
               <select
                 className="select"
                 value={form.driver}
-                onChange={(e) => set("driver", e.target.value as api.DatasourceInput["driver"])}
+                onChange={(e) => set("driver", e.target.value as api.SystemInput["driver"])}
               >
                 <option value="postgresql">PostgreSQL</option>
                 <option value="mysql">MySQL</option>
                 <option value="oracle">Oracle</option>
               </select>
             </Field>
-            <Field label="설명" full>
-              <input
-                className="input"
-                value={form.description}
-                onChange={(e) => set("description", e.target.value)}
+            <Field
+              label="업무 영역 설명"
+              full
+              hint="무엇을 하는 시스템인지, 사람들이 주로 무엇을 묻는지. 테이블 추론 프롬프트 첫머리에 실립니다."
+            >
+              <textarea
+                className="textarea"
+                rows={3}
+                value={form.domain_desc}
+                onChange={(e) => set("domain_desc", e.target.value)}
+                placeholder="예: 차량 BMS 수집·운행·경고 데이터. 차량별 상태, 가동시간, 경고 이력을 주로 조회"
               />
             </Field>
 
@@ -174,7 +191,7 @@ export function DatasourceForm() {
           </div>
         </div>
         <div className="form-actions">
-          <Button variant="ghost" onClick={() => navigate("/datasources")}>
+          <Button variant="ghost" onClick={() => navigate("/systems")}>
             취소
           </Button>
           <Button type="submit" variant="primary" disabled={saving}>

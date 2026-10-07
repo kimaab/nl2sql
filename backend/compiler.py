@@ -1111,8 +1111,13 @@ class Compiler:
                         "value": resolve_relative(spec.get("value"), where)})
         return out
 
-    def _condition(self, spec, ctx: dict) -> str:
-        """WHERE 조건 하나. any_of / all_of 로 묶인 조건은 괄호로 감싼다."""
+    def _condition(self, spec, ctx: dict, parent: str = " AND ") -> str:
+        """WHERE 조건 하나. any_of / all_of 로 묶인 조건은 의미가 달라질 때만 괄호로 감싼다.
+
+        parent 는 이 조건을 잇는 바깥 연결어. 같은 연결어끼리(AND 안의 all_of, OR 안의 any_of)나
+        조건이 하나뿐인 묶음은 괄호가 뜻을 바꾸지 않으므로 풀어 쓴다. 모델이 filters 전체를
+        all_of 하나로 감싸 보내는 일이 흔하다 — filters 는 원래 AND 다.
+        """
         if isinstance(spec, dict) and ("any_of" in spec or "all_of" in spec):
             if len(spec) != 1:
                 raise ValueError(f"any_of / all_of 는 다른 키와 함께 쓸 수 없습니다 -> 받은 키: {sorted(spec)}")
@@ -1121,7 +1126,8 @@ class Compiler:
             if not isinstance(items, list) or len(items) < 1:
                 raise ValueError(f"{group} 는 조건 목록입니다 -> {items!r}")
             joiner = " OR " if group == "any_of" else " AND "
-            return "(" + joiner.join(self._condition(s, ctx) for s in items) + ")"
+            inner = joiner.join(self._condition(s, ctx, joiner) for s in items)
+            return inner if len(items) == 1 or joiner == parent else f"({inner})"
         return self._filter(spec, ctx["scope"], ctx["base"], ctx["qualify"])
 
     def _filter(self, spec: dict, scope: dict, base: str, qualify: bool) -> str:

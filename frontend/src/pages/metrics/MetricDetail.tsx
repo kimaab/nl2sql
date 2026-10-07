@@ -1,16 +1,16 @@
 import { Fragment, useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import * as api from "../../api";
 import { Alert, Badge, Button, EmptyState, Loading, PageHeader, SqlBlock } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage, formatDateTime } from "../../lib/format";
-import { brokenReason, definitionLines, KIND_LABEL, OPERATORS, SOURCES } from "../../lib/metrics";
+import { brokenReason, definitionLines, KIND_LABEL, OPERATORS, SOURCES, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
 
-const ACTION_LABEL = { create: "등록", update: "수정", delete: "삭제" } as const;
+const ACTION_LABEL = { create: "등록", update: "수정", delete: "삭제", retire: "사용 중지" } as const;
 
 export function MetricDetail() {
   const { dsId = "", metricId = "" } = useParams();
-  const [datasource, setDatasource] = useState<api.Datasource | null>(null);
+  const [system, setSystem] = useState<api.System | null>(null);
   const [metric, setMetric] = useState<api.Metric | null | undefined>(undefined);
   const [all, setAll] = useState<api.Metric[]>([]);
   const [tables, setTables] = useState<api.SchemaTable[] | null>(null);
@@ -22,8 +22,8 @@ export function MetricDetail() {
   useEffect(() => {
     (async () => {
       try {
-        const [ds, list] = await Promise.all([api.getDatasource(dsId), api.listMetrics(dsId)]);
-        setDatasource(ds);
+        const [ds, list] = await Promise.all([api.getSystem(dsId), api.listMetrics(dsId)]);
+        setSystem(ds);
         setAll(list);
         setMetric(list.find((m) => m.id === metricId) ?? null);
         api.metricHistory(dsId, metricId).then(setHistory).catch(() => setHistory([]));
@@ -90,12 +90,28 @@ export function MetricDetail() {
       />
 
       <div className="stack">
-        {broken && <Alert tone="warn">스키마와 맞지 않아 질문에 쓰이지 않습니다 — {broken}</Alert>}
+        {(metric.broken_reason || broken) && (
+          <Alert tone="warn">스키마와 맞지 않아 질문에 쓰이지 않습니다 — {metric.broken_reason || broken}</Alert>
+        )}
+        {metric.status === "draft" && (
+          <Alert tone="info">
+            검수 대기 — 승인된 예시 질문이 있어야 질문에 쓰입니다.{" "}
+            {metric.draft_example_count > 0 ? (
+              <Link to={`/review?ds=${dsId}`}>LLM 이 만든 예시 {metric.draft_example_count}개를 검수하세요</Link>
+            ) : (
+              "예시 질문을 직접 추가하거나 보강 화면에서 초안을 만드세요."
+            )}
+          </Alert>
+        )}
+        {metric.synonyms.length > 0 && (
+          <div className="faint">같은 말: {metric.synonyms.join(", ")}</div>
+        )}
 
         <div className="card">
           <div className="card-head">
             <span className="card-title">정의</span>
             <Badge tone="primary">{KIND_LABEL[metric.kind]}</Badge>
+            <Badge tone={STATUS_TONE[metric.status]}>{STATUS_LABEL[metric.status]}</Badge>
             <span className="faint">v{metric.version}</span>
           </div>
           <div className="card-pad">
@@ -210,8 +226,8 @@ export function MetricDetail() {
 
         <div className="card card-pad">
           <dl className="kv" style={{ margin: 0 }}>
-            <dt>데이터소스</dt>
-            <dd>{datasource?.name}</dd>
+            <dt>시스템</dt>
+            <dd>{system?.name}</dd>
             <dt>테이블</dt>
             <dd>
               <code>{[metric.table_name, ...metric.joins.map((j) => j.table)].join(", ")}</code>

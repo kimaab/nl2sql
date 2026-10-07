@@ -7,15 +7,15 @@ import { formatAgo, formatDateTime } from "../../lib/format";
 export function SyncHistory() {
   const [params, setParams] = useSearchParams();
   const dsId = params.get("ds") ?? "";
-  const [datasources, setDatasources] = useState<api.Datasource[] | null>(null);
+  const [systems, setSystems] = useState<api.System[] | null>(null);
   const [logs, setLogs] = useState<api.SyncLog[] | null>(null);
 
   useEffect(() => {
     api
-      .listDatasources()
+      .listSystems()
       // 오래 동기화하지 않은 것, 한 번도 안 한 것이 위로 오게 한다
-      .then((list) => setDatasources([...list].sort((a, b) => (a.synced_at ?? "").localeCompare(b.synced_at ?? ""))))
-      .catch(() => setDatasources([]));
+      .then((list) => setSystems([...list].sort((a, b) => (a.synced_at ?? "").localeCompare(b.synced_at ?? ""))))
+      .catch(() => setSystems([]));
   }, []);
 
   useEffect(() => {
@@ -23,44 +23,44 @@ export function SyncHistory() {
     api.listSyncLogs(dsId || undefined, 100).then(setLogs).catch(() => setLogs([]));
   }, [dsId]);
 
-  // 데이터소스마다 가장 최근 기록 — 깨진 지표 알림은 마지막 동기화 기준이다
+  // 시스템마다 가장 최근 기록 — 깨진 지표 알림은 마지막 동기화 기준이다
   const latest = new Map<string, api.SyncLog>();
-  for (const log of logs ?? []) if (!latest.has(log.datasource_id)) latest.set(log.datasource_id, log);
+  for (const log of logs ?? []) if (!latest.has(log.system_id)) latest.set(log.system_id, log);
   const alerts = [...latest.values()].filter((l) => l.status === "error" || l.broken_metrics.length > 0);
 
   return (
     <div className="page wide">
       <PageHeader
         title="동기화 현황"
-        desc="데이터소스별 마지막 상태와 실행 기록입니다. 자동 동기화(AUTO_SYNC_MINUTES)를 켜면 주기 실행도 여기에 'auto'로 남습니다."
+        desc="시스템별 마지막 상태와 실행 기록입니다. 자동 동기화(AUTO_SYNC_MINUTES)를 켜면 주기 실행도 여기에 'auto'로 남습니다."
       />
 
       <div className="stack">
         {alerts.map((l) =>
           l.status === "error" ? (
             <Alert key={l.id} tone="danger">
-              <strong>{l.datasource_name}</strong> 마지막 동기화 실패 ({formatDateTime(l.started_at)}): {l.error}
+              <strong>{l.system_name}</strong> 마지막 동기화 실패 ({formatDateTime(l.started_at)}): {l.error}
             </Alert>
           ) : (
             <Alert key={l.id} tone="warn">
-              <strong>{l.datasource_name}</strong> 동기화 뒤 깨진 지표 {l.broken_metrics.length}개 —{" "}
+              <strong>{l.system_name}</strong> 동기화 뒤 깨진 지표 {l.broken_metrics.length}개 —{" "}
               {l.broken_metrics.map((b) => `${b.name} (${b.reason})`).join(", ")}.{" "}
-              <Link to={`/metrics?ds=${l.datasource_id}`}>지표 확인 →</Link>
+              <Link to={`/metrics?ds=${l.system_id}`}>지표 확인 →</Link>
             </Alert>
           )
         )}
 
         <div className="card">
-          {datasources === null ? (
+          {systems === null ? (
             <Loading />
-          ) : datasources.length === 0 ? (
-            <EmptyState title="데이터소스가 없습니다" />
+          ) : systems.length === 0 ? (
+            <EmptyState title="시스템이 없습니다" />
           ) : (
             <div className="table-wrap">
               <table className="table">
                 <thead>
                   <tr>
-                    <th>데이터소스</th>
+                    <th>시스템</th>
                     <th>상태</th>
                     <th>마지막 동기화</th>
                     <th className="num">테이블</th>
@@ -68,7 +68,7 @@ export function SyncHistory() {
                   </tr>
                 </thead>
                 <tbody>
-                  {datasources.map((ds) => (
+                  {systems.map((ds) => (
                     <tr key={ds.id} className="clickable" onClick={() => setParams(dsId === ds.id ? {} : { ds: ds.id })}>
                       <td>
                         <div className="cell-title">
@@ -104,7 +104,7 @@ export function SyncHistory() {
         <div className="card">
           <div className="card-head">
             <span className="card-title">실행 기록</span>
-            <span className="faint">{dsId ? datasources?.find((d) => d.id === dsId)?.name : "전체"}</span>
+            <span className="faint">{dsId ? systems?.find((d) => d.id === dsId)?.name : "전체"}</span>
           </div>
           {logs === null ? (
             <Loading />
@@ -116,12 +116,12 @@ export function SyncHistory() {
                 <thead>
                   <tr>
                     <th>시각</th>
-                    <th>데이터소스</th>
+                    <th>시스템</th>
                     <th>방식</th>
                     <th>결과</th>
-                    <th className="num">테이블</th>
-                    <th className="num">컬럼</th>
-                    <th className="num">관계</th>
+                    <th className="num">추가</th>
+                    <th className="num">변경</th>
+                    <th className="num">삭제</th>
                     <th>깨진 지표 / 오류</th>
                   </tr>
                 </thead>
@@ -129,14 +129,14 @@ export function SyncHistory() {
                   {logs.map((l) => (
                     <tr key={l.id}>
                       <td className="faint">{formatDateTime(l.started_at)}</td>
-                      <td>{l.datasource_name}</td>
+                      <td>{l.system_name}</td>
                       <td>
                         <Badge tone={l.trigger === "auto" ? "info" : "primary"}>{l.trigger === "auto" ? "자동" : "수동"}</Badge>
                       </td>
                       <td>{l.status === "ok" ? <Badge tone="ok">성공</Badge> : <Badge tone="danger">실패</Badge>}</td>
-                      <td className="num">{l.table_count ?? "-"}</td>
-                      <td className="num">{l.column_count ?? "-"}</td>
-                      <td className="num">{l.relation_count ?? "-"}</td>
+                      <td className="num">{l.tables_added ?? "-"}</td>
+                      <td className="num">{l.tables_changed ?? "-"}</td>
+                      <td className="num">{l.tables_removed ?? "-"}</td>
                       <td>
                         {l.error ? (
                           <span className="faint">{l.error}</span>

@@ -65,7 +65,7 @@ export function MetricWizard() {
   const { dsId: editDs, metricId } = useParams();
   const editing = Boolean(editDs && metricId);
   const [params] = useSearchParams();
-  const [datasources, setDatasources] = useState<api.Datasource[] | null>(null);
+  const [systems, setSystems] = useState<api.System[] | null>(null);
   const [dsId, setDsId] = useState(editDs ?? params.get("ds") ?? "");
   const [tables, setTables] = useState<api.SchemaTable[]>([]);
   const [relations, setRelations] = useState<api.Relation[]>([]);
@@ -80,12 +80,12 @@ export function MetricWizard() {
 
   useEffect(() => {
     api
-      .listDatasources()
+      .listSystems()
       // 동기화된 것만 쓸 수 있다. 스키마가 없으면 테이블·컬럼을 고를 수 없다.
-      .then((list) => setDatasources(list.filter((d) => d.synced_at)))
+      .then((list) => setSystems(list.filter((d) => d.synced_at)))
       .catch((err) => {
-        toast("데이터소스를 불러오지 못했습니다: " + errorMessage(err), "error");
-        setDatasources([]);
+        toast("시스템을 불러오지 못했습니다: " + errorMessage(err), "error");
+        setSystems([]);
       });
   }, []);
 
@@ -306,7 +306,7 @@ export function MetricWizard() {
     }
   }
 
-  if (datasources === null || !loaded) return <Loading />;
+  if (systems === null || !loaded) return <Loading />;
 
   const questionFilters = form.fixed_filters.filter((f) => (f.source ?? "literal") === "question").length;
 
@@ -375,13 +375,13 @@ export function MetricWizard() {
             {step === 1 && (
               <>
                 <div className="card-title">어디서 가져올까요?</div>
-                {datasources.length === 0 ? (
+                {systems.length === 0 ? (
                   <Alert tone="warn">
-                    스키마를 동기화한 데이터소스가 없습니다. 먼저 데이터소스를 등록하고 동기화하세요.
+                    스키마를 동기화한 시스템이 없습니다. 먼저 시스템을 등록하고 동기화하세요.
                   </Alert>
                 ) : (
                   <div className="form-grid">
-                    <Field label="데이터소스" required>
+                    <Field label="시스템" required>
                       <select
                         className="select"
                         value={dsId}
@@ -392,7 +392,7 @@ export function MetricWizard() {
                         }}
                       >
                         <option value="">선택하세요</option>
-                        {datasources.map((d) => (
+                        {systems.map((d) => (
                           <option key={d.id} value={d.id}>
                             {d.name} ({d.driver})
                           </option>
@@ -428,7 +428,7 @@ export function MetricWizard() {
                 {dsId && form.table_name && (
                   <Field
                     label="조인"
-                    hint="등록된 관계가 있으면 ON 조건이 자동으로 채워집니다. 관계는 '데이터소스 › 관계'에서 관리합니다."
+                    hint="등록된 관계가 있으면 ON 조건이 자동으로 채워집니다. 관계는 '시스템 › 관계'에서 관리합니다."
                   >
                     <div className="stack" style={{ gap: 10 }}>
                       {form.joins.map((j, i) => {
@@ -871,8 +871,20 @@ export function MetricWizard() {
                   />
                 </Field>
                 <Field
+                  label="같은 말"
+                  hint="이 지표를 부르는 다른 말 (쉼표로 구분). 지표 선택 때 LLM 이 함께 봅니다."
+                >
+                  <input
+                    className="input"
+                    value={form.synonyms.join(", ")}
+                    onChange={(e) => patch({ synonyms: e.target.value.split(",").map((s) => s.trimStart()) })}
+                    onBlur={() => patch({ synonyms: form.synonyms.map((s) => s.trim()).filter(Boolean) })}
+                    placeholder="운행시간, 엔진 시간"
+                  />
+                </Field>
+                <Field
                   label="설명"
-                  hint="질문과 이 지표를 이어주는 검색 본문입니다. 사용자가 쓸 법한 표현을 넣어주세요."
+                  hint="LLM 이 지표를 고를 때 읽습니다. 이름을 되풀이하지 말고 무엇을 세는지 적으세요."
                 >
                   <textarea
                     className="textarea"

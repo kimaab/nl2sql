@@ -1,3 +1,4 @@
+import re
 from enum import Enum
 from uuid import UUID
 from typing import Literal
@@ -18,10 +19,11 @@ DEFAULT_PORTS = {
 }
 
 
-class DatasourceInput(BaseModel):
-    """등록 화면이 보내는 것"""
+class SystemInput(BaseModel):
+    """시스템 등록 화면이 보내는 것. 수정할 때 password 를 비우면 기존 비밀번호를 둔다."""
+    code: str
     name: str
-    description: str = ""
+    domain_desc: str = ""
     driver: Driver
     host: str
     port: int = 0
@@ -36,6 +38,14 @@ class DatasourceInput(BaseModel):
         cleaned = (value or "").strip()
         if not cleaned:
             raise ValueError("must not be blank")
+        return cleaned
+
+    @field_validator("code")
+    @classmethod
+    def _code_usable(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", cleaned):
+            raise ValueError("코드는 영문·숫자·_·- 로 40자 이내여야 합니다")
         return cleaned
 
     @field_validator("host", "db_name")
@@ -54,11 +64,12 @@ class DatasourceInput(BaseModel):
         return self
 
 
-class Datasource(BaseModel):
-    """저장된 데이터소스"""
+class System(BaseModel):
+    """저장된 시스템 (비밀번호는 내보내지 않는다)"""
     id: UUID
+    code: str
     name: str
-    description: str
+    domain_desc: str
     driver: Driver
     host: str
     port: int
@@ -68,6 +79,7 @@ class Datasource(BaseModel):
     synced_at: str | None
     table_count: int
     metric_count: int
+    active_metric_count: int
 
 
 class MetricKind(str, Enum):
@@ -127,9 +139,13 @@ class SeriesSpec(BaseModel):
 
 
 class MetricExample(BaseModel):
-    """지표의 예시 질문. ast 가 있으면 프롬프트의 모범 답안(few-shot)이 된다."""
+    """지표의 예시 질문. ast 가 있으면 프롬프트의 모범 답안(few-shot)이 된다.
+
+    화면에서 사람이 적은 예시는 바로 승인된 것으로 저장된다 (origin=human).
+    """
     question: str
     ast: dict | None = None
+    origin: Literal["llm", "human", "feedback"] = "human"
 
     @field_validator("question")
     @classmethod
@@ -158,6 +174,18 @@ class MetricInput(BaseModel):
     series: SeriesSpec | None = None
     fixed_filters: list[dict] = []
     examples: list[MetricExample] = []
+    synonyms: list[str] = []
+
+    @field_validator("synonyms")
+    @classmethod
+    def _clean_synonyms(cls, values: list[str]) -> list[str]:
+        seen, out = set(), []
+        for v in values:
+            text = (v or "").strip()
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                out.append(text)
+        return out
 
     @field_validator("name", "table_name")
     @classmethod
@@ -230,7 +258,11 @@ class Metric(BaseModel):
     expression: str | None
     series: SeriesSpec | None
     fixed_filters: list[dict]
-    examples: list[MetricExample]
+    examples: list[MetricExample]   # 승인된 예시만
+    draft_example_count: int        # 검수를 기다리는 LLM 초안
+    synonyms: list[str]
+    status: Literal["draft", "active", "broken", "retired"]
+    broken_reason: str | None
     version: int
     updated_at: str | None
 
@@ -238,7 +270,7 @@ class Metric(BaseModel):
 class MetricHistoryEntry(BaseModel):
     """지표 정의의 한 시점"""
     version: int
-    action: Literal["create", "update", "delete"]
+    action: Literal["create", "update", "delete", "retire"]
     snapshot: dict
     created_at: str
 
@@ -306,8 +338,19 @@ class Annotation(AnnotationInput):
 
 class AskRequest(BaseModel):
     """질문 요청"""
-    datasource_id: UUID
+    system_id: UUID
     question: str
+
+
+class AskStep(BaseModel):
+    """질문 처리의 한 단계 (ask_trace 한 행). 화면이 '왜 이 테이블·지표인가' 를 보여준다."""
+    stage: Literal["table", "metric", "sql"]
+    candidates: list[str]
+    selected: list[str]
+    reason: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    elapsed_ms: int = 0
 
 
 class AskResponse(BaseModel):
@@ -317,6 +360,9 @@ class AskResponse(BaseModel):
     error: str | None
     attempts: int
     clarification: str | None = None
+    selected_tables: list[str] = []
+    selected_metrics: list[str] = []
+    steps: list[AskStep] = []
 
 
 class CompileRequest(BaseModel):
@@ -330,9 +376,12 @@ class CompileResponse(BaseModel):
 
 class HistoryEntry(BaseModel):
     id: UUID
-    datasource_id: UUID
-    datasource_name: str
+    system_id: UUID
+    system_name: str
     question: str
+    selected_tables: list[str]
+    selected_metrics: list[str]
+    total_tokens: int
     sql: str | None
     ast: dict | None
     error: str | None
@@ -353,9 +402,12 @@ class HistoryPatch(BaseModel):
 
 
 class SyncResult(BaseModel):
-    """동기화 결과"""
+    """동기화 결과. 병합이라 추가·변경·삭제 건수로 말한다."""
     table_count: int
     column_count: int
+    tables_added: int
+    tables_changed: int
+    tables_removed: int
     synced_at: str
     relation_count: int | None = None
     broken_metrics: list[dict] = []
@@ -363,17 +415,110 @@ class SyncResult(BaseModel):
 
 class SyncLog(BaseModel):
     id: int
-    datasource_id: UUID
-    datasource_name: str
+    system_id: UUID
+    system_name: str
     trigger: Literal["manual", "auto"]
     status: Literal["ok", "error"]
-    table_count: int | None
-    column_count: int | None
-    relation_count: int | None
+    tables_added: int | None
+    tables_changed: int | None
+    tables_removed: int | None
     broken_metrics: list[dict]
     error: str | None
     started_at: str
     finished_at: str
+
+
+class TableInfo(BaseModel):
+    """테이블 목록 화면용 (용도·카드 상태)"""
+    id: UUID
+    name: str
+    comment: str
+    purpose: str
+    card: str
+    card_line: str
+    card_status: Literal["none", "draft", "approved"]
+    column_count: int
+    metric_count: int
+
+
+class TablePurposeInput(BaseModel):
+    """사람이 적는 테이블 용도. 바뀌면 카드를 다시 만든다."""
+    purpose: str
+
+
+class ReviewItem(BaseModel):
+    """검수를 기다리는 LLM 초안 하나"""
+    kind: Literal["table_card", "metric_example", "eval_case"]
+    id: str                 # table_card = 테이블 id, metric_example·eval_case = 행 id
+    target_name: str        # 테이블 이름 또는 지표 이름
+    context: str            # 판단에 필요한 원재료 (용도·코멘트 또는 지표 설명)
+    draft: str              # 카드 본문 또는 예시 질문
+    draft_line: str = ""    # 테이블 한 줄 요약
+
+
+class ReviewDecision(BaseModel):
+    action: Literal["approve", "reject"]
+    note: str = ""          # 반려 사유 — 재생성 지시로 쓰인다
+    card: str | None = None        # 승인하면서 고친 카드
+    card_line: str | None = None   # 승인하면서 고친 한 줄 요약
+    question: str | None = None    # 승인하면서 고친 예시 질문
+    reviewer: str = ""
+
+
+class GlossaryInput(BaseModel):
+    """업무 용어. system_id 가 없으면 전사 공통."""
+    term: str
+    synonyms: list[str] = []
+    meaning: str = ""
+    maps_to: list[dict] = []   # [{"table": "bms_log", "column": "eg_time"}] 또는 [{"metric": "일별 가동시간"}]
+    status: Literal["draft", "approved"] = "approved"
+
+    @field_validator("term")
+    @classmethod
+    def _term(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise ValueError("용어가 비어 있습니다")
+        return cleaned
+
+    @field_validator("synonyms")
+    @classmethod
+    def _synonyms(cls, values: list[str]) -> list[str]:
+        seen, out = set(), []
+        for v in values:
+            text = (v or "").strip()
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                out.append(text)
+        return out
+
+
+class GlossaryTerm(GlossaryInput):
+    id: int
+    system_id: UUID | None
+
+
+class EnrichStatus(BaseModel):
+    queued: int
+    running: int
+    failed: int
+    draft_cards: int
+    draft_examples: int
+    draft_eval_cases: int
+
+
+class EvalRun(BaseModel):
+    id: UUID
+    label: str
+    config: dict
+    case_count: int
+    table_recall: float | None
+    metric_accuracy: float | None
+    sql_accuracy: float | None
+    avg_tokens: int | None
+    avg_elapsed_ms: int | None
+    started_at: str
+    finished_at: str | None
 
 
 class ApiException(Exception):
