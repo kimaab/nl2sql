@@ -172,11 +172,6 @@ export interface AskResponse {
   steps: AskStep[];
 }
 
-export interface CompileResponse {
-  sql: string | null;
-  error: string | null;
-}
-
 export interface BrokenMetric {
   name: string;
   reason: string;
@@ -345,8 +340,6 @@ export const deleteMetric = (sysId: string, id: string) =>
   request<void>(`/systems/${sysId}/metrics/${id}`, { method: "DELETE" });
 export const metricHistory = (sysId: string, id: string) =>
   request<MetricHistoryEntry[]>(`/systems/${sysId}/metrics/${id}/history`);
-export const compileAst = (sysId: string, ast: Record<string, any>) =>
-  request<CompileResponse>(`/systems/${sysId}/compile`, { method: "POST", body: { ast } });
 
 // 보강 · 검수 · 평가
 export const enrichStatus = (sysId: string) => request<EnrichStatus>(`/systems/${sysId}/enrich`);

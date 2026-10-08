@@ -3,7 +3,6 @@ from enum import Enum
 from uuid import UUID
 from typing import Literal
 from pydantic import BaseModel, field_validator, model_validator
-from datetime import datetime
 
 
 class Driver(str, Enum):

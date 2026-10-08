@@ -4,7 +4,7 @@ import * as api from "../../api";
 import { Alert, Badge, Button, EmptyState, Loading, PageHeader, SqlBlock } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage, formatDateTime } from "../../lib/format";
-import { brokenReason, definitionLines, KIND_LABEL, OPERATORS, SOURCES, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
+import { definitionLines, KIND_LABEL, OPERATORS, SOURCES, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
 
 const ACTION_LABEL = { create: "등록", update: "수정", delete: "삭제", retire: "사용 중지" } as const;
 
@@ -12,8 +12,6 @@ export function MetricDetail() {
   const { dsId = "", metricId = "" } = useParams();
   const [system, setSystem] = useState<api.System | null>(null);
   const [metric, setMetric] = useState<api.Metric | null | undefined>(undefined);
-  const [all, setAll] = useState<api.Metric[]>([]);
-  const [tables, setTables] = useState<api.SchemaTable[] | null>(null);
   const [history, setHistory] = useState<api.MetricHistoryEntry[]>([]);
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const toast = useToast();
@@ -24,16 +22,8 @@ export function MetricDetail() {
       try {
         const [ds, list] = await Promise.all([api.getSystem(dsId), api.listMetrics(dsId)]);
         setSystem(ds);
-        setAll(list);
         setMetric(list.find((m) => m.id === metricId) ?? null);
         api.metricHistory(dsId, metricId).then(setHistory).catch(() => setHistory([]));
-        if (ds.synced_at) {
-          try {
-            setTables((await api.getSchema(dsId)).tables);
-          } catch {
-            setTables(null);
-          }
-        }
       } catch (err) {
         toast("지표를 불러오지 못했습니다: " + errorMessage(err), "error");
         setMetric(null);
@@ -71,8 +61,6 @@ export function MetricDetail() {
     );
   }
 
-  const broken = brokenReason(tables, metric, all);
-
   return (
     <div className="page narrow">
       <PageHeader
@@ -90,8 +78,8 @@ export function MetricDetail() {
       />
 
       <div className="stack">
-        {(metric.broken_reason || broken) && (
-          <Alert tone="warn">스키마와 맞지 않아 질문에 쓰이지 않습니다 — {metric.broken_reason || broken}</Alert>
+        {metric.broken_reason && (
+          <Alert tone="warn">스키마와 맞지 않아 질문에 쓰이지 않습니다 — {metric.broken_reason}</Alert>
         )}
         {metric.status === "draft" && (
           <Alert tone="info">
