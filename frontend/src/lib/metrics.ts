@@ -1,23 +1,8 @@
 import type { Metric, MetricInput, SchemaTable } from "../api";
+import { exprText, legacyMeasures, measureLabel, toList } from "./measures";
 
-export const AGG_FUNCTIONS: { value: string; label: string }[] = [
-  { value: "SUM", label: "SUM" },
-  { value: "COUNT", label: "COUNT" },
-  { value: "AVG", label: "AVG" },
-  { value: "MIN", label: "MIN" },
-  { value: "MAX", label: "MAX" },
-  { value: "COUNT_DISTINCT", label: "COUNT_DISTINCT" },
-  { value: "DELTA_SUM", label: "누적값 증가분 합" },
-  { value: "CHANGE_COUNT", label: "상태 발생 횟수" },
-];
-
-/** 행 순서가 필요한 시계열 집계. 백엔드 compiler.SERIES_FUNCTIONS 와 같다. */
-export const SERIES_FUNCTIONS: Record<string, string> = {
-  DELTA_SUM: "누적 카운터(가동시간·주행거리 등)의 기간 사용량. 구분별로 시간순 직전 행보다 늘어난 만큼만 더하고, 리셋으로 줄면 0으로 봅니다.",
-  CHANGE_COUNT: "상태가 정상값에서 다른 값으로 바뀐 순간만 셉니다. 같은 상태가 여러 행 이어져도 1건입니다.",
-};
-
-export const isSeries = (fn: string | null | undefined) => Boolean(fn && SERIES_FUNCTIONS[fn]);
+/** 예전 정의의 시계열 집계 (이력·목록 표시용). 새 정의는 측정값 식으로 쓴다. */
+const isSeries = (fn: string | null | undefined) => fn === "DELTA_SUM" || fn === "CHANGE_COUNT";
 
 export const OPERATORS: { value: string; label: string; symbol: string; noValue?: boolean }[] = [
   { value: "equals", label: "같음", symbol: "=" },
@@ -54,11 +39,12 @@ export const EMPTY_METRIC: MetricInput = {
   kind: "aggregate",
   table_name: "",
   joins: [],
-  agg_field: "*",
-  agg_function: "COUNT",
+  agg_field: null,
+  agg_function: null,
   select_columns: [],
   expression: null,
   series: null,
+  measures: [{ name: "", expr: { fn: "COUNT", args: [] } }],
   fixed_filters: [],
   examples: [],
   synonyms: [],
@@ -77,19 +63,23 @@ export const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | undefined> =
   retired: undefined,
 };
 
-/** 저장된 지표를 수정 폼의 입력으로 */
+/** 저장된 지표를 수정 폼의 입력으로. 예전 정의(agg_field·select_columns)는 측정값으로 바꿔 다룬다. */
 export function toInput(m: Metric): MetricInput {
+  const measures = m.kind === "derived" ? [] : legacyMeasures(m);
   return {
     name: m.name,
     description: m.description,
     kind: m.kind,
     table_name: m.table_name,
     joins: m.joins ?? [],
-    agg_field: m.agg_field,
-    agg_function: m.agg_function,
-    select_columns: m.select_columns,
+    agg_field: measures.length ? null : m.agg_field,
+    agg_function: measures.length ? null : m.agg_function,
+    select_columns: measures.length ? [] : m.select_columns,
     expression: m.expression,
-    series: m.series ?? null,
+    series: m.series
+      ? { ...m.series, partition_by: toList(m.series.partition_by), order_by: toList(m.series.order_by) }
+      : null,
+    measures,
     fixed_filters: m.fixed_filters,
     examples: m.examples ?? [],
     synonyms: m.synonyms ?? [],
@@ -133,8 +123,15 @@ function filterToSql(f: Record<string, any>): string {
 
 /** 미리보기·상세·이력에서 보여줄 정의. 줄 단위로 나눠 둔다. */
 export function definitionLines(m: Partial<MetricInput>): string {
-  const select =
-    m.kind === "projection"
+  const measures = m.kind === "derived" ? [] : m.measures ?? [];
+  const seriesNote = m.series
+    ? ` <${toList(m.series.partition_by).join("·") || "…"}별, ${toList(m.series.order_by).join("·") || "…"} 순>`
+    : "";
+  const select = measures.length
+    ? measures
+        .map((x) => `${exprText(x.expr)} AS ${measureLabel(x, m.name ?? "", measures.length)}`)
+        .join(",\n       ") + seriesNote
+    : m.kind === "projection"
       ? m.select_columns?.length
         ? m.select_columns.join(", ")
         : "…"
@@ -144,7 +141,7 @@ export function definitionLines(m: Partial<MetricInput>): string {
           ? `${m.agg_function}(${m.agg_field ?? "…"}` +
             (m.agg_function === "CHANGE_COUNT" ? `, 정상=${m.series?.baseline ?? "…"}` : "") +
             (m.agg_function === "DELTA_SUM" && m.series?.max_step ? `, 한 행 최대 +${m.series.max_step}` : "") +
-            `) <${m.series?.partition_by || "…"}별, ${m.series?.order_by || "…"} 순>`
+            `)${seriesNote}`
           : `${m.agg_function ?? "COUNT"}(${m.agg_field ?? "*"})`;
   const lines = [`SELECT ${select}`, `FROM ${m.table_name || "…"}`];
   for (const j of m.joins ?? []) {

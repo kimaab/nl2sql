@@ -42,12 +42,23 @@ export interface MetricJoin {
   on: { left: string; right: string }[];
 }
 
-/** 시계열 집계(DELTA_SUM, CHANGE_COUNT)의 행 순서 */
+/** 직전 행 비교(PREV·DELTA·DELTA_SUM·CHANGE_COUNT)의 행 순서. 예전 지표는 컬럼 하나(문자열)다. */
 export interface SeriesSpec {
-  partition_by: string;
-  order_by: string;
+  partition_by: string | string[];
+  order_by: string | string[];
   baseline: string | null;
   max_step?: number | null;
+}
+
+/** 측정값 식 트리. 함수를 겹쳐 출력 컬럼 하나를 만든다 (백엔드 compiler 의 측정값 식). */
+export type MeasureNode =
+  | { col: string }
+  | { num: number }
+  | { fn: string; args: MeasureNode[]; by?: string[] };
+
+export interface Measure {
+  name: string;
+  expr: MeasureNode;
 }
 
 export interface MetricExample {
@@ -67,6 +78,8 @@ export interface MetricInput {
   select_columns: string[];
   expression: string | null;
   series: SeriesSpec | null;
+  /** 집계형·조회형의 출력 컬럼. 있으면 agg_field·agg_function·select_columns 대신 쓴다. */
+  measures: Measure[];
   fixed_filters: Record<string, any>[];
   examples: MetricExample[];
   synonyms: string[];
@@ -336,6 +349,12 @@ export const createMetric = (sysId: string, input: MetricInput) =>
   request<Metric>(`/systems/${sysId}/metrics`, { method: "POST", body: input });
 export const updateMetric = (sysId: string, id: string, input: MetricInput) =>
   request<Metric>(`/systems/${sysId}/metrics/${id}`, { method: "PUT", body: input });
+/** 저장하지 않고 정의를 SQL 로. 질문에서 받는 필터는 빠진다. */
+export const previewMetric = (sysId: string, input: MetricInput) =>
+  request<{ sql: string | null; error: string | null }>(`/systems/${sysId}/metrics/preview`, {
+    method: "POST",
+    body: input,
+  });
 export const deleteMetric = (sysId: string, id: string) =>
   request<void>(`/systems/${sysId}/metrics/${id}`, { method: "DELETE" });
 export const metricHistory = (sysId: string, id: string) =>

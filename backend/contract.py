@@ -3,7 +3,7 @@ from uuid import UUID
 
 import db
 from models import ApiException
-from compiler import build_scope, compile_formula, resolve_ref
+from compiler import build_scope, compile_formula, measure_columns, measure_nested, resolve_ref, series_list
 
 log = logging.getLogger("nl2sql.contract")
 
@@ -173,7 +173,11 @@ def metric_entry(m: dict) -> dict:
     }
     if m.get("joins"):
         entry["joins"] = m["joins"]
-    if m["kind"] == "projection":
+    if m.get("measures") and m["kind"] != "derived":
+        entry["measures"] = m["measures"]
+        if m.get("series"):
+            entry["series"] = m["series"]
+    elif m["kind"] == "projection":
         entry["columns"] = m["select_columns"] or []
     elif m["kind"] == "derived":
         entry["expression"] = m["expression"]
@@ -216,6 +220,8 @@ def _broken_components(m: dict, by_name: dict, broken: dict, columns: dict) -> s
             problems.append(f"구성 지표 {name}이(가) 없습니다")
         elif comp["kind"] != "aggregate":
             problems.append(f"구성 지표 {name}은(는) 집계형이 아닙니다")
+        elif len(comp.get("measures") or []) > 1 or any(measure_nested(ms.get("expr")) for ms in comp.get("measures") or []):
+            problems.append(f"구성 지표 {name}은(는) 측정값이 여럿이거나 집계 안의 집계라 수식에 쓸 수 없습니다")
         elif name in broken:
             problems.append(f"구성 지표 {name}이(가) 깨졌습니다 ({broken[name]})")
         else:
@@ -259,7 +265,11 @@ def _broken_reason(m: dict, columns: dict) -> str | None:
                 out.append(str(ref))
         return out
 
-    if m["kind"] == "projection":
+    if m.get("measures") and m["kind"] != "derived":
+        gone = missing(c for ms in m["measures"] for c in measure_columns(ms.get("expr")))
+        if gone:
+            return f"측정값 컬럼이 없습니다: {', '.join(dict.fromkeys(gone))}"
+    elif m["kind"] == "projection":
         if not (m["select_columns"] or []):
             return "조회 컬럼이 비어 있습니다"
         missing_columns = missing(m["select_columns"])
@@ -267,9 +277,9 @@ def _broken_reason(m: dict, columns: dict) -> str | None:
             return f"조회 컬럼이 없습니다: {', '.join(missing_columns)}"
     elif m["kind"] == "aggregate" and m["agg_field"] != "*" and missing([m["agg_field"]]):
         return f"집계 컬럼 {m['agg_field']}이(가) 없습니다"
-    if m["kind"] == "aggregate" and m.get("series"):
+    if m["kind"] != "derived" and m.get("series"):
         series = m["series"]
-        gone = missing([series.get("partition_by"), series.get("order_by")])
+        gone = missing(series_list(series.get("partition_by")) + series_list(series.get("order_by")))
         if gone:
             return f"구분·순서 컬럼이 없습니다: {', '.join(gone)}"
 

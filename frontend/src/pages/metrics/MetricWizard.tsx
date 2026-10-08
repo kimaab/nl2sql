@@ -15,21 +15,25 @@ import {
 import { useToast } from "../../components/Toast";
 import { errorMessage } from "../../lib/format";
 import {
-  AGG_FUNCTIONS,
   definitionLines,
   EMPTY_METRIC,
   formulaRefs,
   isNoValue,
-  isSeries,
   isTemporal,
   KIND_LABEL,
   metricScope,
   newFilter,
   OPERATORS,
-  SERIES_FUNCTIONS,
   SOURCES,
   toInput,
 } from "../../lib/metrics";
+import { exprComplete, mapColumns, toList, usesSeries } from "../../lib/measures";
+import { MeasureList, SeriesEditor } from "./MeasureEditor";
+
+const COUNT_ALL: api.Measure[] = [{ name: "", expr: { fn: "COUNT", args: [] } }];
+
+/** 서버 SQL 을 읽기 좋게 절마다 줄을 바꾼다 */
+const formatSql = (sql: string) => sql.replace(/ (FROM|WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|FETCH FIRST) /g, "\n$1 ");
 
 const STEPS = ["종류", "대상", "조건", "예시", "이름·설명"];
 
@@ -50,9 +54,14 @@ function requalify(form: api.MetricInput, joins: api.MetricJoin[]): api.MetricIn
   const kept = new Set([base.toLowerCase(), ...joins.map((j) => j.table.toLowerCase())]);
   const alive = (ref: string | null) =>
     ref !== null && (ref.indexOf(".") < 0 || kept.has(ref.slice(0, ref.indexOf(".")).toLowerCase()));
+  const fixAlive = (ref: string) => {
+    const fixed = fix(ref);
+    return alive(fixed) ? fixed : null;
+  };
   return {
     ...form,
     joins,
+    measures: form.measures.map((m) => ({ ...m, expr: mapColumns(m.expr, fixAlive) })),
     agg_field: form.agg_field && alive(fix(form.agg_field)) ? fix(form.agg_field) : form.kind === "aggregate" ? "*" : null,
     select_columns: form.select_columns.map(fix).filter(alive) as string[],
     fixed_filters: form.fixed_filters
@@ -75,6 +84,7 @@ export function MetricWizard() {
   const [examples, setExamples] = useState<ExampleDraft[]>([]);
   const [loaded, setLoaded] = useState(!editing);
   const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState<{ sql: string | null; error: string | null } | null>(null);
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -133,48 +143,40 @@ export function MetricWizard() {
     );
   }, [tables, form.table_name, form.joins, qualified]);
   const typeOf = (ref: string) => columnOptions.find((c) => c.value === ref)?.type ?? "";
-  // 시계열 집계는 기본 테이블 컬럼만 쓴다 (LAG 서브쿼리가 기본 테이블만 감싼다)
-  const baseColumns = columnOptions
-    .filter((c) => c.table === form.table_name)
-    .map((c) => ({ ...c, name: c.value.includes(".") ? c.value.slice(c.value.indexOf(".") + 1) : c.value }));
+  // 직전 행 비교(LAG)는 기본 테이블 컬럼만 쓴다 (LAG 서브쿼리가 기본 테이블만 감싼다)
+  const baseColumns = columnOptions.filter((c) => c.table === form.table_name);
+  // 구분·순서 컬럼은 조인이 있어도 기본 테이블의 컬럼 이름만 적는다
+  const bare = (ref: string) => (ref.includes(".") ? ref.slice(ref.indexOf(".") + 1) : ref);
+  const seriesUsed = form.kind === "derived" ? new Set<string>() : usesSeries(form.measures);
 
-  function setKind(kind: api.MetricKind) {
-    if (kind === "aggregate") {
-      patch({ kind, agg_field: "*", agg_function: "COUNT", select_columns: [], expression: null, series: null });
-    } else if (kind === "projection") {
-      patch({ kind, agg_field: null, agg_function: null, expression: null, series: null });
-    } else {
-      patch({ kind, agg_field: null, agg_function: null, select_columns: [], expression: form.expression ?? "", series: null });
-    }
-  }
-
-  function setAggFunction(fn: string) {
-    if (!isSeries(fn)) {
-      patch({
-        agg_function: fn,
-        agg_field: fn !== "COUNT" && form.agg_field === "*" ? columnOptions[0]?.value ?? null : form.agg_field,
-        series: null,
-      });
+  /** 측정값을 바꾼다. 직전 행 비교를 처음 쓰면 순서 컬럼은 첫 날짜 컬럼으로 넣어 둔다.
+   *  구분 컬럼은 짐작하지 않는다 — '_id' 로 끝나는 수집 ID 같은 엉뚱한 컬럼이 걸리기 쉽다. */
+  function setMeasures(measures: api.Measure[]) {
+    const used = usesSeries(measures);
+    if (!used.size) {
+      patch({ measures, series: null });
       return;
     }
-    // 처음 고를 때 그럴듯한 기본값: 구분은 이름이 _id 로 끝나는 컬럼, 순서는 첫 날짜 컬럼
-    const numeric = (type: string) => /int|numeric|decimal|number|real|double|float|serial/i.test(type);
-    const current = baseColumns.find((c) => c.value === form.agg_field);
-    const keepField =
-      current && (fn !== "DELTA_SUM" || numeric(current.type))
-        ? current.value
-        : (fn === "DELTA_SUM" ? baseColumns.find((c) => numeric(c.type)) : baseColumns[0])?.value ?? null;
-    const guessPartition = baseColumns.find((c) => /_?id$/i.test(c.name) && !isTemporal(c.type))?.name ?? "";
-    const guessOrder = baseColumns.find((c) => isTemporal(c.type))?.name ?? "";
+    const series: api.SeriesSpec = form.series ?? {
+      partition_by: [],
+      order_by: baseColumns.filter((c) => isTemporal(c.type)).slice(0, 1).map((c) => bare(c.value)),
+      baseline: null,
+    };
     patch({
-      agg_function: fn,
-      agg_field: keepField,
+      measures,
       series: {
-        partition_by: form.series?.partition_by || guessPartition,
-        order_by: form.series?.order_by || guessOrder,
-        baseline: fn === "CHANGE_COUNT" ? form.series?.baseline ?? "0" : null,
+        ...series,
+        baseline: used.has("CHANGE_COUNT") ? series.baseline ?? "0" : null,
+        max_step: used.has("DELTA_SUM") ? series.max_step ?? null : null,
       },
     });
+  }
+
+  function setKind(kind: api.MetricKind) {
+    const reset = { kind, agg_field: null, agg_function: null, select_columns: [], series: null };
+    if (kind === "aggregate") patch({ ...reset, expression: null, measures: COUNT_ALL });
+    else if (kind === "projection") patch({ ...reset, expression: null, measures: [] });
+    else patch({ ...reset, expression: form.expression ?? "", measures: [] });
   }
 
   function setFilter(i: number, p: Record<string, any>) {
@@ -265,18 +267,19 @@ export function MetricWizard() {
     true,
     Boolean(dsId && form.table_name) &&
       joinsValid &&
-      ((form.kind === "aggregate" &&
-        (!isSeries(form.agg_function) ||
-          Boolean(
-            form.series?.partition_by &&
-              form.series?.order_by &&
-              form.agg_field &&
-              form.agg_field !== "*" &&
-              (form.agg_function !== "CHANGE_COUNT" || form.series?.baseline?.trim()) &&
-              (form.series?.max_step == null || form.series.max_step > 0)
-          ))) ||
-        (form.kind === "projection" && form.select_columns.length > 0) ||
-        (form.kind === "derived" && Boolean(form.expression?.trim()) && formulaRefs(form.expression).length > 0)),
+      (form.kind === "derived"
+        ? Boolean(form.expression?.trim()) && formulaRefs(form.expression).length > 0
+        : form.measures.length > 0 &&
+          form.measures.every((m) => exprComplete(m.expr)) &&
+          (form.measures.length === 1 || form.measures.every((m) => m.name.trim() || "col" in m.expr)) &&
+          (seriesUsed.size === 0 ||
+            Boolean(
+              form.series &&
+                toList(form.series.partition_by).length &&
+                toList(form.series.order_by).length &&
+                (!seriesUsed.has("CHANGE_COUNT") || String(form.series.baseline ?? "").trim()) &&
+                (form.series.max_step == null || form.series.max_step > 0)
+            ))),
     form.fixed_filters.every(
       (f) =>
         f.field &&
@@ -285,6 +288,26 @@ export function MetricWizard() {
     exampleCheck.error === null,
     form.name.trim() !== "",
   ];
+
+  // 서버가 실제로 컴파일한 SQL. 함수 조합 규칙(집계 안의 집계, 직전 행 비교 등)은 서버가 판정한다.
+  useEffect(() => {
+    // 빈 칸이 남은 식은 보내지 않는다 — 고르는 중에 오류가 깜빡이지 않게
+    if (!dsId || !form.table_name || (form.kind !== "derived" && !stepValid[1])) {
+      setPreview(null);
+      return;
+    }
+    let stale = false;
+    const timer = setTimeout(() => {
+      api
+        .previewMetric(dsId, { ...form, name: form.name.trim() || "새 지표", examples: [] })
+        .then((p) => !stale && setPreview(p))
+        .catch((err) => !stale && setPreview({ sql: null, error: errorMessage(err) }));
+    }, 400);
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+  }, [dsId, form]);
 
   async function handleSave() {
     if (exampleCheck.error) {
@@ -388,7 +411,13 @@ export function MetricWizard() {
                         disabled={editing}
                         onChange={(e) => {
                           setDsId(e.target.value);
-                          patch({ table_name: "", joins: [], agg_field: "*", select_columns: [], fixed_filters: [] });
+                          patch({
+                            table_name: "",
+                            joins: [],
+                            measures: form.kind === "aggregate" ? COUNT_ALL : [],
+                            series: null,
+                            fixed_filters: [],
+                          });
                         }}
                       >
                         <option value="">선택하세요</option>
@@ -408,8 +437,8 @@ export function MetricWizard() {
                           patch({
                             table_name: e.target.value,
                             joins: [],
-                            agg_field: form.kind === "aggregate" ? "*" : null,
-                            select_columns: [],
+                            measures: form.kind === "aggregate" ? COUNT_ALL : [],
+                            series: null,
                             fixed_filters: [],
                           })
                         }
@@ -546,136 +575,34 @@ export function MetricWizard() {
                   </Field>
                 )}
 
-                {dsId && form.table_name && form.kind === "aggregate" && (
+                {dsId && form.table_name && form.kind !== "derived" && (
                   <Field
-                    label="집계"
+                    label={form.kind === "aggregate" ? "측정값" : "조회 컬럼"}
+                    required
                     hint={
-                      isSeries(form.agg_function)
-                        ? SERIES_FUNCTIONS[form.agg_function!]
-                        : "COUNT는 컬럼 대신 * 를 쓸 수 있습니다"
+                      form.kind === "aggregate"
+                        ? "결과 숫자마다 식을 만듭니다. 'ƒ 감싸기'로 함수를 겹치면 MAX − MIN, ROUND(AVG(…)), 집계 안의 집계(BY)를 만들 수 있습니다."
+                        : "결과 컬럼마다 식을 만듭니다. 집계 함수는 조회한 행 전체(또는 BY 묶음)의 값이 각 행에 붙습니다. PREV·DELTA 로 직전 행과 비교합니다."
                     }
                   >
-                    <div className="agg-sentence">
-                      <select
-                        className="select"
-                        value={form.agg_function ?? "COUNT"}
-                        onChange={(e) => setAggFunction(e.target.value)}
-                      >
-                        {AGG_FUNCTIONS.map((f) => (
-                          <option key={f.value} value={f.value}>
-                            {f.label}
-                          </option>
-                        ))}
-                      </select>
-                      <span>(</span>
-                      <select
-                        className="select"
-                        value={form.agg_field ?? "*"}
-                        onChange={(e) => patch({ agg_field: e.target.value })}
-                      >
-                        {form.agg_function === "COUNT" && <option value="*">*</option>}
-                        {(isSeries(form.agg_function) ? baseColumns : columnOptions).map((c) => (
-                          <option key={c.value} value={c.value}>
-                            {c.value} ({c.type})
-                          </option>
-                        ))}
-                      </select>
-                      <span>)</span>
-                    </div>
+                    <MeasureList
+                      kind={form.kind}
+                      measures={form.measures}
+                      metricName={form.name}
+                      columns={columnOptions}
+                      baseColumns={baseColumns.map((c) => c.value)}
+                      onChange={setMeasures}
+                    />
                   </Field>
                 )}
 
-                {dsId && form.table_name && form.kind === "aggregate" && isSeries(form.agg_function) && form.series && (
-                  <div className="form-grid">
-                    <Field label="구분 컬럼" required hint="이 컬럼 값마다 따로 시간순으로 비교합니다 (예: 차량 ID)">
-                      <select
-                        className="select"
-                        value={form.series.partition_by}
-                        onChange={(e) => patch({ series: { ...form.series!, partition_by: e.target.value } })}
-                      >
-                        <option value="">선택</option>
-                        {baseColumns.map((c) => (
-                          <option key={c.value} value={c.name}>
-                            {c.name} ({c.type})
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
-                    <Field label="순서 컬럼" required hint="직전 행을 정하는 시간 순서 (예: 수집 일시)">
-                      <select
-                        className="select"
-                        value={form.series.order_by}
-                        onChange={(e) => patch({ series: { ...form.series!, order_by: e.target.value } })}
-                      >
-                        <option value="">선택</option>
-                        {baseColumns.map((c) => (
-                          <option key={c.value} value={c.name}>
-                            {c.name} ({c.type})
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
-                    {form.agg_function === "DELTA_SUM" && (
-                      <Field
-                        label="한 행 최대 증가폭"
-                        hint="이보다 크게 늘어난 행은 리셋 복귀·장비 교체로 튄 값으로 보고 0으로 칩니다. 비우면 제한 없음"
-                      >
-                        <input
-                          className="input"
-                          type="number"
-                          min={0}
-                          step="any"
-                          value={form.series.max_step ?? ""}
-                          onChange={(e) =>
-                            patch({ series: { ...form.series!, max_step: e.target.value === "" ? null : Number(e.target.value) } })
-                          }
-                          placeholder="예: 2 (시간)"
-                        />
-                      </Field>
-                    )}
-                    {form.agg_function === "CHANGE_COUNT" && (
-                      <Field label="정상값" required hint="이 값에서 다른 값으로 바뀐 순간을 1건으로 셉니다 (예: 오류 코드 0)">
-                        <input
-                          className="input"
-                          value={form.series.baseline ?? ""}
-                          onChange={(e) => patch({ series: { ...form.series!, baseline: e.target.value } })}
-                          placeholder="0"
-                        />
-                      </Field>
-                    )}
-                  </div>
-                )}
-
-                {dsId && form.table_name && form.kind === "projection" && (
-                  <Field
-                    label="조회 컬럼"
-                    required
-                    hint="누른 순서대로 SELECT에 들어갑니다. 번호는 순서입니다."
-                  >
-                    <div className="chip-box">
-                      {columnOptions.map((c) => {
-                        const idx = form.select_columns.indexOf(c.value);
-                        return (
-                          <Chip
-                            key={c.value}
-                            selected={idx >= 0}
-                            order={idx + 1}
-                            type={c.type}
-                            onClick={() =>
-                              patch({
-                                select_columns:
-                                  idx >= 0
-                                    ? form.select_columns.filter((x) => x !== c.value)
-                                    : [...form.select_columns, c.value],
-                              })
-                            }
-                          >
-                            {c.value}
-                          </Chip>
-                        );
-                      })}
-                    </div>
-                  </Field>
+                {dsId && form.table_name && seriesUsed.size > 0 && form.series && (
+                  <SeriesEditor
+                    series={form.series}
+                    used={seriesUsed}
+                    columns={baseColumns.map((c) => ({ ...c, value: bare(c.value) }))}
+                    onChange={(series) => patch({ series })}
+                  />
                 )}
 
                 {dsId && form.table_name && form.kind === "derived" && (
@@ -919,7 +846,11 @@ export function MetricWizard() {
             <span className="card-title">미리보기</span>
           </div>
           <div className="preview-body">
-            <SqlBlock sql={definitionLines(form)} />
+            <SqlBlock sql={preview?.sql ? formatSql(preview.sql) : definitionLines(form)} />
+            {preview?.error && <Alert tone="warn">{preview.error}</Alert>}
+            {preview?.sql && questionFilters > 0 && (
+              <div className="field-hint">질문에서 받는 조건 {questionFilters}개는 값이 없어 미리보기에서 빠졌습니다.</div>
+            )}
             <dl className="kv" style={{ margin: 0, gridTemplateColumns: "72px 1fr" }}>
               <dt>종류</dt>
               <dd>{KIND_LABEL[form.kind]}</dd>

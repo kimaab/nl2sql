@@ -8,6 +8,7 @@ import threading
 from uuid import UUID
 
 import db
+from compiler import measure_text
 from metrics import refresh_statuses
 from models import ApiException, EnrichStatus, ReviewDecision, ReviewItem
 from selector import Step, ask_json, model_name
@@ -182,6 +183,9 @@ def _enrich_metric(job: dict, model) -> None:
         "projection": f"컬럼 조회: {', '.join(metric['select_columns'] or [])}",
         "derived": f"수식: {metric['expression']}",
     }.get(metric["kind"], metric["kind"])
+    if metric.get("measures") and metric["kind"] != "derived":
+        definition = ("측정값: " if metric["kind"] == "aggregate" else "컬럼 조회: ") + ", ".join(
+            f"{ms['name']} = {measure_text(ms['expr'])}" for ms in metric["measures"])
     user = (
         f"[지표] {metric['name']}\n[설명] {metric['description'] or '(없음)'}\n"
         f"[정의] {metric['table_name']} 테이블 · {definition}\n"

@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS metric (
     select_columns JSONB       NOT NULL DEFAULT '[]',
     expression     TEXT,
     series         JSONB,
+    measures       JSONB       NOT NULL DEFAULT '[]',  -- 집계형·조회형의 출력 컬럼 [{name, expr(식 트리)}]
     fixed_filters  JSONB       NOT NULL DEFAULT '[]',
     synonyms       JSONB       NOT NULL DEFAULT '[]',
     status         TEXT        NOT NULL DEFAULT 'draft',  -- draft | active | broken | retired
@@ -103,6 +104,7 @@ CREATE TABLE IF NOT EXISTS metric (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (system_id, name)
 );
+ALTER TABLE metric ADD COLUMN IF NOT EXISTS measures JSONB NOT NULL DEFAULT '[]';
 CREATE INDEX IF NOT EXISTS idx_metric_active ON metric (system_id) WHERE status = 'active';
 
 -- 지표가 쓰는 테이블. 질의 생성의 '테이블 → 지표' 는 검색이 아니라 이 표의 조회다.

@@ -65,8 +65,8 @@ def create_metric(system_id: UUID, data: MetricInput, actor: str | None = None) 
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO metric (id, system_id, name, description, kind, base_table_id, joins, agg_field,
-                                    agg_function, select_columns, expression, series, fixed_filters, synonyms)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    agg_function, select_columns, expression, series, measures, fixed_filters, synonyms)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (str(metric_id), str(system_id), *_values(data, tables[table_name]["id"])))
             _save_examples(cur, metric_id, data.examples)
             _record_history(cur, system_id, metric_id, 1, "create", actor)
@@ -90,7 +90,7 @@ def update_metric(system_id: UUID, metric_id: UUID, data: MetricInput, actor: st
             cur.execute("""
                 UPDATE metric SET name = %s, description = %s, kind = %s, base_table_id = %s, joins = %s,
                        agg_field = %s, agg_function = %s, select_columns = %s, expression = %s, series = %s,
-                       fixed_filters = %s, synonyms = %s, version = %s, updated_at = now()
+                       measures = %s, fixed_filters = %s, synonyms = %s, version = %s, updated_at = now()
                  WHERE id = %s AND system_id = %s
             """, (*_values(data, tables[table_name]["id"]), version, str(metric_id), str(system_id)))
             _save_examples(cur, metric_id, data.examples)
@@ -215,7 +215,7 @@ def _record_history(cur, system_id: UUID, metric_id: UUID, version: int, action:
                                   'table_name', t.name, 'joins', m.joins, 'agg_field', m.agg_field,
                                   'agg_function', m.agg_function, 'select_columns', m.select_columns,
                                   'expression', m.expression, 'fixed_filters', m.fixed_filters,
-                                  'series', m.series, 'synonyms', m.synonyms,
+                                  'series', m.series, 'measures', m.measures, 'synonyms', m.synonyms,
                                   'examples', COALESCE((SELECT jsonb_agg(jsonb_build_object('question', e.question,
                                                          'ast', e.ast, 'origin', e.origin) ORDER BY e.id)
                                                         FROM metric_example e
@@ -237,6 +237,7 @@ def _values(data: MetricInput, base_table_id: str) -> tuple:
         json.dumps(data.select_columns),
         data.expression,
         json.dumps(data.series.model_dump()) if data.series else None,
+        json.dumps([ms.model_dump() for ms in data.measures], ensure_ascii=False),
         json.dumps(data.fixed_filters),
         json.dumps(data.synonyms, ensure_ascii=False),
     )
@@ -288,7 +289,9 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
         except ValueError as error:
             raise ApiException(400, str(error)) from None
 
-    if data.kind is MetricKind.AGGREGATE:
+    if data.measures:
+        pass  # 식 트리는 아래 _validate_measures 가 실제로 컴파일해 본다
+    elif data.kind is MetricKind.AGGREGATE:
         if data.series is not None:
             _validate_series(data, scope, base, types, driver)
         elif data.agg_field != "*":
@@ -344,6 +347,8 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
                 "(자정인 행만 걸립니다). greater_or_equal 과 less_or_equal 로 기간을 지정하십시오",
             )
 
+    if data.measures:
+        _validate_measures(system_id, data, base)
     _validate_examples(system_id, data, base)
     return base
 
@@ -381,6 +386,8 @@ def _validate_formula(system_id: UUID, data: MetricInput, scope: dict) -> None:
             raise ValueError(f"수식의 지표 [{name}] 이(가) 없습니다")
         if comp["kind"] != "aggregate":
             raise ValueError(f"수식에는 집계형 지표만 쓸 수 있습니다 -> [{name}] 은(는) {comp['kind']}")
+        if len(comp.get("measures") or []) > 1:
+            raise ValueError(f"[{name}] 은(는) 측정값이 여럿이라 수식에 쓸 수 없습니다")
         if comp["table_name"] not in scope:
             raise ValueError(f"[{name}] 의 테이블 {comp['table_name']} 이(가) 이 지표의 범위({', '.join(scope)})에 없습니다")
         if any(str(f.get("source") or "literal") == "question" for f in comp["fixed_filters"] or []):
@@ -393,21 +400,46 @@ def _validate_formula(system_id: UUID, data: MetricInput, scope: dict) -> None:
         raise ApiException(400, str(error)) from None
 
 
+def _draft_compiler(system_id: UUID, data: MetricInput, base: str, without_question: bool = False) -> Compiler:
+    """저장 전의 정의를 계약서에 끼운 컴파일러.
+
+    without_question: 질문에서 값을 받는 필터를 뺀다 — 질문 없이 정의만 컴파일해 볼 때.
+    """
+    contract = load_contract(system_id)
+    filters = [f for f in data.fixed_filters
+               if not (without_question and str(f.get("source") or "literal").lower() == "question")]
+    draft = metric_entry({
+        "name": data.name, "description": data.description, "kind": data.kind.value, "table_name": base,
+        "joins": [j.model_dump() for j in data.joins], "select_columns": data.select_columns,
+        "expression": data.expression, "agg_field": data.agg_field, "agg_function": data.agg_function,
+        "fixed_filters": filters,
+        "series": data.series.model_dump() if data.series else None,
+        "measures": [ms.model_dump() for ms in data.measures],
+    })
+    contract["metrics"] = [m for m in contract["metrics"] if m["name"].lower() != data.name.lower()] + [draft]
+    return Compiler(contract)
+
+
+def _validate_measures(system_id: UUID, data: MetricInput, base: str) -> None:
+    """식 트리를 실제로 컴파일해 본다. 함수 조합 규칙(집계 안의 집계, 직전 행 비교 등)은 컴파일러가 판정한다."""
+    try:
+        _draft_compiler(system_id, data, base, without_question=True).compile({"metric": data.name})
+    except (ValueError, KeyError, TypeError) as error:
+        raise ApiException(400, str(error)) from None
+
+
+def preview_metric(system_id: UUID, data: MetricInput) -> str:
+    """저장하지 않고 정의를 SQL 로. 질문에서 받는 필터는 값이 없어 빠진다."""
+    base = _validate(system_id, data.model_copy(update={"examples": []}))
+    return _draft_compiler(system_id, data, base, without_question=True).compile({"metric": data.name})
+
+
 def _validate_examples(system_id: UUID, data: MetricInput, base: str) -> None:
     """예시에 AST 가 있으면 실제로 컴파일되는지 확인한다 — 틀린 모범 답안은 모델을 틀리게 가르친다."""
     with_ast = [e for e in data.examples if e.ast is not None]
     if not with_ast:
         return
-    contract = load_contract(system_id)
-    draft = metric_entry({
-        "name": data.name, "description": data.description, "kind": data.kind.value, "table_name": base,
-        "joins": [j.model_dump() for j in data.joins], "select_columns": data.select_columns,
-        "expression": data.expression, "agg_field": data.agg_field, "agg_function": data.agg_function,
-        "fixed_filters": data.fixed_filters,
-        "series": data.series.model_dump() if data.series else None,
-    })
-    contract["metrics"] = [m for m in contract["metrics"] if m["name"].lower() != data.name.lower()] + [draft]
-    compiler = Compiler(contract)
+    compiler = _draft_compiler(system_id, data, base)
     for example in with_ast:
         try:
             compiler.compile(example.ast)
@@ -428,6 +460,7 @@ def _row_to_metric(row: dict, examples: dict) -> Metric:
         select_columns=row["select_columns"] or [],
         expression=row.get("expression"),
         series=row.get("series"),
+        measures=row.get("measures") or [],
         fixed_filters=row["fixed_filters"] or [],
         examples=examples.get("approved", []),
         draft_example_count=examples.get("drafts", 0),

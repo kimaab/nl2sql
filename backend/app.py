@@ -29,7 +29,7 @@ from systems import (
     create_system, delete_system, get_schema, get_system, list_sync_logs, list_systems, list_tables,
     set_table_purpose, sync_system, update_system,
 )
-from metrics import create_metric, delete_metric, list_metric_history, list_metrics, update_metric
+from metrics import create_metric, delete_metric, list_metric_history, list_metrics, preview_metric, update_metric
 from relations import create_relation, delete_relation, list_relations
 from annotations import list_annotations, put_annotation
 from glossary import delete_term, list_terms, save_term
@@ -235,6 +235,18 @@ def post_metric(system_id: UUID, req: MetricInput):
 def put_metric(system_id: UUID, metric_id: UUID, req: MetricInput):
     get_system(system_id)
     return update_metric(system_id, metric_id, req)
+
+
+# 저장하지 않고 정의를 SQL 로 — 등록 화면의 미리보기
+@app.post("/api/systems/{system_id}/metrics/preview", response_model=CompileResponse)
+def post_metric_preview(system_id: UUID, req: MetricInput):
+    get_system(system_id)
+    try:
+        return CompileResponse(sql=preview_metric(system_id, req), error=None)
+    except ApiException as error:
+        return CompileResponse(sql=None, error=str(error.detail))
+    except (ValueError, KeyError, TypeError) as error:
+        return CompileResponse(sql=None, error=str(error))
 
 
 @app.get("/api/systems/{system_id}/metrics/{metric_id}/history", response_model=list[MetricHistoryEntry])

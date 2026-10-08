@@ -84,6 +84,7 @@ def ask_json(model, system: str, user: str, step: Step, validate) -> dict:
     for _ in range(2):
         started = time.monotonic()
         reply = model.invoke(messages)
+        # 테이블 산정 완료
         step.elapsed_ms += int((time.monotonic() - started) * 1000)
         p, c = usage_of(reply)
         step.prompt_tokens += p

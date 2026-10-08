@@ -21,6 +21,12 @@ export function errorMessage(err: unknown): string {
   try {
     const parsed = JSON.parse(raw);
     if (typeof parsed?.detail === "string") return parsed.detail;
+    // 입력 검증 실패(422)는 [{msg: "Value error, ..."}] 목록이다
+    if (Array.isArray(parsed?.detail))
+      return parsed.detail
+        .map((d: { msg?: string }) => String(d?.msg ?? "").replace(/^Value error, /, ""))
+        .filter(Boolean)
+        .join("; ");
   } catch {
     /* 평문 */
   }

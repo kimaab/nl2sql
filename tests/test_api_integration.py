@@ -315,3 +315,57 @@ def test_series_metrics_registered_and_compiled(client, ds):
         conn.execute(f"SET search_path TO {TARGET_SCHEMA}")
         rows = dict(conn.execute(sql).fetchall())
     assert float(rows["a"]) == 1.0 and rows["b"] is None
+
+
+def test_measure_metrics_preview_save_and_run(client, ds):
+    with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
+        conn.execute(f'CREATE TABLE {TARGET_SCHEMA}."TRADE" ("APT" varchar(10), "YM" varchar(6), "DT" date, '
+                     '"AMT" bigint, "CANCEL" boolean)')
+        conn.execute(f"""INSERT INTO {TARGET_SCHEMA}."TRADE" VALUES
+            ('a', '202601', '2026-01-05', 100, false), ('a', '202601', '2026-01-20', 999, true),
+            ('a', '202602', '2026-02-03', 130, false), ('b', '202602', '2026-02-10', 200, false),
+            ('b', '202603', '2026-03-01', 150, false)""")
+    assert client.post(f"/api/systems/{ds}/sync").status_code == 200
+    base = f"/api/systems/{ds}/metrics"
+    amt = {"col": "AMT"}
+    change = {
+        "name": "거래 변동", "kind": "projection", "table_name": "TRADE",
+        "series": {"partition_by": ["APT"], "order_by": ["DT"]},
+        "fixed_filters": [{"field": "CANCEL", "operator": "equals", "value": "false"}],
+        "measures": [{"expr": {"col": "APT"}}, {"name": "이전", "expr": {"fn": "PREV", "args": [amt]}},
+                     {"name": "차이", "expr": {"fn": "DELTA", "args": [amt]}},
+                     {"name": "변동폭", "expr": {"fn": "ABS", "args": [{"fn": "DELTA", "args": [amt]}]}},
+                     {"name": "평균", "expr": {"fn": "ROUND", "args": [{"fn": "AVG", "args": [amt]}, {"num": 0}]}}],
+    }
+    preview = client.post(f"{base}/preview", json=change).json()
+    assert preview["error"] is None and "LAG(" in preview["sql"]
+    bad = client.post(f"{base}/preview", json={**change, "kind": "aggregate"}).json()
+    assert "집계되지 않은 값" in bad["error"]
+    assert client.post(base, json={**change, "kind": "aggregate"}).status_code == 400
+
+    saved = client.post(base, json=change)
+    assert saved.status_code == 200, saved.text
+    assert [m["name"] for m in saved.json()["measures"]] == ["APT", "이전", "차이", "변동폭", "평균"]
+    assert saved.json()["agg_function"] is None and saved.json()["select_columns"] == []
+
+    monthly = client.post(base, json={"name": "월평균 건수", "table_name": "TRADE", "measures": [
+        {"expr": {"fn": "AVG", "args": [{"fn": "COUNT", "args": [], "by": ["YM"]}]}}]})
+    assert monthly.status_code == 200, monthly.text
+
+    def run(ast):
+        out = client.post(f"/api/systems/{ds}/compile", json={"ast": ast}).json()
+        assert out["error"] is None, out["error"]
+        with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
+            conn.execute(f"SET search_path TO {TARGET_SCHEMA}")
+            return conn.execute(out["sql"]).fetchall()
+
+    # 2월 이후 변동이 가장 큰 거래: b 의 200 → 150. 평균은 2월 이후 해제 안 된 거래 (130+200+150)/3
+    top = run({"metric": "거래 변동", "filters": [{"field": "DT", "operator": "greater_or_equal", "value": "2026-02-01"}],
+               "order_by": [{"field": "변동폭", "direction": "desc"}], "limit": 1})
+    assert [tuple(map(str, r)) for r in top] == [("b", "200", "-50", "50", "160")]
+    # a 의 2월 거래는 해제 거래(999)가 아니라 1월 100 과 비교한다
+    rows = run({"metric": "거래 변동", "filters": [{"field": "APT", "operator": "equals", "value": "a"}],
+                "order_by": [{"field": "DT", "direction": "asc"}]})
+    assert [(r[1], r[2]) for r in rows] == [(None, None), (100, 30)]
+    assert float(run({"metric": "월평균 건수"})[0][0]) == pytest.approx(5 / 3)
+    assert {r[0]: float(r[1]) for r in run({"metric": "월평균 건수", "group_by": ["APT"]})} == {"a": 1.5, "b": 1.0}

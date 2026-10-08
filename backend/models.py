@@ -4,6 +4,8 @@ from uuid import UUID
 from typing import Literal
 from pydantic import BaseModel, field_validator, model_validator
 
+from compiler import MEASURE_ROW_SERIES, SERIES_FUNCTIONS, measure_functions
+
 
 class Driver(str, Enum):
     MYSQL = "mysql"
@@ -106,16 +108,24 @@ class JoinSpec(BaseModel):
 
 
 class SeriesSpec(BaseModel):
-    """시계열 집계의 행 순서. 누적 카운터는 이 순서로 직전 행과 비교한다."""
-    partition_by: str  # 행을 나누는 컬럼 (예: 차량 ID)
-    order_by: str      # 시간 순서 컬럼 (예: 수집 일시)
+    """직전 행 비교의 행 순서. 누적 카운터·직전 거래는 이 순서로 직전 행과 비교한다.
+
+    구분·순서는 컬럼 하나(예전 지표)나 목록이다 — 아파트 거래처럼 '지역+단지+면적' 이 한 묶음인 경우.
+    """
+    partition_by: str | list[str]  # 행을 나누는 컬럼 (예: 차량 ID)
+    order_by: str | list[str]      # 시간 순서 컬럼 (예: 수집 일시). 뒤 컬럼은 같은 시각의 순서를 정한다
     baseline: str | None = None  # CHANGE_COUNT 의 정상값 (예: 0)
     # DELTA_SUM 의 한 행 최대 증가폭. 넘으면 리셋 복귀·장비 교체로 튄 값으로 보고 0으로 친다.
     max_step: float | None = None
 
     @field_validator("partition_by", "order_by")
     @classmethod
-    def _not_blank(cls, value: str) -> str:
+    def _not_blank(cls, value):
+        if isinstance(value, list):
+            cleaned = [str(v or "").strip() for v in value if str(v or "").strip()]
+            if not cleaned:
+                raise ValueError("구분 컬럼과 순서 컬럼이 필요합니다")
+            return cleaned[0] if len(cleaned) == 1 else cleaned
         cleaned = (value or "").strip()
         if not cleaned:
             raise ValueError("구분 컬럼과 순서 컬럼이 필요합니다")
@@ -135,6 +145,20 @@ class SeriesSpec(BaseModel):
             return None
         text = str(value).strip()
         return text or None
+
+
+class Measure(BaseModel):
+    """지표의 출력 컬럼 하나. expr 은 함수를 겹친 식 트리다 (compiler 의 측정값 식).
+
+    {"col": "컬럼"} · {"num": 0} · {"fn": "ROUND", "args": [{"fn": "AVG", "args": [{"col": "금액"}]}, {"num": 0}]}
+    """
+    name: str = ""
+    expr: dict
+
+    @field_validator("name")
+    @classmethod
+    def _trim(cls, value: str) -> str:
+        return (value or "").strip()
 
 
 class MetricExample(BaseModel):
@@ -171,6 +195,8 @@ class MetricInput(BaseModel):
     select_columns: list[str] = []
     expression: str | None = None
     series: SeriesSpec | None = None
+    # 집계형·조회형의 출력 컬럼 목록. 있으면 agg_field·agg_function·select_columns 대신 이것을 쓴다.
+    measures: list[Measure] = []
     fixed_filters: list[dict] = []
     examples: list[MetricExample] = []
     synonyms: list[str] = []
@@ -198,6 +224,10 @@ class MetricInput(BaseModel):
     def _shape_matches_kind(self):
         # 종류에 맞지 않는 필드를 남겨두면 "집계로 저장했는데 컬럼 목록이 딸려 있는"
         # 행이 생기고, 나중에 어느 쪽이 진짜인지 알 수 없게 된다.
+        if self.measures and self.kind is not MetricKind.DERIVED:
+            self._shape_measures()
+            return self
+        self.measures = []
         if self.kind is MetricKind.AGGREGATE:
             if not self.agg_field or not self.agg_function:
                 raise ValueError("집계형 지표는 agg_field와 agg_function이 필요합니다")
@@ -242,6 +272,37 @@ class MetricInput(BaseModel):
             self.series = None
         return self
 
+    def _shape_measures(self) -> None:
+        """측정값 정의: 이름을 채우고, 직전 행 비교를 쓰지 않으면 series 를 지운다."""
+        names = set()
+        for ms in self.measures:
+            if not ms.name:
+                if "col" in ms.expr:
+                    ms.name = str(ms.expr["col"]).split(".")[-1]
+                elif len(self.measures) == 1:
+                    ms.name = self.name
+                else:
+                    raise ValueError("측정값이 여럿이면 각각 이름이 필요합니다")
+            if ms.name.lower() in names:
+                raise ValueError(f"측정값 이름이 겹칩니다: {ms.name}")
+            names.add(ms.name.lower())
+        used = set().union(*(measure_functions(ms.expr) for ms in self.measures))
+        if used & (set(MEASURE_ROW_SERIES) | set(SERIES_FUNCTIONS)):
+            if self.series is None:
+                raise ValueError("직전 행 비교(PREV·DELTA·DELTA_SUM·CHANGE_COUNT)에는 구분 컬럼과 순서 컬럼(series)이 필요합니다")
+            if "CHANGE_COUNT" in used and self.series.baseline is None:
+                raise ValueError("CHANGE_COUNT 는 정상값(series.baseline, 예: 0)이 필요합니다")
+            if "CHANGE_COUNT" not in used:
+                self.series.baseline = None
+            if "DELTA_SUM" not in used:
+                self.series.max_step = None
+        else:
+            self.series = None
+        self.agg_field = None
+        self.agg_function = None
+        self.select_columns = []
+        self.expression = None
+
 
 class Metric(BaseModel):
     """업무 지표"""
@@ -256,6 +317,7 @@ class Metric(BaseModel):
     select_columns: list[str]
     expression: str | None
     series: SeriesSpec | None
+    measures: list[Measure] = []
     fixed_filters: list[dict]
     examples: list[MetricExample]   # 승인된 예시만
     draft_example_count: int        # 검수를 기다리는 LLM 초안

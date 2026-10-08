@@ -854,6 +854,110 @@ code {
   min-width: 110px;
 }
 
+/* 측정값 식 — 함수를 겹친 상자. 깊어질수록 왼쪽 선으로 안쪽을 보인다 */
+.measure-card .measure-name {
+  width: 200px;
+  flex: none;
+}
+
+.expr-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--primary);
+}
+
+.expr-fn {
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+}
+
+.expr-fn.alt {
+  background: var(--surface-2);
+}
+
+.expr-head,
+.expr-leaf,
+.expr-by {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.expr-args {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0 12px;
+}
+
+.expr-arg {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.expr-arg > .expr-fn,
+.expr-arg > .expr-leaf {
+  flex: 1;
+  min-width: 0;
+}
+
+.expr-arg-label {
+  flex: none;
+  min-width: 34px;
+  padding-top: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.expr-by {
+  margin: 8px 0 0 12px;
+}
+
+.expr-by .expr-arg-label {
+  padding-top: 0;
+}
+
+.expr-head .select,
+.expr-leaf .select,
+.expr-by .select,
+.expr-num {
+  width: auto;
+  height: 32px;
+}
+
+.expr-fn-select {
+  min-width: 170px;
+  font-weight: 600;
+}
+
+.expr-leaf-select {
+  min-width: 200px;
+  max-width: 100%;
+}
+
+.expr-num {
+  width: 120px;
+}
+
+.expr-wrap {
+  min-width: 110px;
+  color: var(--text-2);
+  border-style: dashed;
+}
+
+.expr-hint {
+  min-width: 0;
+}
+
 .kv {
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr);
@@ -1005,6 +1109,15 @@ code {
   }
   .filter-grid {
     grid-template-columns: 1fr;
+  }
+  .measure-card .measure-name,
+  .expr-leaf-select,
+  .expr-fn-select {
+    width: 100%;
+    min-width: 0;
+  }
+  .expr-hint {
+    display: none;
   }
 }
 

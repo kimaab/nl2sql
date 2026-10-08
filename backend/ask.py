@@ -4,7 +4,7 @@ import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from compiler import Compiler
+from compiler import Compiler, measure_text
 from graph import MAX_ATTEMPTS, build_graph
 from selector import Step, llm_select, model_name, tfidf_select, usage_of
 from tool import CLARIFY_PREFIX, make_clarify_tool, make_compile_tool
@@ -27,10 +27,19 @@ ast 는 JSON 객체이고 아래 키만 씁니다. 키 이름을 바꾸지 마�
 - group_by: ["컬럼"]. 날짜를 기간 단위로 묶을 때는 {"field": "날짜컬럼", "grain": "day|week|month|quarter|year"} — 결과 별칭은 "컬럼_grain" (예: ORDER_DTM_month).
 - having: 집계 결과 조건 [{"alias": "집계 별칭 또는 지표 이름", "operator": "greater_or_equal", "value": 3}].
 - order_by: [{"field": "컬럼 또는 집계 별칭", "direction": "asc|desc"}]. 집계 질의는 group_by 컬럼이나 집계 별칭으로만 정렬합니다.
+  지표에 measures(측정값)가 있으면 그 이름이 결과 컬럼 이름이고, 정렬·having 에 그 이름을 씁니다.
 - limit: 1~1000 정수. "상위 10개", "최근 5건" 은 order_by 와 limit 을 함께 씁니다.
 - distinct: true — 행 목록의 중복을 뺄 때. 집계의 중복 제거는 COUNT_DISTINCT 입니다.
 - compare: 기간 비교 {"field": "날짜컬럼", "periods": [{"label": "이번달", "from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}, {"label": "지난달", "from": "...", "to": "..."}]}.
   첫 기간이 기준이고, 기간이 둘이면 증감률이 함께 나옵니다. 집계(aggregations 나 집계형 지표)에만 씁니다."""
+
+
+def _prompt_metric(m: dict) -> dict:
+    """프롬프트에 싣는 지표. 측정값 식 트리는 읽을 수 있는 식으로 바꾼다."""
+    out = {k: v for k, v in m.items() if k != "examples"}
+    if m.get("measures"):
+        out["measures"] = [{"name": ms["name"], "식": measure_text(ms["expr"])} for ms in m["measures"]]
+    return out
 
 
 def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = None,
@@ -41,7 +50,7 @@ def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = No
     지표를 두고 원본 컬럼을 직접 집계하면 지표 정의(누적값 증가분·고정 필터)가 사라진다.
     """
     today = today or datetime.date.today()
-    metrics = [{k: v for k, v in m.items() if k != "examples"} for m in pruned["metrics"]]
+    metrics = [_prompt_metric(m) for m in pruned["metrics"]]
     metadata = {"tables": pruned["tables"], "metrics": metrics}
     if pruned.get("relations"):
         metadata["relations"] = pruned["relations"]
