@@ -6,6 +6,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "collect" / "budongsan"))
 
 
 @pytest.fixture

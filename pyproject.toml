@@ -21,7 +21,12 @@ dependencies = [
     "numpy>=1.24.0",
     "python-dotenv>=1.0.0",
     "cryptography>=42",
+    "requests>=2.31.0",
+    "defusedxml>=0.7.1",
 ]
+
+[tool.setuptools.package-data]
+backend = ["*.sql"]
 
 [tool.setuptools.packages.find]
 where = ["."]

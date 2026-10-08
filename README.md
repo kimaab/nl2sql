@@ -31,6 +31,8 @@
 
 ## 설치
 
+국토교통부 아파트 매매 실거래가를 PostgreSQL `budongsan` 스키마에 수집하는 방법과 매일 06:00 예약 설정은 [수집 안내](docs/budongsan.md)를 참고하세요.
+
 ### 요구사항
 - Python 3.12+ ([uv](https://docs.astral.sh/uv/) 권장)
 - Node.js 18+
