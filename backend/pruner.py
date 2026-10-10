@@ -20,12 +20,8 @@ def korean_aware_tokens(text: str) -> list[str]:
 
 
 def _column_text(column: dict) -> list[str]:
-    """컬럼 하나가 검색에 기여하는 말 — 이름, 설명, 동의어, 코드값 이름."""
-    return (
-        [column["name"], column.get("description", "")]
-        + list(column.get("synonyms", []))
-        + [str(c.get("label", "")) for c in column.get("codes", [])]
-    )
+    """컬럼 하나가 검색에 기여하는 말 — 이름, 설명."""
+    return [column["name"], column.get("description", "")]
 
 
 class Pruner:
@@ -41,10 +37,9 @@ class Pruner:
                 words.extend(_column_text(column))
             self.entries.append(("table", table, " ".join(words)))
 
-        # 지표 항목 추가 — 예시 질문도 검색 본문이다
+        # 지표 항목 추가
         for metric in contract.get("metrics", []):
-            examples = " ".join(e.get("question", "") for e in metric.get("examples", []))
-            text = f"{metric['name']} {metric.get('description', '')} {metric['table']} {examples}"
+            text = f"{metric['name']} {metric.get('description', '')} {metric['table']}"
             self.entries.append(("metric", metric, text))
 
         self._tables_by_name = {t["name"]: t for t in contract["tables"]}

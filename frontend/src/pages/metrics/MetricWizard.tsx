@@ -35,9 +35,7 @@ const COUNT_ALL: api.Measure[] = [{ name: "", expr: { fn: "COUNT", args: [] } }]
 /** 서버 SQL 을 읽기 좋게 절마다 줄을 바꾼다 */
 const formatSql = (sql: string) => sql.replace(/ (FROM|WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|FETCH FIRST) /g, "\n$1 ");
 
-const STEPS = ["종류", "대상", "조건", "예시", "이름·설명"];
-
-type ExampleDraft = { question: string; ast: string };
+const STEPS = ["종류", "대상", "조건", "이름·설명"];
 
 /** 조인이 생기거나 사라질 때 컬럼 참조를 맞춘다.
  *  조인이 있으면 모두 '테이블.컬럼', 없으면 기본 테이블의 컬럼 이름만 쓴다. */
@@ -81,7 +79,6 @@ export function MetricWizard() {
   const [metrics, setMetrics] = useState<api.Metric[]>([]);
   const [step, setStep] = useState(editing ? 1 : 0);
   const [form, setForm] = useState<api.MetricInput>(EMPTY_METRIC);
-  const [examples, setExamples] = useState<ExampleDraft[]>([]);
   const [loaded, setLoaded] = useState(!editing);
   const [saving, setSaving] = useState(false);
   const [preview, setPreview] = useState<{ sql: string | null; error: string | null } | null>(null);
@@ -117,12 +114,6 @@ export function MetricWizard() {
             toast("수정할 지표를 찾을 수 없습니다", "error");
           } else {
             setForm(toInput(current));
-            setExamples(
-              (current.examples ?? []).map((e) => ({
-                question: e.question,
-                ast: e.ast ? JSON.stringify(e.ast, null, 2) : "",
-              }))
-            );
           }
           setLoaded(true);
         } else {
@@ -234,27 +225,6 @@ export function MetricWizard() {
       .flatMap((t) => t.columns.map((c) => `${t.name}.${c.name}`));
   }
 
-  // ---- 예시
-  function parsedExamples(): { value: api.MetricExample[]; error: string | null } {
-    const out: api.MetricExample[] = [];
-    for (const [i, e] of examples.entries()) {
-      if (!e.question.trim()) return { value: [], error: `예시 ${i + 1}의 질문이 비어 있습니다` };
-      if (!e.ast.trim()) {
-        out.push({ question: e.question.trim(), ast: null });
-        continue;
-      }
-      try {
-        const ast = JSON.parse(e.ast);
-        if (typeof ast !== "object" || Array.isArray(ast) || ast === null) throw new Error("객체가 아닙니다");
-        out.push({ question: e.question.trim(), ast });
-      } catch (err) {
-        return { value: [], error: `예시 ${i + 1}의 AST 가 JSON 객체가 아닙니다 (${errorMessage(err)})` };
-      }
-    }
-    return { value: out, error: null };
-  }
-  const exampleCheck = parsedExamples();
-
   const aggregateMetrics = metrics.filter(
     (m) => m.kind === "aggregate" && m.id !== metricId && scopeNames.includes(m.table_name)
   );
@@ -285,7 +255,6 @@ export function MetricWizard() {
         f.field &&
         ((f.source ?? "literal") === "question" || isNoValue(f.operator) || String(f.value ?? "") !== "")
     ),
-    exampleCheck.error === null,
     form.name.trim() !== "",
   ];
 
@@ -299,7 +268,7 @@ export function MetricWizard() {
     let stale = false;
     const timer = setTimeout(() => {
       api
-        .previewMetric(dsId, { ...form, name: form.name.trim() || "새 지표", examples: [] })
+        .previewMetric(dsId, { ...form, name: form.name.trim() || "새 지표" })
         .then((p) => !stale && setPreview(p))
         .catch((err) => !stale && setPreview({ sql: null, error: errorMessage(err) }));
     }, 400);
@@ -310,11 +279,7 @@ export function MetricWizard() {
   }, [dsId, form]);
 
   async function handleSave() {
-    if (exampleCheck.error) {
-      toast(exampleCheck.error, "error");
-      return;
-    }
-    const body = { ...form, name: form.name.trim(), examples: exampleCheck.value };
+    const body = { ...form, name: form.name.trim() };
     try {
       setSaving(true);
       const saved = editing
@@ -746,47 +711,6 @@ export function MetricWizard() {
 
             {step === 3 && (
               <>
-                <div>
-                  <div className="card-title">예시 질문</div>
-                  <p className="muted">
-                    사용자가 이 지표를 찾을 법한 질문을 적어 두면 검색이 잘 걸립니다. AST 까지 적으면 모델에게 보여주는
-                    모범 답안이 되고, 저장할 때 실제로 컴파일되는지 검사합니다. 없으면 건너뛰어도 됩니다.
-                  </p>
-                </div>
-                {examples.map((e, i) => (
-                  <div key={i} className="filter-card stack" style={{ gap: 8 }}>
-                    <div className="row">
-                      <strong>예시 {i + 1}</strong>
-                      <span className="spacer" />
-                      <Button size="sm" variant="danger" onClick={() => setExamples(examples.filter((_, k) => k !== i))}>
-                        삭제
-                      </Button>
-                    </div>
-                    <input
-                      className="input"
-                      value={e.question}
-                      placeholder="지난달 카드 결제 매출"
-                      onChange={(ev) => setExamples(examples.map((x, k) => (k === i ? { ...x, question: ev.target.value } : x)))}
-                    />
-                    <textarea
-                      className="textarea"
-                      rows={4}
-                      style={{ fontFamily: "var(--mono)" }}
-                      value={e.ast}
-                      placeholder={`(선택) {"metric": "${form.name || "지표명"}", "filters": [...]}`}
-                      onChange={(ev) => setExamples(examples.map((x, k) => (k === i ? { ...x, ast: ev.target.value } : x)))}
-                    />
-                  </div>
-                ))}
-                {exampleCheck.error && <Alert tone="warn">{exampleCheck.error}</Alert>}
-                <div>
-                  <Button onClick={() => setExamples([...examples, { question: "", ast: "" }])}>+ 예시 추가</Button>
-                </div>
-              </>
-            )}
-
-            {step === 4 && (
-              <>
                 <div className="card-title">이름과 설명</div>
                 <Field label="이름" required hint="질문에 자주 나오는 말로 짓습니다. 파생 지표의 수식에서 [이름]으로 부릅니다.">
                   <input
@@ -861,8 +785,6 @@ export function MetricWizard() {
                 {form.fixed_filters.length}개
                 {questionFilters > 0 && <span className="muted"> (질문 값 {questionFilters}개)</span>}
               </dd>
-              <dt>예시</dt>
-              <dd>{examples.length}개</dd>
               {form.name && (
                 <>
                   <dt>이름</dt>

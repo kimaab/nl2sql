@@ -6,12 +6,9 @@
   # 모델로: 질문마다 에이전트를 돌려 기대 SQL 과 비교하고 리포트를 남긴다 (LLM_* 환경변수 필요)
   python backend/evaluate.py --cases eval/shoppingmall_cases.json --contract eval/shoppingmall_contract.json
 
-  # 메타데이터 DB 의 승인된 평가 문항으로 (DB_URL 필요). 결과는 eval_run · eval_result 에 남는다.
-  python backend/evaluate.py --system-id <uuid>                     # TO-BE (LLM 선택)
-  python backend/evaluate.py --system-id <uuid> --selector tfidf    # 비교 기준 (한 번에 검색)
-
-  # 평가 문항 초안 만들기 — 활성 지표마다 N개, 검수 화면에서 승인해야 쓰인다
-  python backend/evaluate.py --system-id <uuid> --generate 3
+  # 메타데이터 DB 의 시스템으로 (DB_URL 필요)
+  python backend/evaluate.py --cases <파일> --system-id <uuid>                     # TO-BE (LLM 선택)
+  python backend/evaluate.py --cases <파일> --system-id <uuid> --selector tfidf    # 비교 기준 (한 번에 검색)
 """
 import argparse
 import datetime
@@ -163,7 +160,6 @@ def run_model(contract: dict, data: dict, today: datetime.date | None, selector:
             "tables": outcome.get("tables", []), "metrics": outcome.get("metrics", []),
             "total_tokens": outcome.get("total_tokens", 0), **judge(outcome, case),
             "ast": outcome["ast"], "error": outcome["error"], "clarification": outcome["clarification"],
-            **({"case_id": case["id"]} if "id" in case else {}),
         })
         hits = " ".join(f"{k[:-4]}={'O' if v else 'X'}" for k, v in judge(outcome, case).items() if v is not None)
         print(f"[{i}/{len(data['cases'])}] {status:9s} {hits:24s} {case['question']}", flush=True)
@@ -206,146 +202,32 @@ def _summary(results: list[dict], mode: str) -> dict:
     }
 
 
-# ── 메타데이터 DB 의 평가 문항 (eval_case → eval_run · eval_result) ─────────
-
-def db_cases(system_id) -> list[dict]:
-    """승인된 평가 문항을 run_model 이 읽는 모양으로 (정답 테이블·지표는 이름으로)"""
-    import db
-    rows = db.query("""
-        SELECT c.id, c.question, c.expected_tables, c.expected_sql, m.name AS metric_name, c.expected_metric_id
-          FROM eval_case c LEFT JOIN metric m ON m.id = c.expected_metric_id
-         WHERE c.system_id = %s AND c.status = 'approved' ORDER BY c.id
-    """, str(system_id))
-    names = {str(r["id"]): r["name"] for r in db.query("SELECT id, name FROM meta_table WHERE system_id = %s", str(system_id))}
-    return [{"id": r["id"], "question": r["question"],
-             "expected_tables": [names[t] for t in r["expected_tables"] if t in names],
-             "expected_metric": r["metric_name"], "expected_sql": r["expected_sql"]} for r in rows]
-
-
-def save_run(system_id, label: str, config: dict, report: dict) -> str:
-    """평가 실행 요약(eval_run)과 문항별 결과(eval_result)를 남긴다"""
-    from uuid import uuid4
-    import db
-    run_id = uuid4()
-    metric_ids = {r["name"]: str(r["id"]) for r in db.query("SELECT id, name FROM metric WHERE system_id = %s", str(system_id))}
-    with db.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO eval_run (id, system_id, label, config, case_count, table_recall, metric_accuracy,
-                                      sql_accuracy, avg_tokens, avg_elapsed_ms, finished_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-            """, (str(run_id), str(system_id), label, json.dumps(config, ensure_ascii=False), report["total"],
-                  report["table_recall"], report["metric_accuracy"], report["sql_accuracy"],
-                  report["avg_tokens"], report["avg_elapsed_ms"]))
-            cur.executemany("""
-                INSERT INTO eval_result (run_id, case_id, selected_tables, selected_metric_id, sql, table_hit,
-                                         metric_hit, sql_hit, error, total_tokens, elapsed_ms)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, [(str(run_id), r["case_id"], json.dumps(r["tables"], ensure_ascii=False),
-                   metric_ids.get((r["metrics"] or [None])[0]), r["sql"], bool(r["table_hit"]), bool(r["metric_hit"]),
-                   r["sql_hit"], r["error"] or r["clarification"], r["total_tokens"], r["elapsed_ms"])
-                  for r in report["results"] if "case_id" in r])
-    return str(run_id)
-
-
-GENERATE_SYSTEM = """당신은 업무 시스템 '{name}' 의 사용자가 실제로 할 법한 질문을 씁니다. 이 질문들은 평가 문항이 됩니다.
-[업무 영역] {domain}
-[규칙]
-- 아래 지표 하나를 정답으로 하는 질문을 {n}개 씁니다.
-- 지표 이름과 설명에 쓰인 단어를 그대로 쓰지 마십시오 — 같은 뜻의 다른 말로. 그래야 검색이 아니라 이해로 맞혀야 합니다.
-- 말투를 섞습니다: 표준, 구어체, 줄임말, 비속어, 다른 업무 용어. style 에 어느 말투인지 적습니다.
-- 설명 없이 JSON 객체 하나로만 답합니다: {{"cases": [{{"question": "...", "style": "구어체"}}]}}"""
-
-
-def generate_cases(system_id, per_metric: int = 3, model=None) -> int:
-    """활성 지표마다 LLM 으로 평가 문항 초안(draft)을 만든다. 사람이 검수 화면에서 승인해야 평가에 쓰인다."""
-    import db
-    from contract import load_contract
-    from llm import make_model
-    from selector import Step, ask_json
-
-    model = model or make_model(temperature=0.7)
-    contract = load_contract(system_id, active_only=True)
-    table_ids = {r["name"]: str(r["id"]) for r in db.query(
-        "SELECT id, name FROM meta_table WHERE system_id = %s AND deleted_at IS NULL", str(system_id))}
-    metric_ids = {r["name"]: str(r["id"]) for r in db.query("SELECT id, name FROM metric WHERE system_id = %s", str(system_id))}
-    made = 0
-    for m in contract["metrics"]:
-        system = GENERATE_SYSTEM.format(name=contract["name"], domain=contract.get("domain") or "", n=per_metric)
-        user = f"[지표] {m['name']}\n[설명] {m.get('description') or ''}\n[테이블] {', '.join(m.get('tables', []))}"
-
-        def validate(p):
-            if not isinstance(p.get("cases"), list) or not p["cases"]:
-                raise ValueError('"cases" 목록이 필요합니다')
-
-        try:
-            parsed = ask_json(model, system, user, Step("eval"), validate)
-        except ValueError as error:
-            print(f"  - {m['name']}: 생성 실패 ({error})")
-            continue
-        rows = [(str(system_id), str(c.get("question", "")).strip(),
-                 json.dumps([table_ids[t] for t in m.get("tables", []) if t in table_ids]),
-                 metric_ids.get(m["name"]), str(c.get("style") or "")[:20])
-                for c in parsed["cases"][:per_metric] if str(c.get("question", "")).strip()]
-        with db.connection() as conn:
-            with conn.cursor() as cur:
-                cur.executemany("""
-                    INSERT INTO eval_case (system_id, question, expected_tables, expected_metric_id, origin, style, status)
-                    VALUES (%s, %s, %s, %s, 'synthetic', %s, 'draft')
-                """, rows)
-        made += len(rows)
-        print(f"  - {m['name']}: {len(rows)}개")
-    return made
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="nl2sql 평가셋 실행기")
-    parser.add_argument("--cases", type=Path, help="평가셋 JSON 파일 (없으면 --system-id 의 승인된 평가 문항)")
+    parser.add_argument("--cases", type=Path, required=True, help="평가셋 JSON 파일")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--contract", type=Path, help="계약서 JSON 파일")
     source.add_argument("--system-id", help="메타데이터 DB 의 시스템 id")
     parser.add_argument("--selector", choices=("llm", "tfidf"), default="llm",
                         help="llm = 테이블 추론 → 지표 선택 (TO-BE) · tfidf = 한 번에 검색 (비교 기준)")
-    parser.add_argument("--label", help="평가 실행 이름 (DB 에 남길 때)")
     parser.add_argument("--compile-only", action="store_true", help="모델 없이 ast → expected_sql 만 확인")
-    parser.add_argument("--generate", type=int, metavar="N", help="활성 지표마다 평가 문항 초안 N개를 만든다 (검수 화면에서 승인)")
     parser.add_argument("--out", type=Path, help="리포트 경로 (기본: eval/reports/<시각>.json)")
     args = parser.parse_args(argv)
 
-    run_id = None
+    data = load_cases(args.cases)
+    today = datetime.date.fromisoformat(data["today"]) if data.get("today") else None
     if args.contract:
-        if not args.cases:
-            raise SystemExit("--contract 에는 --cases 가 필요합니다")
-        data = load_cases(args.cases)
         contract = json.loads(args.contract.read_text(encoding="utf-8"))
-        today = datetime.date.fromisoformat(data["today"]) if data.get("today") else None
-        report = run_compile_only(contract, data) if args.compile_only else run_model(contract, data, today, args.selector)
     else:
         import db
         from contract import load_contract
         from uuid import UUID
-        system_id = UUID(args.system_id)
         db.init_pool()
         try:
-            if args.generate:
-                print(f"평가 문항 초안 {generate_cases(system_id, args.generate)}개를 만들었습니다 — 검수 화면에서 승인하십시오")
-                return 0
-            contract = load_contract(system_id, active_only=not args.compile_only)
-            data = load_cases(args.cases) if args.cases else {"cases": db_cases(system_id)}
-            if not data["cases"]:
-                raise SystemExit("승인된 평가 문항이 없습니다 (--generate 로 만들고 검수 화면에서 승인)")
-            today = datetime.date.fromisoformat(data["today"]) if data.get("today") else None
-            if args.compile_only:
-                report = run_compile_only(contract, data)
-            else:
-                report = run_model(contract, data, today, args.selector)
-                if not args.cases:
-                    from llm import make_model
-                    label = args.label or f"{args.selector}-{datetime.datetime.now():%m%d-%H%M}"
-                    run_id = save_run(system_id, label, {"selector": args.selector,
-                                                         "model": str(getattr(make_model(), "model_name", ""))}, report)
+            contract = load_contract(UUID(args.system_id), active_only=not args.compile_only)
         finally:
             db.close_pool()
+    report = run_compile_only(contract, data) if args.compile_only else run_model(contract, data, today, args.selector)
 
     out = args.out or REPORT_DIR / f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{report['mode']}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -353,8 +235,7 @@ def main(argv=None) -> int:
 
     print(f"\n테이블 재현율 {report.get('table_recall')} · 지표 정확도 {report.get('metric_accuracy')} · "
           f"SQL 일치 {report.get('sql_accuracy')} (정확히 {report['accuracy']})")
-    print(f"{report['by_status']} · 평균 시도 {report['avg_attempts']} · 평균 토큰 {report.get('avg_tokens')} · 리포트 {out}"
-          + (f" · 평가 실행 {run_id}" if run_id else ""))
+    print(f"{report['by_status']} · 평균 시도 {report['avg_attempts']} · 평균 토큰 {report.get('avg_tokens')} · 리포트 {out}")
     for f in report["failures"][:20]:
         print(f"  - [{f['status']}] {f['question']}: {f.get('error') or f.get('clarification') or f.get('sql')}")
     return 0 if not report["failures"] else 1

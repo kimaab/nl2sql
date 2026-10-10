@@ -111,30 +111,6 @@ def export_eval_cases(system_id: UUID) -> dict:
     }
 
 
-def promote_to_eval_case(entry_id: UUID) -> int:
-    """'맞음' 기록 하나를 평가 문항(eval_case, origin=human, approved)으로 옮긴다.
-
-    정답 테이블·지표는 그 질문이 실제로 고른 것 — 사람이 '맞음' 이라고 확인했기 때문이다.
-    """
-    row = db.one("SELECT * FROM ask_log WHERE id = %s", str(entry_id))
-    if row is None:
-        raise ApiException(404, "질문 기록을 찾을 수 없습니다")
-    if row["feedback"] != "up" or not row["sql"]:
-        raise ApiException(400, "'맞음' 으로 표시된 기록만 평가 문항으로 옮길 수 있습니다")
-    tables = db.query("SELECT id FROM meta_table WHERE system_id = %s AND name = ANY(%s)",
-                      str(row["system_id"]), row["selected_tables"] or [])
-    metric = db.one("SELECT id FROM metric WHERE system_id = %s AND name = %s",
-                    str(row["system_id"]), (row["selected_metrics"] or [None])[0])
-    with db.connection() as conn:
-        cur = conn.execute("""
-            INSERT INTO eval_case (system_id, question, expected_tables, expected_metric_id, expected_sql,
-                                   origin, style, status)
-            VALUES (%s, %s, %s, %s, %s, 'human', '', 'approved') RETURNING id
-        """, (str(row["system_id"]), row["question"], json.dumps([str(t["id"]) for t in tables]),
-              str(metric["id"]) if metric else None, row["sql"]))
-        return cur.fetchone()[0]
-
-
 def _row_to_entry(row: dict) -> HistoryEntry:
     return HistoryEntry(
         id=row["id"], system_id=row["system_id"], system_name=row["system_name"],

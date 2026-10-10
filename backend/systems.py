@@ -183,13 +183,6 @@ def _merge_schema(system_id: UUID, tables: list[dict], relations: list[dict] | N
             """, (sid, [t["name"] for t in tables]))
             removed = len(cur.fetchall())
 
-            # 새로 생기거나 구조가 바뀐 테이블은 카드를 (다시) 만든다
-            if added or changed:
-                cur.executemany("""
-                    INSERT INTO enrich_job (target_type, target_id, reason) VALUES ('table', %s, %s)
-                    ON CONFLICT (target_type, target_id) WHERE status = 'queued' DO NOTHING
-                """, [(str(t), "new") for t in added] + [(str(t), "changed") for t in changed])
-
             if relations is not None:
                 replace_fk_relations(cur, system_id, relations)
             cur.execute("UPDATE meta_system SET synced_at = now(), updated_at = now() WHERE id = %s RETURNING synced_at",
@@ -263,24 +256,17 @@ def list_tables(system_id: UUID) -> list[TableInfo]:
                (SELECT count(*) FROM metric_table mt WHERE mt.table_id = t.id) AS metric_count
           FROM meta_table t WHERE t.system_id = %s AND t.deleted_at IS NULL ORDER BY t.name
     """, str(system_id))
-    return [TableInfo(id=r["id"], name=r["name"], comment=r["comment"], purpose=r["purpose"], card=r["card"],
-                      card_line=r["card_line"], card_status=r["card_status"], column_count=r["column_count"],
+    return [TableInfo(id=r["id"], name=r["name"], comment=r["comment"], purpose=r["purpose"],
+                      column_count=r["column_count"],
                       metric_count=r["metric_count"]) for r in rows]
 
 
 def set_table_purpose(system_id: UUID, table_id: UUID, purpose: str) -> TableInfo:
-    """용도가 바뀌면 카드를 다시 만든다 (보강 대기열)."""
     with db.connection() as conn:
-        cur = conn.execute("""
+        conn.execute("""
             UPDATE meta_table SET purpose = %s, updated_at = now()
              WHERE id = %s AND system_id = %s AND deleted_at IS NULL AND purpose IS DISTINCT FROM %s
-            RETURNING id
         """, (purpose.strip(), str(table_id), str(system_id), purpose.strip()))
-        if cur.fetchone():
-            conn.execute("""
-                INSERT INTO enrich_job (target_type, target_id, reason) VALUES ('table', %s, 'changed')
-                ON CONFLICT (target_type, target_id) WHERE status = 'queued' DO NOTHING
-            """, (str(table_id),))
     found = next((t for t in list_tables(system_id) if t.id == table_id), None)
     if found is None:
         raise ApiException(404, "테이블을 찾을 수 없습니다")

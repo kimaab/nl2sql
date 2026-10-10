@@ -14,30 +14,12 @@
         {
           "name": "MEMBER_NM",
           "type": "varchar(50)",
-          "description": "회원 이름",
-          "synonyms": [
-            "고객명",
-            "이름"
-          ]
+          "description": "회원 이름"
         },
         {
           "name": "GRADE_CD",
           "type": "varchar(2)",
-          "description": "회원 등급",
-          "codes": [
-            {
-              "code": "G1",
-              "label": "일반"
-            },
-            {
-              "code": "G2",
-              "label": "우수"
-            },
-            {
-              "code": "G3",
-              "label": "VIP"
-            }
-          ]
+          "description": "회원 등급 (G1 일반, G2 우수, G3 VIP)"
         },
         {
           "name": "JOIN_DT",
@@ -68,25 +50,7 @@
         {
           "name": "ORDER_STATUS",
           "type": "varchar(2)",
-          "description": "주문 상태",
-          "codes": [
-            {
-              "code": "01",
-              "label": "주문접수"
-            },
-            {
-              "code": "02",
-              "label": "결제완료"
-            },
-            {
-              "code": "03",
-              "label": "배송완료"
-            },
-            {
-              "code": "99",
-              "label": "취소"
-            }
-          ]
+          "description": "주문 상태 (01 주문접수, 02 결제완료, 03 배송완료, 99 취소)"
         },
         {
           "name": "TOTAL_AMT",
@@ -96,21 +60,7 @@
         {
           "name": "PAY_METHOD",
           "type": "varchar(10)",
-          "description": "결제 수단",
-          "codes": [
-            {
-              "code": "CARD",
-              "label": "카드"
-            },
-            {
-              "code": "BANK",
-              "label": "계좌이체"
-            },
-            {
-              "code": "POINT",
-              "label": "포인트"
-            }
-          ]
+          "description": "결제 수단 (CARD 카드, BANK 계좌이체, POINT 포인트)"
         }
       ]
     },
@@ -206,21 +156,6 @@
           "operator": "not_equals",
           "value": "99",
           "source": "literal"
-        }
-      ],
-      "examples": [
-        {
-          "question": "이번 달 매출",
-          "ast": {
-            "metric": "매출",
-            "filters": [
-              {
-                "field": "ORDER_DTM",
-                "operator": "greater_or_equal",
-                "value": "2026-10-01"
-              }
-            ]
-          }
         }
       ]
     },

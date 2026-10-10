@@ -95,10 +95,6 @@ def test_sync_reads_foreign_keys_and_primary_keys(client, ds):
     pk = _q("""SELECT c.name FROM meta_column c JOIN meta_table t ON t.id = c.table_id
                WHERE t.system_id = %s AND t.name = 'TB_ORDER_ITEM' AND c.is_pk ORDER BY c.name""", ds)
     assert [r[0] for r in pk] == ["ITEM_SEQ", "ORDER_ID"]
-    # 새 테이블은 카드를 만들 대기열에 들어간다
-    queued = _q("""SELECT count(*) FROM enrich_job j JOIN meta_table t ON t.id = j.target_id
-                   WHERE t.system_id = %s AND j.status = 'queued'""", ds)[0][0]
-    assert queued == 3
 
 
 def test_manual_relation_and_model_join_compile(client, ds):
@@ -111,18 +107,6 @@ def test_manual_relation_and_model_join_compile(client, ds):
     assert out["error"] is None and 'INNER JOIN "TB_MEMBER" ON "TB_ORDER"."MEMBER_ID" = "TB_MEMBER"."MEMBER_ID"' in out["sql"]
 
 
-def test_annotation_codes_map_labels(client, ds):
-    res = client.put(f"/api/systems/{ds}/annotations/TB_ORDER/order_status", json={
-        "synonyms": ["상태", "상태"], "codes": [{"code": "03", "label": "배송완료"}, {"code": 99, "label": "취소"}]})
-    assert res.status_code == 200, res.text
-    assert res.json()["column_name"] == "ORDER_STATUS" and res.json()["synonyms"] == ["상태"]
-    assert [a["column_name"] for a in client.get(f"/api/systems/{ds}/annotations").json()] == ["ORDER_STATUS"]
-    out = client.post(f"/api/systems/{ds}/compile", json={"ast": {
-        "target_table": "TB_ORDER", "columns": ["ORDER_ID"],
-        "filters": [{"field": "ORDER_STATUS", "operator": "equals", "value": "배송완료"}]}}).json()
-    assert out["sql"].endswith("WHERE \"ORDER_STATUS\" = '03';")
-
-
 def test_metric_lifecycle_links_status_and_history(client, ds):
     base = f"/api/systems/{ds}/metrics"
     detail = client.post(base, json={
@@ -131,24 +115,17 @@ def test_metric_lifecycle_links_status_and_history(client, ds):
                    "on": [{"left": "TB_ORDER.ORDER_ID", "right": "TB_ORDER_ITEM.ORDER_ID"}]}],
         "select_columns": ["TB_ORDER.ORDER_ID", "TB_ORDER_ITEM.QTY"],
         "fixed_filters": [{"field": "TB_ORDER.MEMBER_ID", "operator": "equals", "source": "question"}],
-        "examples": [{"question": "m1 주문상세", "ast": {"metric": "주문상세", "filters": [
-            {"field": "MEMBER_ID", "operator": "equals", "value": "m1"}]}}],
     })
     assert detail.status_code == 200, detail.text
-    # 사람이 적은 예시가 있으니 바로 active
+    # 깨지지 않았으면 저장하자마자 active
     assert detail.json()["status"] == "active" and detail.json()["version"] == 1
+    assert "examples" not in detail.json()
     links = _q("""SELECT t.name, mt.role FROM metric_table mt JOIN meta_table t ON t.id = mt.table_id
                   WHERE mt.metric_id = %s ORDER BY mt.role, t.name""", detail.json()["id"])
     assert links == [("TB_ORDER", "base"), ("TB_ORDER_ITEM", "join")]
 
-    bad_example = client.post(base, json={
-        "name": "x", "kind": "aggregate", "table_name": "TB_ORDER", "agg_field": "*", "agg_function": "COUNT",
-        "examples": [{"question": "q", "ast": {"metric": "x", "filters": [{"field": "NOPE", "operator": "equals", "value": 1}]}}],
-    })
-    assert bad_example.status_code == 400 and "예시" in bad_example.json()["detail"]
-
     cnt = client.post(base, json={"name": "주문수", "table_name": "TB_ORDER", "agg_field": "*", "agg_function": "COUNT"}).json()
-    assert cnt["status"] == "draft" and cnt["examples"] == []  # 예시가 없으면 검수 전까지 draft
+    assert cnt["status"] == "active"
     cancel = client.post(base, json={"name": "취소주문수", "table_name": "TB_ORDER", "agg_field": "*",
                                      "agg_function": "COUNT", "fixed_filters": [
                                          {"field": "ORDER_STATUS", "operator": "equals", "value": "99"}]}).json()
@@ -174,19 +151,13 @@ def test_metric_lifecycle_links_status_and_history(client, ds):
 
 
 class FakeLLM:
-    """보강·질문 처리용 가짜 LLM. 프롬프트를 보고 알맞은 JSON 을 낸다."""
+    """질문 처리용 가짜 LLM. 프롬프트를 보고 알맞은 JSON 을 낸다."""
     model_name = "fake"
 
     def invoke(self, messages):
         from langchain_core.messages import AIMessage
-        system, user = messages[0].content, messages[1].content
-        if "카드를 씁니다" in system:
-            table = user.split("\n", 1)[0].replace("[테이블] ", "")
-            col = user.split("[컬럼]\n- ", 1)[1].split(" ", 1)[0]
-            body = {"card": f"무엇을 기록하나: {table}\n주요 컬럼: `{col}`", "card_line": f"{table} 기록"}
-        elif "물을 법한 질문을 씁니다" in system:
-            body = {"questions": ["장사 얼마나 됐어", "이번 달 건수", "주문 몇 개야"]}
-        elif "테이블을 고르는" in system:
+        system = messages[0].content
+        if "테이블을 고르는" in system:
             body = {"tables": [{"name": "TB_ORDER", "reason": "주문"}]}
         else:
             body = {"metrics": ["주문수"], "reason": "건수"}
@@ -202,24 +173,15 @@ class FakeLLM:
         return Bound()
 
 
-def test_enrich_review_activates_metric_and_ask_uses_it(client, ds, monkeypatch):
+def test_ask_uses_active_metric(client, ds, monkeypatch):
     import app as app_module
-    import enrich
-    from uuid import UUID
 
-    done = enrich.run(UUID(ds), FakeLLM())
-    assert done >= 4  # 테이블 3 + 지표들
-    review = client.get(f"/api/systems/{ds}/review").json()
-    cards = [r for r in review if r["kind"] == "table_card"]
-    assert {c["target_name"] for c in cards} == {"TB_MEMBER", "TB_ORDER", "TB_ORDER_ITEM"}
-    for c in cards:
-        assert client.post(f"/api/systems/{ds}/review/table_card/{c['id']}", json={"action": "approve"}).status_code == 204
-    example = next(r for r in review if r["kind"] == "metric_example" and r["target_name"] == "주문수")
-    assert client.post(f"/api/systems/{ds}/review/metric_example/{example['id']}",
-                       json={"action": "approve", "question": "주문 몇 건이야"}).status_code == 204
+    # 보강·검수·평가 API 는 없다
+    for path in ("enrich", "review", "eval-runs"):
+        assert client.get(f"/api/systems/{ds}/{path}").status_code == 404
+    # 예시 질문 없이도 저장된 지표는 바로 질문에 쓰인다
     metric = next(m for m in client.get(f"/api/systems/{ds}/metrics").json() if m["name"] == "주문수")
-    assert metric["status"] == "active" and metric["examples"][0]["question"] == "주문 몇 건이야"
-    assert metric["examples"][0]["origin"] == "llm"
+    assert metric["status"] == "active"
 
     monkeypatch.setattr(app_module, "make_model", lambda **kw: FakeLLM())
     res = client.post("/api/ask", json={"system_id": ds, "question": "주문 몇 개"}).json()
@@ -228,20 +190,8 @@ def test_enrich_review_activates_metric_and_ask_uses_it(client, ds, monkeypatch)
     assert [s["stage"] for s in res["steps"]] == ["table", "metric", "sql"]
     trace = client.get(f"/api/history/{res['id']}/trace").json()
     assert [t["stage"] for t in trace] == ["table", "metric", "sql"]
-    # 승인된 카드 한 줄이 테이블 추론에 쓰인다 (초안이 아니라)
     entry = client.get(f"/api/history?system_id={ds}").json()[0]
     assert entry["selected_metrics"] == ["주문수"]
-
-
-def test_glossary_crud(client, ds):
-    base = f"/api/systems/{ds}/glossary"
-    term = client.post(base, json={"term": "매상", "synonyms": ["매출액"], "maps_to": [{"metric": "주문수"}]})
-    assert term.status_code == 201, term.text
-    assert client.post(base, json={"term": "매상"}).status_code == 409
-    shared = client.post("/api/glossary", json={"term": "itest-전사용어"}).json()
-    names = [t["term"] for t in client.get(base).json()]
-    assert "매상" in names and "itest-전사용어" in names
-    client.delete(f"/api/glossary/{shared['id']}")
 
 
 def test_sync_merge_keeps_ids_and_soft_deletes(client, ds):
@@ -274,7 +224,7 @@ def test_sync_failure_is_logged(client):
     assert log["status"] == "error" and log["error"]
 
 
-def test_history_feedback_export_and_eval_case(client, ds):
+def test_history_feedback_and_export(client, ds):
     import history
     from uuid import UUID
     ok = history.record_ask(UUID(ds), "주문 수", {"sql": "SELECT 1;", "ast": {"metric": "주문수"}, "error": None,
@@ -287,9 +237,7 @@ def test_history_feedback_export_and_eval_case(client, ds):
     assert patched["favorite"] and patched["feedback"] == "up" and patched["feedback_note"] == "확인"
     exported = client.get(f"/api/history/export?system_id={ds}").json()
     assert {"question": "주문 수", "ast": {"metric": "주문수"}, "expected_sql": "SELECT 1;", "note": "확인"} in exported["cases"]
-    case_id = client.post(f"/api/history/{ok}/eval-case").json()["id"]
-    row = _q("SELECT origin, status, expected_metric_id IS NOT NULL FROM eval_case WHERE id = %s", case_id)[0]
-    assert row == ("human", "approved", True)
+    assert client.post(f"/api/history/{ok}/eval-case").status_code in (404, 405)
     assert client.delete(f"/api/history/{fail}").status_code == 204
 
 

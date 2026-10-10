@@ -61,12 +61,6 @@ export interface Measure {
   expr: MeasureNode;
 }
 
-export interface MetricExample {
-  question: string;
-  ast: Record<string, any> | null;
-  origin?: "llm" | "human" | "feedback";
-}
-
 export interface MetricInput {
   name: string;
   description: string;
@@ -81,7 +75,6 @@ export interface MetricInput {
   /** 집계형·조회형의 출력 컬럼. 있으면 agg_field·agg_function·select_columns 대신 쓴다. */
   measures: Measure[];
   fixed_filters: Record<string, any>[];
-  examples: MetricExample[];
   synonyms: string[];
 }
 
@@ -89,7 +82,6 @@ export interface Metric extends MetricInput {
   id: string;
   status: MetricStatus;
   broken_reason: string | null;
-  draft_example_count: number;
   version: number;
   updated_at: string | null;
 }
@@ -99,11 +91,6 @@ export interface MetricHistoryEntry {
   action: "create" | "update" | "delete" | "retire";
   snapshot: Partial<MetricInput>;
   created_at: string;
-}
-
-export interface CodeValue {
-  code: string;
-  label: string;
 }
 
 export interface SchemaColumn {
@@ -124,9 +111,6 @@ export interface TableInfo {
   name: string;
   comment: string;
   purpose: string;
-  card: string;
-  card_line: string;
-  card_status: "none" | "draft" | "approved";
   column_count: number;
   metric_count: number;
 }
@@ -142,26 +126,6 @@ export interface RelationInput {
 export interface Relation extends RelationInput {
   id: string;
   source: "fk" | "manual";
-}
-
-export interface Annotation {
-  table_name: string;
-  column_name: string;
-  synonyms: string[];
-  codes: CodeValue[];
-}
-
-export interface GlossaryInput {
-  term: string;
-  synonyms: string[];
-  meaning: string;
-  maps_to: Record<string, string>[];
-  status: "draft" | "approved";
-}
-
-export interface GlossaryTerm extends GlossaryInput {
-  id: number;
-  system_id: string | null;
 }
 
 export interface AskStep {
@@ -244,48 +208,6 @@ export interface HistoryPatch {
   feedback_note?: string;
 }
 
-export interface EnrichStatus {
-  queued: number;
-  running: number;
-  failed: number;
-  draft_cards: number;
-  draft_examples: number;
-  draft_eval_cases: number;
-}
-
-export type ReviewKind = "table_card" | "metric_example" | "eval_case";
-
-export interface ReviewItem {
-  kind: ReviewKind;
-  id: string;
-  target_name: string;
-  context: string;
-  draft: string;
-  draft_line: string;
-}
-
-export interface ReviewDecision {
-  action: "approve" | "reject";
-  note?: string;
-  card?: string;
-  card_line?: string;
-  question?: string;
-}
-
-export interface EvalRun {
-  id: string;
-  label: string;
-  config: Record<string, any>;
-  case_count: number;
-  table_recall: number | null;
-  metric_accuracy: number | null;
-  sql_accuracy: number | null;
-  avg_tokens: number | null;
-  avg_elapsed_ms: number | null;
-  started_at: string;
-  finished_at: string | null;
-}
-
 async function request<T>(path: string, init?: { method?: string; body?: unknown }): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: init?.method ?? "GET",
@@ -325,24 +247,6 @@ export const createRelation = (sysId: string, input: RelationInput) =>
 export const deleteRelation = (sysId: string, id: string) =>
   request<void>(`/systems/${sysId}/relations/${id}`, { method: "DELETE" });
 
-// 컬럼 사전 (동의어 · 코드값)
-export const listAnnotations = (sysId: string) => request<Annotation[]>(`/systems/${sysId}/annotations`);
-export const putAnnotation = (sysId: string, table: string, column: string, body: { synonyms: string[]; codes: CodeValue[] }) =>
-  request<Annotation>(
-    `/systems/${sysId}/annotations/${encodeURIComponent(table)}/${encodeURIComponent(column)}`,
-    { method: "PUT", body }
-  );
-
-// 업무 용어 (sysId 가 없으면 전사 공통)
-const glossaryBase = (sysId: string | null) => (sysId ? `/systems/${sysId}/glossary` : "/glossary");
-export const listGlossary = (sysId: string | null) => request<GlossaryTerm[]>(glossaryBase(sysId));
-export const createGlossary = (sysId: string | null, input: GlossaryInput) =>
-  request<GlossaryTerm>(glossaryBase(sysId), { method: "POST", body: input });
-export const updateGlossary = (sysId: string | null, id: number, input: GlossaryInput) =>
-  request<GlossaryTerm>(`${glossaryBase(sysId)}/${id}`, { method: "PUT", body: input });
-export const deleteGlossary = (sysId: string | null, id: number) =>
-  request<void>(`${glossaryBase(sysId)}/${id}`, { method: "DELETE" });
-
 // 지표
 export const listMetrics = (sysId: string) => request<Metric[]>(`/systems/${sysId}/metrics`);
 export const createMetric = (sysId: string, input: MetricInput) =>
@@ -361,13 +265,6 @@ export const metricHistory = (sysId: string, id: string) =>
   request<MetricHistoryEntry[]>(`/systems/${sysId}/metrics/${id}/history`);
 
 // 보강 · 검수 · 평가
-export const enrichStatus = (sysId: string) => request<EnrichStatus>(`/systems/${sysId}/enrich`);
-export const startEnrich = (sysId: string, enqueueAll: boolean) =>
-  request<EnrichStatus>(`/systems/${sysId}/enrich`, { method: "POST", body: { enqueue_all: enqueueAll } });
-export const listReview = (sysId: string) => request<ReviewItem[]>(`/systems/${sysId}/review`);
-export const decideReview = (sysId: string, kind: ReviewKind, id: string, decision: ReviewDecision) =>
-  request<void>(`/systems/${sysId}/review/${kind}/${encodeURIComponent(id)}`, { method: "POST", body: decision });
-export const listEvalRuns = (sysId: string) => request<EvalRun[]>(`/systems/${sysId}/eval-runs`);
 
 // 질문
 export const ask = (systemId: string, question: string) =>
@@ -379,7 +276,6 @@ export const listHistory = (params: { systemId?: string; favorite?: boolean; fee
     `/history${q({ system_id: params.systemId, favorite: params.favorite, feedback: params.feedback, limit: params.limit, offset: params.offset })}`
   );
 export const historyTrace = (id: string) => request<AskStep[]>(`/history/${id}/trace`);
-export const promoteToEvalCase = (id: string) => request<{ id: number }>(`/history/${id}/eval-case`, { method: "POST" });
 export const patchHistory = (id: string, patch: HistoryPatch) =>
   request<HistoryEntry>(`/history/${id}`, { method: "PATCH", body: patch });
 export const deleteHistory = (id: string) => request<void>(`/history/${id}`, { method: "DELETE" });

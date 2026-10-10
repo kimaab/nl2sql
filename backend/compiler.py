@@ -69,10 +69,8 @@ SERIES_FUNCTIONS = {
     "DELTA_SUM": "누적값 증가분 합 — 직전 행보다 늘어난 만큼만 더한다(리셋으로 줄면 0)",
     "CHANGE_COUNT": "상태 발생 횟수 — 기준값(정상)에서 다른 값으로 바뀐 순간만 센다",
 }
-# 지표 정의에서 온 필터 표시. 모델이 이 키를 보내도 normalize 를 거친 filters 와 섞이지 않게
-# 사람이 쓰지 않을 이름으로 둔다.
-METRIC_FILTER = "__metric_filter__"
-# 그중 질문과 무관하게 언제나 붙는 고정값 조건. 직전 행 비교의 대상 자체를 정한다.
+# 지표 정의의 고정값 조건 표시. 직전 행 비교의 대상 자체를 정한다.
+# 모델이 이 키를 보내도 섞이지 않게 사람이 쓰지 않을 이름으로 둔다.
 FIXED_FILTER = "__fixed_filter__"
 MAX_LIMIT = 1000
 
@@ -532,10 +530,6 @@ class Compiler:
         self.column_types = {
             (t["name"], c["name"]): c.get("type", "")
             for t in contract["tables"] for c in t["columns"]
-        }
-        self.column_codes = {
-            (t["name"], c["name"]): c["codes"]
-            for t in contract["tables"] for c in t["columns"] if c.get("codes")
         }
         self.relations = contract.get("relations", [])
         self.metrics = {m["name"]: m for m in contract.get("metrics", [])}
@@ -1201,8 +1195,7 @@ class Compiler:
             raise ValueError("CHANGE_COUNT 지표에는 기준값(baseline, 예: 정상 = 0)이 필요합니다")
         data_type = self.column_types.get((base, column), "")
         where = f"{base}.{column}"
-        normal = self._number(baseline, where) if is_numeric_type(data_type) else self._value(
-            base, column, data_type, baseline, where, codes=False)
+        normal = self._number(baseline, where) if is_numeric_type(data_type) else self._value(data_type, baseline, where)
         return f"CASE WHEN {value} <> {normal} AND COALESCE({previous}, {normal}) = {normal} THEN 1 ELSE 0 END"
 
     def _only_base(self, spec, ctx: dict) -> bool:
@@ -1439,7 +1432,7 @@ class Compiler:
                     f"(사용 가능: {', '.join(FILTER_SOURCES)})"
                 )
             if source == "literal":
-                out.append({**spec, METRIC_FILTER: True, FIXED_FILTER: True})
+                out.append({**spec, FIXED_FILTER: True})
                 continue
             key = self._ref(field, scope, base, "지표의 고정 필터 컬럼을 찾을 수 없습니다")
             if key in touched:
@@ -1450,7 +1443,7 @@ class Compiler:
                     f"filters 에 {field} 를 넣어 값이나 기간을 지정하십시오"
                 )
             where = f"{key[0]}.{key[1]}"
-            out.append({**spec, "source": "literal", METRIC_FILTER: True,
+            out.append({**spec, "source": "literal",
                         "value": resolve_relative(spec.get("value"), where)})
         return out
 
@@ -1514,8 +1507,7 @@ class Compiler:
             if temporal:
                 rendered = ", ".join(self._temporal_value(temporal, v, where) for v in values)
             else:
-                rendered = ", ".join(
-                    self._value(table, resolved, data_type, v, where, codes=not spec.get(METRIC_FILTER)) for v in values)
+                rendered = ", ".join(self._value(data_type, v, where) for v in values)
             return f"{column} {self._LIST_OPERATORS[operator]} ({rendered})"
 
         if operator not in self._OPERATORS:
@@ -1528,28 +1520,11 @@ class Compiler:
             operator, rendered = self._temporal_compare(
                 temporal, operator, spec.get("value"), where)
             return f"{column} {self._OPERATORS[operator]} {rendered}"
-        # 코드 사전은 모델이 낸 값에만 적용한다. 지표 정의의 값은 관리자가 실제 DB 값으로
-        # 적은 것이라, 사전이 일부만 채워져 있어도 그대로 믿는다.
-        codes = operator in ("equals", "not_equals") and not spec.get(METRIC_FILTER)
-        rendered = self._value(table, resolved, data_type, spec.get("value"), where, codes=codes)
+        rendered = self._value(data_type, spec.get("value"), where)
         return f"{column} {self._OPERATORS[operator]} {rendered}"
 
-    def _value(self, table: str, column: str, data_type: str, value, where: str, codes: bool = True) -> str:
-        """비교 값을 리터럴로. 코드 사전이 있으면 업무 용어를 코드로 바꾸고,
-        숫자 컬럼에 숫자가 아닌 값이 오면 거부한다."""
-        known = self.column_codes.get((table, column)) if codes else None
-        if known and value is not None and not isinstance(value, (list, tuple, dict)):
-            text = str(value).strip().lower()
-            for entry in known:
-                if text == str(entry.get("code", "")).strip().lower():
-                    value = entry["code"]
-                    break
-                if text == str(entry.get("label", "")).strip().lower():
-                    value = entry["code"]
-                    break
-            else:
-                listed = ", ".join(f"{e.get('code')}={e.get('label')}" for e in known)
-                raise ValueError(f"{where} 는 코드 컬럼입니다. 사전에 없는 값입니다 -> {value!r} (사용 가능: {listed})")
+    def _value(self, data_type: str, value, where: str) -> str:
+        """비교 값을 리터럴로. 숫자 컬럼에 숫자가 아닌 값이 오면 거부한다."""
         if is_numeric_type(data_type) and value is not None and not isinstance(value, bool):
             if not isinstance(value, (int, float)):
                 try:

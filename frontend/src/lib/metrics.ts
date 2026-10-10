@@ -46,7 +46,6 @@ export const EMPTY_METRIC: MetricInput = {
   series: null,
   measures: [{ name: "", expr: { fn: "COUNT", args: [] } }],
   fixed_filters: [],
-  examples: [],
   synonyms: [],
 };
 
@@ -81,7 +80,6 @@ export function toInput(m: Metric): MetricInput {
       : null,
     measures,
     fixed_filters: m.fixed_filters,
-    examples: m.examples ?? [],
     synonyms: m.synonyms ?? [],
   };
 }

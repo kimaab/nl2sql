@@ -9,8 +9,6 @@ from graph import MAX_ATTEMPTS, build_graph
 from selector import Step, llm_select, model_name, tfidf_select, usage_of
 from tool import CLARIFY_PREFIX, make_clarify_tool, make_compile_tool
 
-MAX_EXAMPLES = 6
-
 AST_GUIDE = """[조회 명세(ast) 모양]
 ast 는 JSON 객체이고 아래 키만 씁니다. 키 이름을 바꾸지 마십시오 (column 이 아니라 field, table 이 아니라 target_table).
 - metric: 지표 이름. 지표의 집계식·조회 컬럼·조인·고정 필터는 자동으로 적용되니 다시 적지 않습니다. metric 을 쓰면 target_table, columns, aggregations, joins 는 적지 않습니다.
@@ -23,7 +21,6 @@ ast 는 JSON 객체이고 아래 키만 씁니다. 키 이름을 바꾸지 마�
   operator: equals, not_equals, greater_than, greater_or_equal, less_than, less_or_equal,
   in, not_in (value 는 목록), is_null, is_not_null (value 없음), contains, starts_with, ends_with (문자열 일부 일치).
   OR 는 {"any_of": [조건, 조건]} 으로, 그 안의 AND 묶음은 {"all_of": [조건, 조건]} 으로 적습니다.
-  컬럼에 codes(코드 사전)가 있으면 value 에 코드나 그 이름(label)을 적습니다.
 - group_by: ["컬럼"]. 날짜를 기간 단위로 묶을 때는 {"field": "날짜컬럼", "grain": "day|week|month|quarter|year"} — 결과 별칭은 "컬럼_grain" (예: ORDER_DTM_month).
 - having: 집계 결과 조건 [{"alias": "집계 별칭 또는 지표 이름", "operator": "greater_or_equal", "value": 3}].
 - order_by: [{"field": "컬럼 또는 집계 별칭", "direction": "asc|desc"}]. 집계 질의는 group_by 컬럼이나 집계 별칭으로만 정렬합니다.
@@ -36,7 +33,7 @@ ast 는 JSON 객체이고 아래 키만 씁니다. 키 이름을 바꾸지 마�
 
 def _prompt_metric(m: dict) -> dict:
     """프롬프트에 싣는 지표. 측정값 식 트리는 읽을 수 있는 식으로 바꾼다."""
-    out = {k: v for k, v in m.items() if k != "examples"}
+    out = dict(m)
     if m.get("measures"):
         out["measures"] = [{"name": ms["name"], "식": measure_text(ms["expr"])} for ms in m["measures"]]
     return out
@@ -44,7 +41,7 @@ def _prompt_metric(m: dict) -> dict:
 
 def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = None,
                   chosen_metrics: list | None = None) -> str:
-    """시스템 프롬프트 생성. 지표 예시는 메타데이터와 따로 모범 답안으로 싣는다.
+    """시스템 프롬프트 생성.
 
     chosen_metrics: 지표 선택 단계가 고른 지표. 있으면 그 지표를 쓰라고 못박는다 — 이 단계의 모델이
     지표를 두고 원본 컬럼을 직접 집계하면 지표 정의(누적값 증가분·고정 필터)가 사라진다.
@@ -54,15 +51,6 @@ def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = No
     metadata = {"tables": pruned["tables"], "metrics": metrics}
     if pruned.get("relations"):
         metadata["relations"] = pruned["relations"]
-
-    examples = [
-        e for m in pruned["metrics"] for e in m.get("examples", []) if e.get("ast")
-    ][:MAX_EXAMPLES]
-    example_text = ""
-    if examples:
-        example_text = "[예시]\n" + "\n".join(
-            f"질문: {e['question']}\nast: {json.dumps(e['ast'], ensure_ascii=False)}" for e in examples
-        ) + "\n\n"
 
     domain = f"업무 영역: {contract['domain']}\n" if contract.get("domain") else ""
     chosen = ""
@@ -83,7 +71,6 @@ def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = No
         f"[허용된 메타데이터]\n{json.dumps(metadata, ensure_ascii=False, indent=2)}\n\n"
         f"{AST_GUIDE}\n\n"
         f"{chosen}"
-        f"{example_text}"
         "질문을 분석해 compile_sql 도구를 ast 인자로 부르십시오.\n"
         "도구가 \"SQL:\"로 시작하는 결과를 돌려주면 그것으로 답이 끝난 것입니다.\n"
         "도구가 \"error:\"로 시작하는 결과를 돌려주면 그 메시지를 읽고 고쳐서 "

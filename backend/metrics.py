@@ -8,7 +8,7 @@ from compiler import (
     resolve_relative, temporal_kind,
 )
 from contract import broken_reasons, load_contract, load_metric_rows, load_tables, metric_entry, metric_tables
-from models import ApiException, Metric, MetricExample, MetricHistoryEntry, MetricInput, MetricKind
+from models import ApiException, Metric, MetricHistoryEntry, MetricInput, MetricKind
 
 log = logging.getLogger("nl2sql.metrics")
 
@@ -18,13 +18,11 @@ def list_metrics(system_id: UUID) -> list[Metric]:
         SELECT m.*, t.name AS table_name FROM metric m JOIN meta_table t ON t.id = m.base_table_id
          WHERE m.system_id = %s ORDER BY m.created_at DESC
     """, str(system_id))
-    examples = _examples([r["id"] for r in rows])
-    return [_row_to_metric(r, examples.get(r["id"], {})) for r in rows]
+    return [_row_to_metric(r) for r in rows]
 
 
 def get_metric(system_id: UUID, metric_id: UUID) -> Metric:
-    row = _get_row(system_id, metric_id)
-    return _row_to_metric(row, _examples([row["id"]]).get(row["id"], {}))
+    return _row_to_metric(_get_row(system_id, metric_id))
 
 
 def _get_row(system_id: UUID, metric_id: UUID) -> dict:
@@ -35,23 +33,6 @@ def _get_row(system_id: UUID, metric_id: UUID) -> dict:
     if row is None:
         raise ApiException(404, "지표를 찾을 수 없습니다")
     return row
-
-
-def _examples(metric_ids: list) -> dict:
-    """{metric_id: {"approved": [..], "drafts": n}}"""
-    out: dict = {}
-    if not metric_ids:
-        return out
-    for r in db.query("""
-        SELECT metric_id, question, ast, origin, status FROM metric_example
-         WHERE metric_id = ANY(%s) AND status IN ('approved', 'draft') ORDER BY id
-    """, [str(i) for i in metric_ids]):
-        slot = out.setdefault(r["metric_id"], {"approved": [], "drafts": 0})
-        if r["status"] == "approved":
-            slot["approved"].append(MetricExample(question=r["question"], ast=r["ast"], origin=r["origin"]))
-        else:
-            slot["drafts"] += 1
-    return out
 
 
 def create_metric(system_id: UUID, data: MetricInput, actor: str | None = None) -> Metric:
@@ -68,7 +49,6 @@ def create_metric(system_id: UUID, data: MetricInput, actor: str | None = None) 
                                     agg_function, select_columns, expression, series, measures, fixed_filters, synonyms)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (str(metric_id), str(system_id), *_values(data, tables[table_name]["id"])))
-            _save_examples(cur, metric_id, data.examples)
             _record_history(cur, system_id, metric_id, 1, "create", actor)
     _after_save(system_id, metric_id)
     log.info("metric created: %s (%s, kind=%s)", metric_id, data.name, data.kind.value)
@@ -93,7 +73,6 @@ def update_metric(system_id: UUID, metric_id: UUID, data: MetricInput, actor: st
                        measures = %s, fixed_filters = %s, synonyms = %s, version = %s, updated_at = now()
                  WHERE id = %s AND system_id = %s
             """, (*_values(data, tables[table_name]["id"]), version, str(metric_id), str(system_id)))
-            _save_examples(cur, metric_id, data.examples)
             _record_history(cur, system_id, metric_id, version, "update", actor)
     _after_save(system_id, metric_id)
     log.info("metric updated: %s (%s, v%d)", metric_id, data.name, version)
@@ -124,16 +103,11 @@ def list_metric_history(system_id: UUID, metric_id: UUID) -> list[MetricHistoryE
                                created_at=r["created_at"].isoformat()) for r in rows]
 
 
-# ── 저장 뒤처리: 테이블 연결 · 상태 · 보강 대기열 ───────────────────────────
+# ── 저장 뒤처리: 테이블 연결 · 상태 ─────────────────────────────────────────
 
 def _after_save(system_id: UUID, metric_id: UUID) -> None:
     rebuild_metric_tables(system_id, metric_id)
     refresh_statuses(system_id)
-    with db.connection() as conn:
-        conn.execute("""
-            INSERT INTO enrich_job (target_type, target_id, reason) VALUES ('metric', %s, 'changed')
-            ON CONFLICT (target_type, target_id) WHERE status = 'queued' DO NOTHING
-        """, (str(metric_id),))
 
 
 def rebuild_metric_tables(system_id: UUID, metric_id: UUID) -> None:
@@ -155,22 +129,18 @@ def rebuild_metric_tables(system_id: UUID, metric_id: UUID) -> None:
 
 
 def refresh_statuses(system_id: UUID) -> list[dict]:
-    """지표 상태를 다시 매긴다: 깨졌으면 broken, 승인된 예시 질문이 있으면 active, 아니면 draft.
+    """지표 상태를 다시 매긴다: 깨졌으면 broken, 아니면 active.
 
     retired 는 사람이 정한 것이라 건드리지 않는다. 깨진 지표 [{name, reason}] 를 돌려준다.
     """
     rows = [r for r in load_metric_rows(system_id) if r["status"] != "retired"]
     broken = broken_reasons(rows, load_tables(system_id))
-    with_examples = {r["metric_id"] for r in db.query("""
-        SELECT DISTINCT e.metric_id FROM metric_example e JOIN metric m ON m.id = e.metric_id
-         WHERE m.system_id = %s AND e.status = 'approved'
-    """, str(system_id))}
     updates = []
     for r in rows:
         if r["name"] in broken:
             status, reason = "broken", broken[r["name"]]
         else:
-            status, reason = ("active" if r["id"] in with_examples else "draft"), None
+            status, reason = "active", None
         if status != r["status"] or reason != r["broken_reason"]:
             updates.append((status, reason, str(r["id"])))
     if updates:
@@ -178,33 +148,6 @@ def refresh_statuses(system_id: UUID) -> list[dict]:
             with conn.cursor() as cur:
                 cur.executemany("UPDATE metric SET status = %s, broken_reason = %s WHERE id = %s", updates)
     return [{"name": k, "reason": v} for k, v in sorted(broken.items())]
-
-
-def _save_examples(cur, metric_id: UUID, examples: list[MetricExample]) -> None:
-    """화면에서 온 예시 목록으로 승인된 예시를 맞춘다. 검수 대기(draft) 초안은 건드리지 않는다.
-
-    같은 질문이 이미 있으면 출처(origin)를 지킨다 — LLM 초안을 승인한 것이 사람이 쓴 것으로 바뀌지 않게.
-    """
-    cur.execute("SELECT id, lower(question), origin FROM metric_example WHERE metric_id = %s AND status = 'approved'",
-                (str(metric_id),))
-    existing = {q: (i, origin) for i, q, origin in cur.fetchall()}
-    keep = set()
-    for e in examples:
-        key = e.question.lower()
-        if key in existing:
-            keep.add(existing[key][0])
-            cur.execute("UPDATE metric_example SET question = %s, ast = %s WHERE id = %s",
-                        (e.question, json.dumps(e.ast, ensure_ascii=False) if e.ast else None, existing[key][0]))
-        else:
-            cur.execute("""
-                INSERT INTO metric_example (metric_id, question, ast, origin, status, reviewed_at)
-                VALUES (%s, %s, %s, %s, 'approved', now()) RETURNING id
-            """, (str(metric_id), e.question, json.dumps(e.ast, ensure_ascii=False) if e.ast else None,
-                  e.origin if e.origin != "llm" else "human"))
-            keep.add(cur.fetchone()[0])
-    gone = [i for i, _ in existing.values() if i not in keep]
-    if gone:
-        cur.execute("DELETE FROM metric_example WHERE id = ANY(%s)", (gone,))
 
 
 def _record_history(cur, system_id: UUID, metric_id: UUID, version: int, action: str, actor: str | None) -> None:
@@ -215,11 +158,7 @@ def _record_history(cur, system_id: UUID, metric_id: UUID, version: int, action:
                                   'table_name', t.name, 'joins', m.joins, 'agg_field', m.agg_field,
                                   'agg_function', m.agg_function, 'select_columns', m.select_columns,
                                   'expression', m.expression, 'fixed_filters', m.fixed_filters,
-                                  'series', m.series, 'measures', m.measures, 'synonyms', m.synonyms,
-                                  'examples', COALESCE((SELECT jsonb_agg(jsonb_build_object('question', e.question,
-                                                         'ast', e.ast, 'origin', e.origin) ORDER BY e.id)
-                                                        FROM metric_example e
-                                                       WHERE e.metric_id = m.id AND e.status = 'approved'), '[]'))
+                                  'series', m.series, 'measures', m.measures, 'synonyms', m.synonyms)
           FROM metric m JOIN meta_table t ON t.id = m.base_table_id
          WHERE m.id = %s AND m.system_id = %s
     """, (version, action, actor, str(metric_id), str(system_id)))
@@ -349,7 +288,6 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
 
     if data.measures:
         _validate_measures(system_id, data, base)
-    _validate_examples(system_id, data, base)
     return base
 
 
@@ -400,14 +338,10 @@ def _validate_formula(system_id: UUID, data: MetricInput, scope: dict) -> None:
         raise ApiException(400, str(error)) from None
 
 
-def _draft_compiler(system_id: UUID, data: MetricInput, base: str, without_question: bool = False) -> Compiler:
-    """저장 전의 정의를 계약서에 끼운 컴파일러.
-
-    without_question: 질문에서 값을 받는 필터를 뺀다 — 질문 없이 정의만 컴파일해 볼 때.
-    """
+def _draft_compiler(system_id: UUID, data: MetricInput, base: str) -> Compiler:
+    """저장 전의 정의를 계약서에 끼운 컴파일러. 질문 없이 정의만 컴파일하므로 질문에서 값을 받는 필터는 뺀다."""
     contract = load_contract(system_id)
-    filters = [f for f in data.fixed_filters
-               if not (without_question and str(f.get("source") or "literal").lower() == "question")]
+    filters = [f for f in data.fixed_filters if str(f.get("source") or "literal").lower() != "question"]
     draft = metric_entry({
         "name": data.name, "description": data.description, "kind": data.kind.value, "table_name": base,
         "joins": [j.model_dump() for j in data.joins], "select_columns": data.select_columns,
@@ -423,31 +357,18 @@ def _draft_compiler(system_id: UUID, data: MetricInput, base: str, without_quest
 def _validate_measures(system_id: UUID, data: MetricInput, base: str) -> None:
     """식 트리를 실제로 컴파일해 본다. 함수 조합 규칙(집계 안의 집계, 직전 행 비교 등)은 컴파일러가 판정한다."""
     try:
-        _draft_compiler(system_id, data, base, without_question=True).compile({"metric": data.name})
+        _draft_compiler(system_id, data, base).compile({"metric": data.name})
     except (ValueError, KeyError, TypeError) as error:
         raise ApiException(400, str(error)) from None
 
 
 def preview_metric(system_id: UUID, data: MetricInput) -> str:
     """저장하지 않고 정의를 SQL 로. 질문에서 받는 필터는 값이 없어 빠진다."""
-    base = _validate(system_id, data.model_copy(update={"examples": []}))
-    return _draft_compiler(system_id, data, base, without_question=True).compile({"metric": data.name})
+    base = _validate(system_id, data)
+    return _draft_compiler(system_id, data, base).compile({"metric": data.name})
 
 
-def _validate_examples(system_id: UUID, data: MetricInput, base: str) -> None:
-    """예시에 AST 가 있으면 실제로 컴파일되는지 확인한다 — 틀린 모범 답안은 모델을 틀리게 가르친다."""
-    with_ast = [e for e in data.examples if e.ast is not None]
-    if not with_ast:
-        return
-    compiler = _draft_compiler(system_id, data, base)
-    for example in with_ast:
-        try:
-            compiler.compile(example.ast)
-        except (ValueError, KeyError, TypeError) as error:
-            raise ApiException(400, f"예시 '{example.question}' 의 AST 가 컴파일되지 않습니다: {error}") from None
-
-
-def _row_to_metric(row: dict, examples: dict) -> Metric:
+def _row_to_metric(row: dict) -> Metric:
     return Metric(
         id=row["id"],
         name=row["name"],
@@ -462,8 +383,6 @@ def _row_to_metric(row: dict, examples: dict) -> Metric:
         series=row.get("series"),
         measures=row.get("measures") or [],
         fixed_filters=row["fixed_filters"] or [],
-        examples=examples.get("approved", []),
-        draft_example_count=examples.get("drafts", 0),
         synonyms=row.get("synonyms") or [],
         status=row["status"],
         broken_reason=row.get("broken_reason"),

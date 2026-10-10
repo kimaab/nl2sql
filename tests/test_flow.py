@@ -28,7 +28,7 @@ def test_normalize_sql_keeps_literals():
 
 # ------------------------------------------------------------------ 프루닝 (A-04 동의어·코드값, A-02 예시)
 
-def test_pruner_finds_table_by_code_label_and_synonym(contract):
+def test_pruner_finds_table_by_code_meaning_in_column_comment(contract):
     pruned = Pruner(contract).prune("VIP 고객명 알려줘", top_k=2)
     assert "TB_MEMBER" in [t["name"] for t in pruned["tables"]]
 
@@ -40,12 +40,12 @@ def test_pruner_brings_join_tables_and_relations(contract):
     assert any(r["constraint"] == "FK_ITEM_ORDER" for r in pruned["relations"])
 
 
-def test_prompt_has_examples_separately(contract):
+def test_prompt_has_metadata_and_today(contract):
     pruned = Pruner(contract).prune("이번 달 매출", top_k=3)
     prompt = system_prompt(contract, pruned, datetime.date(2026, 10, 6))
-    assert "[예시]\n질문: 이번 달 매출" in prompt
+    assert "[예시]" not in prompt
     metadata = prompt.split("[허용된 메타데이터]\n", 1)[1].split("\n\n[조회 명세", 1)[0]
-    assert "examples" not in metadata
+    assert "\"매출\"" in metadata and "examples" not in metadata
     assert "2026-10-06 (화요일)" in prompt
 
 

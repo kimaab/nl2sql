@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import * as api from "../../api";
 import { Alert, Badge, Button, EmptyState, Loading, PageHeader, SqlBlock } from "../../components/ui";
 import { useToast } from "../../components/Toast";
@@ -81,16 +81,6 @@ export function MetricDetail() {
         {metric.broken_reason && (
           <Alert tone="warn">스키마와 맞지 않아 질문에 쓰이지 않습니다 — {metric.broken_reason}</Alert>
         )}
-        {metric.status === "draft" && (
-          <Alert tone="info">
-            검수 대기 — 승인된 예시 질문이 있어야 질문에 쓰입니다.{" "}
-            {metric.draft_example_count > 0 ? (
-              <Link to={`/review?ds=${dsId}`}>LLM 이 만든 예시 {metric.draft_example_count}개를 검수하세요</Link>
-            ) : (
-              "예시 질문을 직접 추가하거나 보강 화면에서 초안을 만드세요."
-            )}
-          </Alert>
-        )}
         {metric.synonyms.length > 0 && (
           <div className="faint">같은 말: {metric.synonyms.join(", ")}</div>
         )}
@@ -145,29 +135,6 @@ export function MetricDetail() {
                 })}
               </tbody>
             </table>
-          )}
-        </div>
-
-        <div className="card">
-          <div className="card-head">
-            <span className="card-title">예시 질문</span>
-            <span className="faint">{metric.examples.length}개</span>
-          </div>
-          {metric.examples.length === 0 ? (
-            <div className="card-pad muted">예시가 없습니다. 수정에서 추가하면 검색과 정확도가 좋아집니다.</div>
-          ) : (
-            <div className="card-pad stack" style={{ gap: 10 }}>
-              {metric.examples.map((e, i) => (
-                <div key={i}>
-                  <div className="cell-title">{e.question}</div>
-                  {e.ast ? (
-                    <pre className="sql">{JSON.stringify(e.ast)}</pre>
-                  ) : (
-                    <div className="cell-sub">검색용 (AST 없음)</div>
-                  )}
-                </div>
-              ))}
-            </div>
           )}
         </div>
 

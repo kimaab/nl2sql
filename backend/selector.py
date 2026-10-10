@@ -19,7 +19,6 @@ log = logging.getLogger("nl2sql.selector")
 
 MAX_TABLES = 5
 MAX_METRICS = 2
-EXAMPLES_PER_METRIC = 2
 
 
 @dataclass
@@ -155,31 +154,9 @@ METRIC_SYSTEM = """당신은 사용자 질문이 묻는 '무엇'에 맞는 업�
   {{"metrics": ["지표명"], "reason": "고른 이유", "ambiguous": false, "options": [], "message": ""}}"""
 
 
-def glossary_block(contract: dict, question: str) -> str:
-    """질문에 나온 업무 용어만 싣는다 (용어나 같은 말이 질문에 그대로 들어 있을 때)"""
-    q = re.sub(r"\s+", "", question).lower()
-    lines = []
-    for g in contract.get("glossary") or []:
-        words = [g["term"], *g.get("synonyms", [])]
-        if not any(re.sub(r"\s+", "", w).lower() in q for w in words if w):
-            continue
-        target = ", ".join(
-            f"{m['metric']} 지표" if m.get("metric") else ".".join(x for x in (m.get("table"), m.get("column")) if x)
-            for m in g.get("maps_to") or [])
-        line = f"- {g['term']}"
-        if g.get("synonyms"):
-            line += f" (= {', '.join(g['synonyms'])})"
-        if g.get("meaning"):
-            line += f": {g['meaning']}"
-        if target:
-            line += f" → {target}"
-        lines.append(line)
-    return "[업무 용어]\n" + "\n".join(lines) + "\n\n" if lines else ""
-
-
 def table_line(t: dict) -> str:
-    """테이블 추론에 보내는 한 줄. 승인된 카드 한 줄 → 용도 → 코멘트 순으로 쓴다."""
-    text = t.get("card_line") or t.get("purpose") or t.get("description") or ""
+    """테이블 추론에 보내는 한 줄. 용도 → 코멘트 순으로 쓴다."""
+    text = t.get("purpose") or t.get("description") or ""
     text = " ".join(str(text).split())
     return f"- {t['name']}: {text}" if text else f"- {t['name']}"
 
@@ -188,8 +165,6 @@ def metric_block(m: dict) -> str:
     lines = [f"- {m['name']}: {' '.join(str(m.get('description') or '').split()) or '(설명 없음)'}"]
     if m.get("synonyms"):
         lines.append(f"  같은 말: {', '.join(m['synonyms'])}")
-    for e in (m.get("examples") or [])[:EXAMPLES_PER_METRIC]:
-        lines.append(f"  예: \"{e['question']}\"")
     return "\n".join(lines)
 
 
@@ -199,7 +174,7 @@ def infer_tables(model, contract: dict, question: str) -> tuple[list, list, Step
     step = Step("table", candidates=names, model=model_name(model))
     system = TABLE_SYSTEM.format(name=contract.get("name", ""), domain=contract.get("domain") or "(설명 없음)",
                                  max_tables=MAX_TABLES)
-    user = (glossary_block(contract, question) + "[테이블 목록]\n"
+    user = ("[테이블 목록]\n"
             + "\n".join(table_line(t) for t in contract["tables"]) + f"\n\n[질문]\n{question}")
 
     def validate(p):
@@ -225,7 +200,7 @@ def metric_candidates(contract: dict, tables: list) -> list:
     return [m for m in contract["metrics"] if wanted & {x.lower() for x in m.get("tables", [m["table"]])}]
 
 
-def select_metrics(model, question: str, candidates: list, glossary: str = "") -> tuple[list, Step, str | None]:
+def select_metrics(model, question: str, candidates: list) -> tuple[list, Step, str | None]:
     """→ (고른 지표, Step, 되물을 말)"""
     names = [m["name"] for m in candidates]
     step = Step("metric", candidates=names, model=model_name(model))
@@ -233,7 +208,7 @@ def select_metrics(model, question: str, candidates: list, glossary: str = "") -
         step.reason = "고른 테이블에 연결된 지표가 없음 — 테이블을 직접 조회"
         return [], step, None
     system = METRIC_SYSTEM.format(max_metrics=MAX_METRICS)
-    user = glossary + "[후보 지표]\n" + "\n".join(metric_block(m) for m in candidates) + f"\n\n[질문]\n{question}"
+    user = "[후보 지표]\n" + "\n".join(metric_block(m) for m in candidates) + f"\n\n[질문]\n{question}"
 
     def validate(p):
         if not isinstance(p.get("metrics"), list):
@@ -260,8 +235,7 @@ def llm_select(model, contract: dict, question: str) -> Selection:
                          clarification=f"질문에 맞는 테이블을 찾지 못했습니다. 이 시스템은 {domain} 에 대한 것입니다. "
                                        "무엇을 조회하려는지 조금 더 구체적으로 적어 주십시오.")
     candidates = metric_candidates(contract, tables)
-    metrics, metric_step, clarification = select_metrics(model, question, candidates,
-                                                         glossary_block(contract, question))
+    metrics, metric_step, clarification = select_metrics(model, question, candidates)
     log.info("선택: 테이블=%s 지표=%s (후보 %d개)%s", tables, metrics, len(candidates),
              f" 되묻기={clarification}" if clarification else "")
     return Selection(tables, metrics, _pruned(contract, tables, metrics), [table_step, metric_step],

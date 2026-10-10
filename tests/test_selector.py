@@ -7,7 +7,7 @@ from ask import run_question
 from compiler import Compiler
 from contract import metric_tables
 from evaluate import judge
-from selector import glossary_block, llm_select, metric_candidates, parse_json
+from selector import llm_select, metric_candidates, parse_json
 
 
 class FakeLLM:
@@ -109,16 +109,6 @@ def test_bad_json_is_retried_once(contract):
 def test_parse_json_accepts_fences_and_chatter():
     assert parse_json('네.\n```json\n{"tables": []}\n```') == {"tables": []}
     assert parse_json('답: {"metrics": ["a"]} 입니다') == {"metrics": ["a"]}
-
-
-def test_glossary_only_terms_in_question():
-    contract = {"glossary": [
-        {"term": "운행시간", "synonyms": ["가동시간"], "meaning": "엔진이 돈 시간", "maps_to": [{"table": "bms_log", "column": "eg_time"}]},
-        {"term": "매출", "synonyms": [], "meaning": "", "maps_to": [{"metric": "매출"}]},
-    ]}
-    block = glossary_block(contract, "차량별 운행 시간 제일 큰 애")
-    assert "운행시간 (= 가동시간): 엔진이 돈 시간 → bms_log.eg_time" in block and "매출" not in block
-    assert glossary_block(contract, "오늘 날씨") == ""
 
 
 def test_metric_tables_from_definition():

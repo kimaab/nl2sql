@@ -13,16 +13,14 @@ load_dotenv(BASE_DIR / ".env")
 from fastapi import FastAPI, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 import db
-import enrich
 import secret
 from logging_config import configure_logging
 from models import (
-    Annotation, AnnotationInput, ApiException, AskRequest, AskResponse, AskStep, CompileRequest, CompileResponse,
-    EnrichStatus, EvalRun, GlossaryInput, GlossaryTerm, HistoryEntry, HistoryPatch, Metric, MetricHistoryEntry,
-    MetricInput, Relation, RelationInput, ReviewDecision, ReviewItem, SyncLog, SyncResult, System, SystemInput,
+    ApiException, AskRequest, AskResponse, AskStep, CompileRequest, CompileResponse,
+    HistoryEntry, HistoryPatch, Metric, MetricHistoryEntry,
+    MetricInput, Relation, RelationInput, SyncLog, SyncResult, System, SystemInput,
     TableInfo, TablePurposeInput,
 )
 from systems import (
@@ -31,10 +29,8 @@ from systems import (
 )
 from metrics import create_metric, delete_metric, list_metric_history, list_metrics, preview_metric, update_metric
 from relations import create_relation, delete_relation, list_relations
-from annotations import list_annotations, put_annotation
-from glossary import delete_term, list_terms, save_term
 from history import (
-    delete_history, export_eval_cases, get_trace, list_history, patch_history, promote_to_eval_case, record_ask,
+    delete_history, export_eval_cases, get_trace, list_history, patch_history, record_ask,
 )
 from contract import load_contract
 from compiler import Compiler
@@ -145,7 +141,7 @@ def put_table_purpose(system_id: UUID, table_id: UUID, req: TablePurposeInput):
     return set_table_purpose(system_id, table_id, req.purpose)
 
 
-# ── 관계 · 컬럼 사전 · 업무 용어 ─────────────────────────────────────────
+# ── 관계 ───────────────────────────────────────────────────────────────
 @app.get("/api/systems/{system_id}/relations", response_model=list[Relation])
 def get_relations(system_id: UUID):
     get_system(system_id)
@@ -161,61 +157,6 @@ def post_relation(system_id: UUID, req: RelationInput):
 @app.delete("/api/systems/{system_id}/relations/{relation_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_relation_detail(system_id: UUID, relation_id: UUID):
     delete_relation(system_id, relation_id)
-
-
-@app.get("/api/systems/{system_id}/annotations", response_model=list[Annotation])
-def get_annotations(system_id: UUID):
-    get_system(system_id)
-    return list_annotations(system_id)
-
-
-@app.put("/api/systems/{system_id}/annotations/{table}/{column}", response_model=Annotation)
-def put_annotation_detail(system_id: UUID, table: str, column: str, req: AnnotationInput):
-    get_system(system_id)
-    return put_annotation(system_id, table, column, req)
-
-
-@app.get("/api/systems/{system_id}/glossary", response_model=list[GlossaryTerm])
-def get_glossary(system_id: UUID):
-    get_system(system_id)
-    return list_terms(system_id)
-
-
-@app.post("/api/systems/{system_id}/glossary", response_model=GlossaryTerm, status_code=status.HTTP_201_CREATED)
-def post_glossary(system_id: UUID, req: GlossaryInput):
-    get_system(system_id)
-    return save_term(system_id, req)
-
-
-@app.put("/api/systems/{system_id}/glossary/{term_id}", response_model=GlossaryTerm)
-def put_glossary(system_id: UUID, term_id: int, req: GlossaryInput):
-    return save_term(system_id, req, term_id)
-
-
-@app.delete("/api/systems/{system_id}/glossary/{term_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_glossary(system_id: UUID, term_id: int):
-    delete_term(system_id, term_id)
-
-
-# 전사 공통 용어 (system_id 없음)
-@app.get("/api/glossary", response_model=list[GlossaryTerm])
-def get_global_glossary():
-    return list_terms(None)
-
-
-@app.post("/api/glossary", response_model=GlossaryTerm, status_code=status.HTTP_201_CREATED)
-def post_global_glossary(req: GlossaryInput):
-    return save_term(None, req)
-
-
-@app.put("/api/glossary/{term_id}", response_model=GlossaryTerm)
-def put_global_glossary(term_id: int, req: GlossaryInput):
-    return save_term(None, req, term_id)
-
-
-@app.delete("/api/glossary/{term_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_global_glossary(term_id: int):
-    delete_term(None, term_id)
 
 
 # ── 지표 ────────────────────────────────────────────────────────────────
@@ -259,7 +200,7 @@ def delete_metric_detail(system_id: UUID, metric_id: UUID):
     delete_metric(system_id, metric_id)
 
 
-# 모델 없이 AST 를 컴파일해 본다 — 지표 예시 작성과 평가셋 확인용
+# 모델 없이 AST 를 컴파일해 본다
 @app.post("/api/systems/{system_id}/compile", response_model=CompileResponse)
 def post_compile(system_id: UUID, req: CompileRequest):
     compiler = Compiler(load_contract(system_id))
@@ -267,49 +208,6 @@ def post_compile(system_id: UUID, req: CompileRequest):
         return CompileResponse(sql=compiler.compile(req.ast), error=None)
     except (ValueError, KeyError, TypeError) as error:
         return CompileResponse(sql=None, error=str(error))
-
-
-# ── 메타데이터 보강 · 검수 ───────────────────────────────────────────────
-class EnrichRequest(BaseModel):
-    enqueue_all: bool = False   # 카드·예시가 없는 것을 모두 대기열에 넣고 시작
-
-
-@app.get("/api/systems/{system_id}/enrich", response_model=EnrichStatus)
-def get_enrich_status(system_id: UUID):
-    get_system(system_id)
-    return enrich.status(system_id)
-
-
-@app.post("/api/systems/{system_id}/enrich", response_model=EnrichStatus)
-def post_enrich(system_id: UUID, req: EnrichRequest):
-    get_system(system_id)
-    if req.enqueue_all:
-        enrich.enqueue_all(system_id)
-    enrich.start(system_id, make_model(temperature=0.3))
-    return enrich.status(system_id)
-
-
-@app.get("/api/systems/{system_id}/review", response_model=list[ReviewItem])
-def get_review(system_id: UUID):
-    get_system(system_id)
-    return enrich.list_review(system_id)
-
-
-@app.post("/api/systems/{system_id}/review/{kind}/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def post_review(system_id: UUID, kind: str, item_id: str, req: ReviewDecision):
-    enrich.decide(system_id, kind, item_id, req)
-
-
-@app.get("/api/systems/{system_id}/eval-runs", response_model=list[EvalRun])
-def get_eval_runs(system_id: UUID):
-    rows = db.query("SELECT * FROM eval_run WHERE system_id = %s ORDER BY started_at DESC LIMIT 50", str(system_id))
-    return [EvalRun(**{**r, "table_recall": _num(r["table_recall"]), "metric_accuracy": _num(r["metric_accuracy"]),
-                       "sql_accuracy": _num(r["sql_accuracy"]), "started_at": r["started_at"].isoformat(),
-                       "finished_at": r["finished_at"].isoformat() if r["finished_at"] else None}) for r in rows]
-
-
-def _num(value):
-    return float(value) if value is not None else None
 
 
 # ── 질문 ────────────────────────────────────────────────────────────────
@@ -356,11 +254,6 @@ def get_history_export(system_id: UUID):
 @app.get("/api/history/{entry_id}/trace", response_model=list[AskStep])
 def get_history_trace(entry_id: UUID):
     return get_trace(entry_id)
-
-
-@app.post("/api/history/{entry_id}/eval-case")
-def post_history_eval_case(entry_id: UUID):
-    return {"id": promote_to_eval_case(entry_id)}
 
 
 @app.patch("/api/history/{entry_id}", response_model=HistoryEntry)

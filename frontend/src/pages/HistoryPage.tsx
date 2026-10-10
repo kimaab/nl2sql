@@ -76,15 +76,6 @@ export function HistoryPage() {
     }
   }
 
-  async function promote(entry: api.HistoryEntry) {
-    try {
-      await api.promoteToEvalCase(entry.id);
-      toast("평가 문항으로 만들었습니다 (승인됨)", "ok");
-    } catch (err) {
-      toast("만들지 못했습니다: " + errorMessage(err), "error");
-    }
-  }
-
   async function remove(entry: api.HistoryEntry) {
     if (!confirm("이 질문 기록을 지우시겠습니까?")) return;
     try {
@@ -233,15 +224,6 @@ export function HistoryPage() {
                                   >
                                     맞음
                                   </Button>
-                                  {e.feedback === "up" && (
-                                    <Button
-                                      size="sm"
-                                      title="이 질문과 고른 테이블·지표·SQL 을 정답으로 하는 평가 문항을 만듭니다"
-                                      onClick={() => promote(e)}
-                                    >
-                                      평가 문항으로
-                                    </Button>
-                                  )}
                                   <Button
                                     size="sm"
                                     variant={e.feedback === "down" ? "danger" : "secondary"}

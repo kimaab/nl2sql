@@ -9,15 +9,13 @@ log = logging.getLogger("nl2sql.contract")
 
 
 def load_tables(system_id: UUID) -> dict:
-    """살아 있는 스키마를 {테이블명: {id, name, description, purpose, card, card_line, columns}} 로.
+    """살아 있는 스키마를 {테이블명: {id, name, description, purpose, columns}} 로.
 
-    컬럼에는 동의어·코드 사전이 붙는다. 삭제 표시된 테이블·컬럼은 빠진다.
-    카드는 승인된 것만 싣는다 — 초안은 질문 처리에 쓰지 않는다.
+    삭제 표시된 테이블·컬럼은 빠진다.
     """
     rows = db.query("""
         SELECT t.id AS table_id, t.name AS table_name, t.comment AS table_note, t.purpose,
-               t.card, t.card_line, t.card_status,
-               c.name AS column_name, c.data_type, c.comment AS column_note, c.is_pk, c.synonyms, c.codes
+               c.name AS column_name, c.data_type, c.comment AS column_note, c.is_pk
           FROM meta_table t
           LEFT JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
          WHERE t.system_id = %s AND t.deleted_at IS NULL
@@ -26,24 +24,17 @@ def load_tables(system_id: UUID) -> dict:
 
     tables = {}
     for r in rows:
-        approved = r["card_status"] == "approved"
         table = tables.setdefault(r["table_name"], {
             "id": str(r["table_id"]),
             "name": r["table_name"],
             "description": r["table_note"] or "",
             "purpose": r["purpose"] or "",
-            "card": r["card"] if approved else "",
-            "card_line": r["card_line"] if approved else "",
             "columns": [],
         })
         if r["column_name"] is not None:
             column = {"name": r["column_name"], "type": r["data_type"] or "", "description": r["column_note"] or ""}
             if r["is_pk"]:
                 column["is_pk"] = True
-            if r["synonyms"]:
-                column["synonyms"] = r["synonyms"]
-            if r["codes"]:
-                column["codes"] = r["codes"]
             table["columns"].append(column)
     return tables
 
@@ -87,7 +78,7 @@ def load_metric_rows(system_id: UUID) -> list[dict]:
 def load_contract(system_id: UUID, active_only: bool = False) -> dict:
     """메타데이터 DB에서 계약서 로드.
 
-    active_only=True 는 질문 처리용 — 승인된 예시 질문이 있는 active 지표만 싣는다.
+    active_only=True 는 질문 처리용 — active 지표만 싣는다.
     False 는 컴파일·지표 검사용 — draft 도 싣는다. broken·retired 는 어느 쪽에도 없다.
     """
     row = db.one("SELECT id, code, name, domain_desc, driver FROM meta_system WHERE id = %s", str(system_id))
@@ -107,22 +98,15 @@ def load_contract(system_id: UUID, active_only: bool = False) -> dict:
          WHERE m.system_id = %s AND t.deleted_at IS NULL ORDER BY mt.role, t.name
     """, str(system_id)):
         links.setdefault(r["metric_id"], []).append(r["name"])
-    examples: dict = {}
-    for r in db.query("""
-        SELECT e.metric_id, e.question, e.ast FROM metric_example e JOIN metric m ON m.id = e.metric_id
-         WHERE m.system_id = %s AND e.status = 'approved' ORDER BY e.id
-    """, str(system_id)):
-        examples.setdefault(r["metric_id"], []).append({"question": r["question"], "ast": r["ast"]})
 
     metrics = []
     for m in metric_rows:
-        entry = metric_entry({**m, "examples": examples.get(m["id"], [])})
+        entry = metric_entry(m)
         entry["tables"] = links.get(m["id"], [m["table_name"]])
         if m.get("synonyms"):
             entry["synonyms"] = m["synonyms"]
         metrics.append(entry)
 
-    from glossary import load_for_contract
     return {
         "name": row["name"],
         "code": row["code"],
@@ -131,7 +115,6 @@ def load_contract(system_id: UUID, active_only: bool = False) -> dict:
         "tables": list(tables.values()),
         "relations": load_relations(system_id, tables),
         "metrics": metrics,
-        "glossary": load_for_contract(system_id),
     }
 
 
@@ -188,8 +171,6 @@ def metric_entry(m: dict) -> dict:
         }
         if m.get("series"):
             entry["series"] = m["series"]
-    if m.get("examples"):
-        entry["examples"] = m["examples"]
     return entry
 
 

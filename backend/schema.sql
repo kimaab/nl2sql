@@ -38,10 +38,10 @@ CREATE TABLE IF NOT EXISTS meta_table (
     name             TEXT        NOT NULL,
     comment          TEXT        NOT NULL DEFAULT '',   -- 대상 DB 코멘트 (동기화가 채움)
     purpose          TEXT        NOT NULL DEFAULT '',   -- 테이블 용도 (사람)
-    card             TEXT        NOT NULL DEFAULT '',   -- LLM 요약 카드 (승인 후 사용)
-    card_line        TEXT        NOT NULL DEFAULT '',   -- 테이블 추론에 보내는 한 줄 요약
-    card_status      TEXT        NOT NULL DEFAULT 'none',  -- none | draft | approved
-    card_source_hash TEXT,                              -- 카드를 만든 시점의 구조 해시
+    card             TEXT        NOT NULL DEFAULT '',   -- 쓰지 않음 (보강·검수 제거, 기존 데이터 보존)
+    card_line        TEXT        NOT NULL DEFAULT '',   -- 쓰지 않음
+    card_status      TEXT        NOT NULL DEFAULT 'none',  -- 쓰지 않음
+    card_source_hash TEXT,                              -- 쓰지 않음
     deleted_at       TIMESTAMPTZ,                       -- 대상 DB 에서 사라짐 (soft delete)
     synced_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -57,8 +57,8 @@ CREATE TABLE IF NOT EXISTS meta_column (
     comment    TEXT        NOT NULL DEFAULT '',
     ordinal    INTEGER     NOT NULL,
     is_pk      BOOLEAN     NOT NULL DEFAULT false,
-    synonyms   JSONB       NOT NULL DEFAULT '[]',
-    codes      JSONB       NOT NULL DEFAULT '[]',   -- [{"code": "03", "label": "배송완료"}]
+    synonyms   JSONB       NOT NULL DEFAULT '[]',   -- 쓰지 않음 (컬럼 사전 제거, 기존 데이터 보존)
+    codes      JSONB       NOT NULL DEFAULT '[]',   -- 쓰지 않음 (컬럼 사전 제거, 기존 데이터 보존)
     deleted_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (table_id, name)
@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS metric (
     UNIQUE (system_id, name)
 );
 ALTER TABLE metric ADD COLUMN IF NOT EXISTS measures JSONB NOT NULL DEFAULT '[]';
+-- 예시 질문 승인을 기다리던 지표(draft)는 이제 깨지지 않았으면 바로 쓰인다. 깨진 지표는 이미 broken 이다.
+UPDATE metric SET status = 'active' WHERE status = 'draft';
 CREATE INDEX IF NOT EXISTS idx_metric_active ON metric (system_id) WHERE status = 'active';
 
 -- 지표가 쓰는 테이블. 질의 생성의 '테이블 → 지표' 는 검색이 아니라 이 표의 조회다.
@@ -117,6 +119,7 @@ CREATE TABLE IF NOT EXISTS metric_table (
 );
 CREATE INDEX IF NOT EXISTS idx_metric_table_table ON metric_table (table_id);
 
+-- 쓰지 않음: 지표 예시 질문 기능 제거. 기존 데이터 보존용으로만 남긴다.
 CREATE TABLE IF NOT EXISTS metric_example (
     id          BIGSERIAL PRIMARY KEY,
     metric_id   UUID        NOT NULL REFERENCES metric (id) ON DELETE CASCADE,
@@ -143,6 +146,7 @@ CREATE TABLE IF NOT EXISTS metric_history (
 );
 CREATE INDEX IF NOT EXISTS idx_metric_history_metric ON metric_history (metric_id, version);
 
+-- 쓰지 않음: 업무 용어 사전 제거. 기존 데이터 보존용으로만 남긴다.
 CREATE TABLE IF NOT EXISTS glossary (
     id         BIGSERIAL PRIMARY KEY,
     system_id  UUID REFERENCES meta_system (id) ON DELETE CASCADE,  -- NULL = 전사 공통
@@ -157,7 +161,7 @@ CREATE TABLE IF NOT EXISTS glossary (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_glossary_term
     ON glossary (coalesce(system_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(term));
 
--- LLM 으로 테이블 카드·지표 예시 질문 초안을 만들 대상
+-- 쓰지 않음: 보강(LLM 초안)·검수 기능 제거. 기존 데이터 보존용으로만 남긴다.
 CREATE TABLE IF NOT EXISTS enrich_job (
     id          BIGSERIAL PRIMARY KEY,
     target_type TEXT        NOT NULL,  -- table | metric
@@ -227,6 +231,8 @@ CREATE TABLE IF NOT EXISTS ask_trace (
 );
 CREATE INDEX IF NOT EXISTS idx_ask_trace_ask ON ask_trace (ask_id, stage);
 
+-- 쓰지 않음: 평가 문항·평가 실행(eval_case · eval_run · eval_result) 기능 제거. 기존 데이터 보존용으로만 남긴다.
+-- 평가는 파일 평가셋으로 evaluate.py 를 직접 돌린다.
 CREATE TABLE IF NOT EXISTS eval_case (
     id                 BIGSERIAL PRIMARY KEY,
     system_id          UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,

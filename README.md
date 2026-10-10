@@ -22,12 +22,11 @@
 
 - **여러 데이터베이스 지원**: MySQL, PostgreSQL, Oracle
 - **스키마 동기화**: 대상 DB 의 테이블·컬럼·PK·FK 를 읽어 **이름 기준 병합** — 테이블 id 가 유지되어 지표 연결이 끊기지 않고, 사라진 테이블·컬럼은 지우지 않고 표시(soft delete). `AUTO_SYNC_MINUTES` 로 주기 실행
-- **메타데이터 보강**: LLM 이 테이블 카드(무엇을 기록하나 · 주요 컬럼 · 한 줄 요약)와 지표 예시 질문 초안을 만들고, 사람이 검수 화면에서 승인한 것만 질문 처리에 씀
-- **업무 지표**: 집계형·조회형·파생형(`[매출] - [환불]`), 시계열(`DELTA_SUM`·`CHANGE_COUNT` → `LAG` 서브쿼리), 고정 필터 강제, 동의어, 버전 이력. 승인된 예시 질문이 있어야 `active` 가 되어 질문에 쓰임
-- **사전**: 컬럼 동의어·코드값(`03`=배송완료), 업무 용어(`운행시간 = 가동시간 → bms_log.eg_time`) — 질문에 나온 용어만 프롬프트에 실음
+- **테이블 용도**: 사람이 적은 용도(없으면 DB 코멘트) 한 줄을 보고 LLM 이 테이블을 고름. 코드값의 뜻은 DB 컬럼 코멘트에 적어 둠
+- **업무 지표**: 집계형·조회형·파생형(`[매출] - [환불]`), 시계열(`DELTA_SUM`·`CHANGE_COUNT` → `LAG` 서브쿼리), 고정 필터 강제, 동의어, 버전 이력. 저장하면 (깨지지 않은 한) 바로 `active` 가 되어 질문에 쓰임
 - **조회 표현**: 집계·목록, 정렬·개수 제한, 기간 단위 묶음, NULL·부분 일치·OR, HAVING, DISTINCT, 기간 비교(증감률), 관계를 따라가는 조인
 - **되묻기**: 테이블·지표를 정할 수 없으면 후보를 보여주고 되묻기 (서버는 이전 질문을 기억하지 않음)
-- **질문 기록·평가**: 이력·즐겨찾기·맞음/틀림, 단계별 선택 기록, '맞음' 기록을 평가 문항으로. 평가는 단계별(테이블 재현율 · 지표 정확도 · SQL 일치)로 재고 방식끼리(LLM 선택 / TF-IDF) 비교
+- **질문 기록**: 이력·즐겨찾기·맞음/틀림, 단계별 선택 기록, '맞음' 기록을 평가셋 파일로 내보내기
 
 ## 설치
 
@@ -57,11 +56,10 @@ AS-IS 메타데이터(`datasource_*`)가 있는 DB 라면 한 번 옮깁니다. 
 
 ```bash
 uv run python backend/migrate_v2.py           # 무엇을 옮길지 보기
-uv run python backend/migrate_v2.py --apply   # 옮기기 (비밀번호는 암호화, 지표 연결·상태 재계산, 보강 대기열 등록)
+uv run python backend/migrate_v2.py --apply   # 옮기기 (비밀번호는 암호화, 지표 연결·상태 재계산)
 ```
 
 `schema.sql` 은 AS-IS `ask_log` 를 `ask_log_v1` 로 이름을 바꿔 두고, 마이그레이션이 새 `ask_log` 로 옮깁니다.
-옮긴 뒤에는 보강·검수 화면에서 카드·예시 질문을 만들고 승인해야 지표가 질문에 쓰입니다.
 
 ### 프론트엔드 설정
 
@@ -86,24 +84,21 @@ nl2sql/
 │   ├── scheduler.py        # 자동 동기화 (AUTO_SYNC_MINUTES)
 │   ├── metrics.py          # 지표 CRUD · 검증 · 테이블 연결 · 상태 · 이력
 │   ├── relations.py        # 테이블 관계 (FK·수동)
-│   ├── annotations.py      # 컬럼 사전 (동의어·코드값)
-│   ├── glossary.py         # 업무 용어 사전
 │   ├── contract.py         # 계약서 로드, 깨진 지표 판정
 │   ├── selector.py         # 테이블 추론 → 지표 후보 → 지표 선택 (TF-IDF 기준선 포함)
 │   ├── pruner.py           # TF-IDF 검색 (비교 기준)
 │   ├── compiler.py         # AST 정규화·검증 + SQL 조립
 │   ├── tool.py · graph.py  # compile_sql · ask_user 도구, LangGraph 루프
 │   ├── ask.py              # 질문 하나 처리, 앱과 평가가 함께 씀
-│   ├── enrich.py           # 보강 대기열 · LLM 초안 · 검수
-│   ├── history.py          # 질문 기록 · 단계 기록 · 피드백 · 평가 문항
-│   ├── evaluate.py         # 평가 실행기
+│   ├── history.py          # 질문 기록 · 단계 기록 · 피드백 · 평가셋 내보내기
+│   ├── evaluate.py         # 평가셋 파일 실행기 (CLI)
 │   └── llm.py · logging_config.py
 ├── docs/to-be/             # TO-BE 설계 문서
 ├── eval/                   # 샘플 계약서와 평가셋 (reports/ 는 실행 결과, 커밋 안 함)
 ├── tests/                  # pytest (통합 테스트는 TEST_DB_URL 이 있을 때만)
 └── frontend/src/
     ├── api.ts              # API 클라이언트
-    └── pages/              # 질문 · 기록 · 시스템(동기화·테이블·관계·사전·용어) · 지표 · 보강·검수
+    └── pages/              # 질문 · 기록 · 시스템(동기화·테이블·관계) · 지표
 ```
 
 ## 환경변수
@@ -124,28 +119,20 @@ nl2sql/
 - `POST /api/systems/{id}/sync` - 동기화 (추가·변경·삭제 건수, 깨진 지표)
 - `GET /api/sync-logs?system_id=` - 동기화 기록
 - `GET /api/systems/{id}/schema` - 저장된 스키마
-- `GET /api/systems/{id}/tables`, `PUT /api/systems/{id}/tables/{table_id}/purpose` - 테이블 용도·카드 상태
+- `GET /api/systems/{id}/tables`, `PUT /api/systems/{id}/tables/{table_id}/purpose` - 테이블 용도
 
-### 관계 · 사전 · 용어
+### 관계
 - `GET|POST /api/systems/{id}/relations`, `DELETE .../relations/{relation_id}` - 관계 (FK 관계는 지울 수 없음)
-- `GET /api/systems/{id}/annotations`, `PUT .../annotations/{table}/{column}` - 컬럼 동의어·코드값
-- `GET|POST /api/systems/{id}/glossary`, `PUT|DELETE .../glossary/{term_id}` - 업무 용어 (전사 공통은 `/api/glossary`)
 
 ### 지표
 - `GET|POST /api/systems/{id}/metrics`, `PUT|DELETE .../metrics/{metric_id}` - 지표 (파생 지표가 쓰는 지표는 삭제 거부)
 - `GET .../metrics/{metric_id}/history` - 변경 이력
 - `POST /api/systems/{id}/compile` - 모델 없이 AST 를 SQL 로
 
-### 보강 · 검수 · 평가
-- `GET /api/systems/{id}/enrich` - 대기열 상태, `POST` - 처리 시작 (`{"enqueue_all": true}` 면 카드·예시 없는 것 모두)
-- `GET /api/systems/{id}/review` - 검수 대기 초안, `POST .../review/{kind}/{item_id}` - 승인·반려 (`table_card` · `metric_example` · `eval_case`)
-- `GET /api/systems/{id}/eval-runs` - 평가 실행 기록
-
 ### 질문 · 기록
 - `POST /api/ask` - `{system_id, question}` → SQL, 고른 테이블·지표, 단계별 기록
 - `GET /api/history?system_id=&favorite=&feedback=`, `PATCH|DELETE /api/history/{id}`
 - `GET /api/history/{id}/trace` - 단계별 선택 기록
-- `POST /api/history/{id}/eval-case` - '맞음' 기록을 평가 문항으로
 - `GET /api/history/export?system_id=` - '맞음' 기록을 평가셋 파일 형식으로
 
 ## 테스트와 평가
@@ -154,26 +141,23 @@ nl2sql/
 uv run pytest                                          # 단위 테스트
 TEST_DB_URL=postgresql://user:pw@host:5432/nl2sql_itest uv run pytest   # + API 통합 테스트 (전용 DB)
 
-# 평가 문항 초안 만들기 (활성 지표마다 N개) → 보강·검수 화면의 '평가 문항' 에서 승인
-uv run python backend/evaluate.py --system-id <uuid> --generate 3
-
-# 승인된 평가 문항으로 실행 → eval_run · eval_result 에 남고 보강·검수 화면에 표시
-uv run python backend/evaluate.py --system-id <uuid>                    # TO-BE (LLM 선택)
-uv run python backend/evaluate.py --system-id <uuid> --selector tfidf   # 비교 기준 (한 번에 검색)
+# 평가셋 파일을 메타데이터 DB 의 시스템으로 실행 ('맞음' 기록은 질문 기록 화면에서 내보내기)
+uv run python backend/evaluate.py --cases <파일> --system-id <uuid>                    # TO-BE (LLM 선택)
+uv run python backend/evaluate.py --cases <파일> --system-id <uuid> --selector tfidf   # 비교 기준 (한 번에 검색)
 
 # 샘플 계약서·평가셋 (DB 없이)
 uv run python backend/evaluate.py --cases eval/shoppingmall_cases.json --contract eval/shoppingmall_contract.json --compile-only
 ```
 
 평가는 단계별로 냅니다: 테이블 재현율(정답 테이블이 후보에 들었나), 지표 정확도('맞는 지표 없음' 이 정답이면 안 고른 게 맞음),
-SQL 일치(별칭 이름 차이 무시). 평가 문항은 지표 예시 질문과 따로 만듭니다 — 예시 질문으로 평가하면 점수가 부풀려집니다.
+SQL 일치(별칭 이름 차이 무시).
 
 ## 주요 설계 원칙
 
 1. **넓게 고르고 점점 좁힌다** - 시스템 → 테이블 → 지표. 앞 단계는 놓치지 않기(재현율), 뒤 단계는 정확히
 2. **구조로 알 수 있는 것은 LLM 에 묻지 않는다** - 테이블 → 지표는 `metric_table` 조회. 지표를 저장하면 정의에서 자동으로 만든다
-3. **판단할 때 필요한 것만 보낸다** - 고를 때는 요약(이름·설명·예시 질문), SQL 을 만들 때만 상세
-4. **초안은 LLM, 책임은 사람** - 카드·예시 질문·평가 문항은 승인한 것만 쓴다
+3. **판단할 때 필요한 것만 보낸다** - 고를 때는 요약(이름·설명), SQL 을 만들 때만 상세
+4. **메타데이터는 사람이 적는다** - 테이블 용도·컬럼 코멘트·지표 설명. LLM 이 만든 초안을 질문 처리에 쓰지 않는다
 5. **SQL 문자열은 모델이 생성하지 않음** - JSON AST 만 만들고 컴파일러가 검증 후 조립. 조인 ON 조건도 관계 정의에서 옴
 6. **고른 지표는 지킨다** - 지표를 고른 뒤 원본 컬럼을 직접 집계하면 오류 없이 틀린 답이 나온다. 첫 시도가 지표를 쓰지 않으면 되돌려 보낸다
 7. **동기화는 병합** - id 를 유지하고 사라진 것은 표시만. 지표 연결과 이력이 끊기지 않는다

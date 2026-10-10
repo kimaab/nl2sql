@@ -270,7 +270,7 @@ def test_distinct_with_aggregation_rejected(compiler):
 def test_model_join_uses_registered_relation(compiler):
     out = sql(compiler, {"target_table": "TB_ORDER", "joins": ["TB_MEMBER"],
                          "columns": ["ORDER_ID", "TB_MEMBER.MEMBER_NM"],
-                         "filters": [{"field": "TB_MEMBER.GRADE_CD", "operator": "equals", "value": "VIP"}]})
+                         "filters": [{"field": "TB_MEMBER.GRADE_CD", "operator": "equals", "value": "G3"}]})
     assert out == (
         'SELECT "TB_ORDER"."ORDER_ID", "TB_MEMBER"."MEMBER_NM" FROM "TB_ORDER" '
         'INNER JOIN "TB_MEMBER" ON "TB_ORDER"."MEMBER_ID" = "TB_MEMBER"."MEMBER_ID" '
@@ -359,34 +359,17 @@ def test_formula_parser():
 
 # ------------------------------------------------------------------ A-03 / A-04 값 해석
 
-def test_code_label_is_mapped_to_code(compiler):
+def test_values_are_used_as_given(compiler):
+    # 코드 사전이 없으므로 값을 바꾸지 않는다 — 코드의 뜻은 컬럼 코멘트로 모델에게 전해진다
     out = sql(compiler, {"target_table": "TB_ORDER", "filters": [
-        {"field": "ORDER_STATUS", "operator": "in", "value": ["배송완료", "02"]}]})
+        {"field": "ORDER_STATUS", "operator": "in", "value": ["03", "02"]}]})
     assert "\"ORDER_STATUS\" IN ('03', '02')" in out
-
-
-def test_unknown_code_value_lists_dictionary(compiler):
-    msg = error(compiler, {"target_table": "TB_ORDER", "filters": [
-        {"field": "ORDER_STATUS", "operator": "equals", "value": "반품"}]})
-    assert "03=배송완료" in msg
 
 
 def test_non_numeric_value_on_numeric_column_rejected(compiler):
     msg = error(compiler, {"target_table": "TB_ORDER", "filters": [
         {"field": "ORDER_ID", "operator": "equals", "value": "테스트 고객"}]})
     assert "숫자 컬럼" in msg and "이름 컬럼" in msg
-
-
-def test_metric_literal_value_bypasses_partial_dictionary(contract):
-    # 사전에 '03' 하나만 있어도 지표가 정의한 '99' 는 그대로 쓰이고, 모델이 낸 값만 사전을 따른다
-    order = next(t for t in contract["tables"] if t["name"] == "TB_ORDER")
-    status = next(c for c in order["columns"] if c["name"] == "ORDER_STATUS")
-    status["codes"] = [{"code": "03", "label": "배송완료"}]
-    compiler = Compiler(contract)
-    assert "\"ORDER_STATUS\" = '99'" in compiler.compile({"metric": "취소주문수"})
-    assert "COUNT(CASE WHEN \"ORDER_STATUS\" = '99'" in compiler.compile({"metric": "취소율"})
-    with pytest.raises(ValueError, match="사전에 없는 값"):
-        compiler.compile({"metric": "주문수", "filters": [{"field": "ORDER_STATUS", "operator": "equals", "value": "99"}]})
 
 
 def test_unjoined_table_reference_suggests_joins(compiler):

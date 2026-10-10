@@ -161,24 +161,6 @@ class Measure(BaseModel):
         return (value or "").strip()
 
 
-class MetricExample(BaseModel):
-    """지표의 예시 질문. ast 가 있으면 프롬프트의 모범 답안(few-shot)이 된다.
-
-    화면에서 사람이 적은 예시는 바로 승인된 것으로 저장된다 (origin=human).
-    """
-    question: str
-    ast: dict | None = None
-    origin: Literal["llm", "human", "feedback"] = "human"
-
-    @field_validator("question")
-    @classmethod
-    def _not_blank(cls, value: str) -> str:
-        cleaned = (value or "").strip()
-        if not cleaned:
-            raise ValueError("예시 질문이 비어 있습니다")
-        return cleaned
-
-
 class MetricInput(BaseModel):
     """업무 지표 입력.
 
@@ -198,7 +180,6 @@ class MetricInput(BaseModel):
     # 집계형·조회형의 출력 컬럼 목록. 있으면 agg_field·agg_function·select_columns 대신 이것을 쓴다.
     measures: list[Measure] = []
     fixed_filters: list[dict] = []
-    examples: list[MetricExample] = []
     synonyms: list[str] = []
 
     @field_validator("synonyms")
@@ -319,8 +300,6 @@ class Metric(BaseModel):
     series: SeriesSpec | None
     measures: list[Measure] = []
     fixed_filters: list[dict]
-    examples: list[MetricExample]   # 승인된 예시만
-    draft_example_count: int        # 검수를 기다리는 LLM 초안
     synonyms: list[str]
     status: Literal["draft", "active", "broken", "retired"]
     broken_reason: str | None
@@ -356,45 +335,6 @@ class RelationInput(BaseModel):
 class Relation(RelationInput):
     id: UUID
     source: Literal["fk", "manual"]
-
-
-class CodeValue(BaseModel):
-    code: str
-    label: str
-
-    @field_validator("code", "label", mode="before")
-    @classmethod
-    def _not_blank(cls, value) -> str:
-        cleaned = str(value if value is not None else "").strip()
-        if not cleaned:
-            raise ValueError("코드와 이름은 비어 있을 수 없습니다")
-        return cleaned
-
-
-class AnnotationInput(BaseModel):
-    """컬럼 동의어와 코드값 사전"""
-    synonyms: list[str] = []
-    codes: list[CodeValue] = []
-
-    @model_validator(mode="after")
-    def _clean(self):
-        seen, synonyms = set(), []
-        for s in self.synonyms:
-            text = s.strip()
-            if text and text.lower() not in seen:
-                seen.add(text.lower())
-                synonyms.append(text)
-        self.synonyms = synonyms
-        for key in ("code", "label"):
-            values = [getattr(c, key).lower() for c in self.codes]
-            if len(values) != len(set(values)):
-                raise ValueError(f"코드 사전에 같은 {'코드' if key == 'code' else '이름'}가 두 번 있습니다")
-        return self
-
-
-class Annotation(AnnotationInput):
-    table_name: str
-    column_name: str
 
 
 class AskRequest(BaseModel):
@@ -490,96 +430,18 @@ class SyncLog(BaseModel):
 
 
 class TableInfo(BaseModel):
-    """테이블 목록 화면용 (용도·카드 상태)"""
+    """테이블 목록 화면용"""
     id: UUID
     name: str
     comment: str
     purpose: str
-    card: str
-    card_line: str
-    card_status: Literal["none", "draft", "approved"]
     column_count: int
     metric_count: int
 
 
 class TablePurposeInput(BaseModel):
-    """사람이 적는 테이블 용도. 바뀌면 카드를 다시 만든다."""
+    """사람이 적는 테이블 용도. 테이블 추론에 쓰인다."""
     purpose: str
-
-
-class ReviewItem(BaseModel):
-    """검수를 기다리는 LLM 초안 하나"""
-    kind: Literal["table_card", "metric_example", "eval_case"]
-    id: str                 # table_card = 테이블 id, metric_example·eval_case = 행 id
-    target_name: str        # 테이블 이름 또는 지표 이름
-    context: str            # 판단에 필요한 원재료 (용도·코멘트 또는 지표 설명)
-    draft: str              # 카드 본문 또는 예시 질문
-    draft_line: str = ""    # 테이블 한 줄 요약
-
-
-class ReviewDecision(BaseModel):
-    action: Literal["approve", "reject"]
-    note: str = ""          # 반려 사유 — 재생성 지시로 쓰인다
-    card: str | None = None        # 승인하면서 고친 카드
-    card_line: str | None = None   # 승인하면서 고친 한 줄 요약
-    question: str | None = None    # 승인하면서 고친 예시 질문
-    reviewer: str = ""
-
-
-class GlossaryInput(BaseModel):
-    """업무 용어. system_id 가 없으면 전사 공통."""
-    term: str
-    synonyms: list[str] = []
-    meaning: str = ""
-    maps_to: list[dict] = []   # [{"table": "bms_log", "column": "eg_time"}] 또는 [{"metric": "일별 가동시간"}]
-    status: Literal["draft", "approved"] = "approved"
-
-    @field_validator("term")
-    @classmethod
-    def _term(cls, value: str) -> str:
-        cleaned = (value or "").strip()
-        if not cleaned:
-            raise ValueError("용어가 비어 있습니다")
-        return cleaned
-
-    @field_validator("synonyms")
-    @classmethod
-    def _synonyms(cls, values: list[str]) -> list[str]:
-        seen, out = set(), []
-        for v in values:
-            text = (v or "").strip()
-            if text and text.lower() not in seen:
-                seen.add(text.lower())
-                out.append(text)
-        return out
-
-
-class GlossaryTerm(GlossaryInput):
-    id: int
-    system_id: UUID | None
-
-
-class EnrichStatus(BaseModel):
-    queued: int
-    running: int
-    failed: int
-    draft_cards: int
-    draft_examples: int
-    draft_eval_cases: int
-
-
-class EvalRun(BaseModel):
-    id: UUID
-    label: str
-    config: dict
-    case_count: int
-    table_recall: float | None
-    metric_accuracy: float | None
-    sql_accuracy: float | None
-    avg_tokens: int | None
-    avg_elapsed_ms: int | None
-    started_at: str
-    finished_at: str | None
 
 
 class ApiException(Exception):

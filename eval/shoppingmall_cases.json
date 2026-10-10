@@ -192,7 +192,7 @@
           {
             "field": "ORDER_STATUS",
             "operator": "equals",
-            "value": "배송완료"
+            "value": "03"
           }
         ]
       },
@@ -210,7 +210,7 @@
           {
             "field": "ORDER_STATUS",
             "operator": "not_equals",
-            "value": "취소"
+            "value": "99"
           }
         ]
       },
@@ -225,8 +225,8 @@
             "field": "ORDER_STATUS",
             "operator": "in",
             "value": [
-              "결제완료",
-              "배송완료"
+              "02",
+              "03"
             ]
           }
         ]
@@ -320,7 +320,7 @@
           {
             "field": "GRADE_CD",
             "operator": "equals",
-            "value": "VIP"
+            "value": "G3"
           }
         ]
       },
@@ -505,7 +505,7 @@
           {
             "field": "TB_MEMBER.GRADE_CD",
             "operator": "equals",
-            "value": "VIP"
+            "value": "G3"
           }
         ]
       },

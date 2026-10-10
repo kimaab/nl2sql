@@ -80,7 +80,7 @@ export function MetricList() {
         <span className="muted">지표 {flat.length}개</span>
         {brokenCount > 0 && <Badge tone="danger">깨진 지표 {brokenCount}개</Badge>}
         {draftCount > 0 && (
-          <span title="승인된 예시 질문이 있어야 질문에 쓰입니다">
+          <span title="저장하면 사용 중으로 바뀝니다">
             <Badge tone="warn">검수 대기 {draftCount}개</Badge>
           </span>
         )}
@@ -139,10 +139,9 @@ export function MetricList() {
                       <code className="muted">{definitionLines(m).replace(/\n\s*/g, " ")}</code>
                     </td>
                     <td>
-                      <span title={m.broken_reason ?? (m.status === "draft" ? "승인된 예시 질문이 있어야 질문에 쓰입니다" : "")}>
+                      <span title={m.broken_reason ?? ""}>
                         <Badge tone={STATUS_TONE[m.status]}>{STATUS_LABEL[m.status]}</Badge>
                       </span>
-                      {m.draft_example_count > 0 && <div className="cell-sub">예시 초안 {m.draft_example_count}개</div>}
                     </td>
                   </tr>
                 ))}
