@@ -76,23 +76,35 @@ def parse_json(text: str) -> dict:
     return parsed
 
 
+LLM_LOG = "[LLM 연동]"
+STAGE_NAMES = {"table": "테이블 선택", "metric": "지표 선택"}
+
+
 def ask_json(model, system: str, user: str, step: Step, validate) -> dict:
     """JSON 으로 답하게 하고, 형식이 틀리면 이유를 붙여 한 번 더 묻는다. 토큰·시간은 step 에 더한다."""
     messages = [SystemMessage(system), HumanMessage(user)]
+    stage = STAGE_NAMES.get(step.stage, step.stage)
     last_error = None
-    for _ in range(2):
+    for attempt in range(1, 3):
+        if attempt == 1:
+            log.info("%s %s 요청 attempt=%d model=%s\n[system]\n%s\n[user]\n%s",
+                     LLM_LOG, stage, attempt, step.model, system, user)
+        else:
+            log.info("%s %s 재요청 attempt=%d\n[user]\n%s", LLM_LOG, stage, attempt, messages[-1].content)
         started = time.monotonic()
         reply = model.invoke(messages)
-        # 테이블 산정 완료
-        step.elapsed_ms += int((time.monotonic() - started) * 1000)
+        elapsed = int((time.monotonic() - started) * 1000)
+        step.elapsed_ms += elapsed
         p, c = usage_of(reply)
         step.prompt_tokens += p
         step.completion_tokens += c
+        log.info("%s %s 응답 attempt=%d (토큰 %d+%d, %dms)\n%s", LLM_LOG, stage, attempt, p, c, elapsed, reply.content)
         try:
             parsed = parse_json(reply.content)
             validate(parsed)
             return parsed
         except (ValueError, KeyError, TypeError) as error:
+            log.info("%s %s 응답 형식 오류 attempt=%d: %s", LLM_LOG, stage, attempt, error)
             last_error = error
             messages += [reply, HumanMessage(f"형식이 틀렸습니다: {error}. 설명 없이 JSON 객체 하나만 다시 답하십시오.")]
     raise ValueError(f"{step.stage} 단계 응답을 읽지 못했습니다: {last_error}")
@@ -191,6 +203,7 @@ def infer_tables(model, contract: dict, question: str) -> tuple[list, list, Step
             reasons.append(f"{real[0]}: {(item.get('reason') if isinstance(item, dict) else '') or ''}".strip(": "))
     step.selected = picked[:MAX_TABLES]
     step.reason = " / ".join(reasons[:MAX_TABLES])
+    log.info("%s 테이블 선택 결과: %s", LLM_LOG, step.selected)
     return step.selected, reasons, step
 
 
@@ -206,6 +219,7 @@ def select_metrics(model, question: str, candidates: list) -> tuple[list, Step, 
     step = Step("metric", candidates=names, model=model_name(model))
     if not candidates:
         step.reason = "고른 테이블에 연결된 지표가 없음 — 테이블을 직접 조회"
+        log.info("%s 지표 선택 생략: 후보 없음 — 테이블 직접 조회 question=%r", LLM_LOG, question)
         return [], step, None
     system = METRIC_SYSTEM.format(max_metrics=MAX_METRICS)
     user = "[후보 지표]\n" + "\n".join(metric_block(m) for m in candidates) + f"\n\n[질문]\n{question}"
@@ -222,8 +236,10 @@ def select_metrics(model, question: str, candidates: list) -> tuple[list, Step, 
             step.selected = []
             step.reason = step.reason or "질문만으로 지표를 정할 수 없음"
             message = str(parsed.get("message") or "어느 지표를 말씀하시나요?").strip()
+            log.info("%s 지표 선택 결과: 되묻기 options=%s", LLM_LOG, options)
             return [], step, f"{message} (후보: {', '.join(options)})"
     step.selected = _match(parsed["metrics"], names)[:MAX_METRICS]
+    log.info("%s 지표 선택 결과: %s", LLM_LOG, step.selected)
     return step.selected, step, None
 
 
