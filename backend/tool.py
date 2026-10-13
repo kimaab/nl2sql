@@ -8,8 +8,12 @@ log = logging.getLogger("nl2sql.compile")
 CLARIFY_PREFIX = "CLARIFY:"
 
 
-def make_compile_tool(compiler: Compiler, question: str, record: dict | None = None,
-                      expected_metrics: list | None = None):
+def make_compile_tool(
+    compiler: Compiler,
+    question: str,
+    record: dict | None = None,
+    expected_metrics: list | None = None,
+):
     """compile_sql 도구 생성. 성공하면 record["ast"] 에 컴파일된 AST 를 남긴다.
 
     expected_metrics: 지표 선택 단계가 고른 지표. 첫 시도가 그 지표를 쓰지 않으면 한 번 되돌려 보낸다 —
@@ -42,36 +46,63 @@ def make_compile_tool(compiler: Compiler, question: str, record: dict | None = N
             parsed = json.loads(payload)
         except json.JSONDecodeError as error:
             detail = f"ast가 올바른 JSON이 아닙니다 -> {error}"
-            log.info("attempt=%d outcome=error question=%r detail=%s",
-                     attempt["n"], question, detail)
+            log.info(
+                "attempt=%d outcome=error question=%r detail=%s",
+                attempt["n"],
+                question,
+                detail,
+            )
             return f"error: {detail}"
 
         if not isinstance(parsed, dict):
             detail = f"ast는 JSON 객체여야 합니다 (받은 것: {type(parsed).__name__})"
-            log.info("attempt=%d outcome=error question=%r detail=%s",
-                     attempt["n"], question, detail)
+            log.info(
+                "attempt=%d outcome=error question=%r detail=%s",
+                attempt["n"],
+                question,
+                detail,
+            )
             return f"error: {detail}"
 
         used = parsed.get("metric")
-        used = [used] if isinstance(used, str) else used if isinstance(used, list) else []
-        if expected and attempt["n"] == 1 and not any(str(u).lower() in expected for u in used):
-            detail = (f"이 질문에는 지표 선택 단계에서 {', '.join(expected_metrics)} 을(를) 골랐습니다. "
-                      "metric 에 그 지표를 쓰고 정렬·기간·필터만 덧붙이십시오. 지표로 정말 답할 수 없을 때만 "
-                      "같은 ast 를 다시 보내십시오.")
-            log.info("attempt=%d outcome=error question=%r detail=지표 미사용 %s", attempt["n"], question, payload)
+        used = (
+            [used] if isinstance(used, str) else used if isinstance(used, list) else []
+        )
+        if (
+            expected
+            and attempt["n"] == 1
+            and not any(str(u).lower() in expected for u in used)
+        ):
+            detail = (
+                f"이 질문에는 지표 선택 단계에서 {', '.join(expected_metrics)} 을(를) 골랐습니다. "
+                "metric 에 그 지표를 쓰고 정렬·기간·필터만 덧붙이십시오. 지표로 정말 답할 수 없을 때만 "
+                "같은 ast 를 다시 보내십시오."
+            )
+            log.info(
+                "attempt=%d outcome=error question=%r detail=지표 미사용 %s",
+                attempt["n"],
+                question,
+                payload,
+            )
             return f"error: {detail}"
 
         try:
             sql = compiler.compile(parsed)
         except (ValueError, KeyError, TypeError) as error:
-            log.info("attempt=%d outcome=error question=%r ast=%s detail=%s",
-                     attempt["n"], question, payload, error)
+            log.info(
+                "attempt=%d outcome=error question=%r ast=%s detail=%s",
+                attempt["n"],
+                question,
+                payload,
+                error,
+            )
             return f"error: {error}"
 
         if record is not None:
             record["ast"] = parsed
-        log.info("attempt=%d outcome=success question=%r sql=%s",
-                 attempt["n"], question, sql)
+        log.info(
+            "attempt=%d outcome=success question=%r sql=%s", attempt["n"], question, sql
+        )
         return f"SQL: {sql}"
 
     return compile_sql

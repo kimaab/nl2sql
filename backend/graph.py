@@ -11,6 +11,7 @@ MAX_ATTEMPTS = 4
 
 class State(TypedDict):
     """에이전트 상태"""
+
     messages: Annotated[list, add_messages]
 
 
@@ -45,8 +46,10 @@ def build_graph(model, tools: list):
             return END
         # 최대 시도 횟수 체크 — 되묻기는 시도가 아니다
         attempts = sum(
-            1 for m in state["messages"]
-            if isinstance(m, ToolMessage) and not str(m.content).startswith(CLARIFY_PREFIX)
+            1
+            for m in state["messages"]
+            if isinstance(m, ToolMessage)
+            and not str(m.content).startswith(CLARIFY_PREFIX)
         )
         return END if attempts >= MAX_ATTEMPTS else "agent"
 
@@ -54,8 +57,12 @@ def build_graph(model, tools: list):
     graph.add_node("agent", agent)
     graph.add_node("compile", ToolNode(tools))
     graph.add_edge(START, "agent")
-    graph.add_conditional_edges("agent", route_after_agent, {"compile": "compile", END: END})
-    graph.add_conditional_edges("compile", route_after_tool, {"agent": "agent", END: END})
+    graph.add_conditional_edges(
+        "agent", route_after_agent, {"compile": "compile", END: END}
+    )
+    graph.add_conditional_edges(
+        "compile", route_after_tool, {"agent": "agent", END: END}
+    )
 
     # 체크포인터 없음 — 요청 간 격리
     return graph.compile()

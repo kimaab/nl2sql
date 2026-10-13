@@ -15,7 +15,7 @@ def korean_aware_tokens(text: str) -> list[str]:
         if chunk[0].isascii() or len(chunk) == 1:
             found.append(chunk)
         else:
-            found.extend(chunk[i:i + 2] for i in range(len(chunk) - 1))
+            found.extend(chunk[i : i + 2] for i in range(len(chunk) - 1))
     return found
 
 
@@ -47,21 +47,29 @@ class Pruner:
 
         # TF-IDF 벡터화
         self.vectorizer = TfidfVectorizer(
-            tokenizer=korean_aware_tokens,
-            token_pattern=None
+            tokenizer=korean_aware_tokens, token_pattern=None
         )
         self.matrix = self.vectorizer.fit_transform([e[2] for e in self.entries])
 
         vocab_size = len(self.vectorizer.vocabulary_)
-        log.info("단어 사전 %d개 (테이블 %d, 지표 %d)", vocab_size,
-                 sum(1 for e in self.entries if e[0] == "table"), sum(1 for e in self.entries if e[0] == "metric"))
+        log.info(
+            "단어 사전 %d개 (테이블 %d, 지표 %d)",
+            vocab_size,
+            sum(1 for e in self.entries if e[0] == "table"),
+            sum(1 for e in self.entries if e[0] == "metric"),
+        )
         for kind, item, text in self.entries:
             words = sorted(set(korean_aware_tokens(text)))
             if kind == "metric":
                 log.info("지표 사전: %s -> %s", item["name"], words)
             else:
-                log.info("테이블 사전: %s -> 단어 %d개 (컬럼 %d개) %s",
-                         item["name"], len(words), len(item["columns"]), words)
+                log.info(
+                    "테이블 사전: %s -> 단어 %d개 (컬럼 %d개) %s",
+                    item["name"],
+                    len(words),
+                    len(item["columns"]),
+                    words,
+                )
 
     def prune(self, question: str, top_k: int = 3) -> dict:
         """질문과 관련된 항목 선택"""
@@ -100,18 +108,32 @@ class Pruner:
         # 고른 테이블과 관계로 이어진 이웃도 질문과 겹치면 싣는다. "등급별 주문 금액" 에서
         # 주문 테이블만 실리면 등급이 있는 회원 테이블로 조인할 길이 없다.
         table_scores = {
-            self.entries[i][1]["name"]: scores[i] for i in range(len(self.entries)) if self.entries[i][0] == "table"
+            self.entries[i][1]["name"]: scores[i]
+            for i in range(len(self.entries))
+            if self.entries[i][0] == "table"
         }
         for r in self._relations:
-            for here, there in ((r["left_table"], r["right_table"]), (r["right_table"], r["left_table"])):
-                if here in seen and there not in seen and table_scores.get(there, 0) > 0:
+            for here, there in (
+                (r["left_table"], r["right_table"]),
+                (r["right_table"], r["left_table"]),
+            ):
+                if (
+                    here in seen
+                    and there not in seen
+                    and table_scores.get(there, 0) > 0
+                ):
                     add_table(there)
 
         relations = [
-            r for r in self._relations
+            r
+            for r in self._relations
             if r["left_table"] in seen and r["right_table"] in seen
         ]
-        log.info("선택: 지표=%s 테이블=%s", [m["name"] for m in metrics], [t["name"] for t in tables])
+        log.info(
+            "선택: 지표=%s 테이블=%s",
+            [m["name"] for m in metrics],
+            [t["name"] for t in tables],
+        )
         return {"tables": tables, "metrics": metrics, "relations": relations}
 
     def _log_search(self, question: str, scores, order) -> None:
@@ -119,10 +141,21 @@ class Pruner:
         vocab = self.vectorizer.vocabulary_
         tokens = korean_aware_tokens(question)
         used = [t for t in tokens if t in vocab]
-        log.info("질문=%r 토큰=%s 사용=%s 무시(사전에 없음)=%s", question, tokens, used,
-                 [t for t in tokens if t not in vocab])
+        log.info(
+            "질문=%r 토큰=%s 사용=%s 무시(사전에 없음)=%s",
+            question,
+            tokens,
+            used,
+            [t for t in tokens if t not in vocab],
+        )
         for rank, idx in enumerate(order, start=1):
             kind, item, text = self.entries[idx]
             doc = set(korean_aware_tokens(text))
-            log.info("후보 %d: [%s] %s 점수=%.3f 겹친 토큰=%s", rank, kind, item["name"], scores[idx],
-                     [t for t in dict.fromkeys(used) if t in doc])
+            log.info(
+                "후보 %d: [%s] %s 점수=%.3f 겹친 토큰=%s",
+                rank,
+                kind,
+                item["name"],
+                scores[idx],
+                [t for t in dict.fromkeys(used) if t in doc],
+            )

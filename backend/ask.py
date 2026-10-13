@@ -35,12 +35,18 @@ def _prompt_metric(m: dict) -> dict:
     """프롬프트에 싣는 지표. 측정값 식 트리는 읽을 수 있는 식으로 바꾼다."""
     out = dict(m)
     if m.get("measures"):
-        out["measures"] = [{"name": ms["name"], "식": measure_text(ms["expr"])} for ms in m["measures"]]
+        out["measures"] = [
+            {"name": ms["name"], "식": measure_text(ms["expr"])} for ms in m["measures"]
+        ]
     return out
 
 
-def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = None,
-                  chosen_metrics: list | None = None) -> str:
+def system_prompt(
+    contract: dict,
+    pruned: dict,
+    today: datetime.date | None = None,
+    chosen_metrics: list | None = None,
+) -> str:
     """시스템 프롬프트 생성.
 
     chosen_metrics: 지표 선택 단계가 고른 지표. 있으면 그 지표를 쓰라고 못박는다 — 이 단계의 모델이
@@ -56,9 +62,11 @@ def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = No
     chosen = ""
     if chosen_metrics:
         names = ", ".join(f"'{n}'" for n in chosen_metrics)
-        chosen = (f"[이번 질문의 지표]\n이전 단계에서 질문에 맞는 지표로 {names} 을(를) 골랐습니다. "
-                  "ast 의 metric 에 이 지표를 쓰고, 정렬·기간·필터·묶음만 덧붙이십시오. "
-                  "지표가 이미 정의한 집계를 원본 컬럼으로 다시 계산하지 마십시오.\n\n")
+        chosen = (
+            f"[이번 질문의 지표]\n이전 단계에서 질문에 맞는 지표로 {names} 을(를) 골랐습니다. "
+            "ast 의 metric 에 이 지표를 쓰고, 정렬·기간·필터·묶음만 덧붙이십시오. "
+            "지표가 이미 정의한 집계를 원본 컬럼으로 다시 계산하지 마십시오.\n\n"
+        )
     return (
         f"당신은 자연어 질문을 '{contract['name']}' 데이터베이스"
         f"({contract['driver']}) 조회로 바꾸는 시맨틱 파서입니다.\n"
@@ -72,8 +80,8 @@ def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = No
         f"{AST_GUIDE}\n\n"
         f"{chosen}"
         "질문을 분석해 compile_sql 도구를 ast 인자로 부르십시오.\n"
-        "도구가 \"SQL:\"로 시작하는 결과를 돌려주면 그것으로 답이 끝난 것입니다.\n"
-        "도구가 \"error:\"로 시작하는 결과를 돌려주면 그 메시지를 읽고 고쳐서 "
+        '도구가 "SQL:"로 시작하는 결과를 돌려주면 그것으로 답이 끝난 것입니다.\n'
+        '도구가 "error:"로 시작하는 결과를 돌려주면 그 메시지를 읽고 고쳐서 '
         "다시 부르십시오.\n"
         "질문이 여러 갈래로 읽혀 조회를 정할 수 없거나, 지표가 질문에서 받아야 하는 값이 "
         "빠졌다면 추측하지 말고 ask_user 도구로 한 번 되물으십시오. 전체 조회나 합리적인 "
@@ -81,30 +89,59 @@ def system_prompt(contract: dict, pruned: dict, today: datetime.date | None = No
     )
 
 
-def run_question(contract: dict, question: str, model, top_k: int = 3,
-                 today: datetime.date | None = None, selector: str = "llm") -> dict:
+def run_question(
+    contract: dict,
+    question: str,
+    model,
+    top_k: int = 3,
+    today: datetime.date | None = None,
+    selector: str = "llm",
+) -> dict:
     """질문 하나를 처리한다. 상태는 이 호출 안에서만 산다.
 
     selector: "llm" = 테이블 추론 → 지표 후보 조회 → 지표 선택 (TO-BE)
               "tfidf" = 테이블·지표 전체를 TF-IDF 로 검색 (기준선)
     돌려주는 것: {sql, error, attempts, ast, clarification, tables, metrics, steps, total_tokens}
     """
-    outcome = {"sql": None, "error": None, "attempts": 0, "ast": None, "clarification": None,
-               "tables": [], "metrics": [], "steps": [], "total_tokens": 0}
+    outcome = {
+        "sql": None,
+        "error": None,
+        "attempts": 0,
+        "ast": None,
+        "clarification": None,
+        "tables": [],
+        "metrics": [],
+        "steps": [],
+        "total_tokens": 0,
+    }
+    # 지표 선택 소스 시작 파이썬 3항연산자 눈에 잘 안들어온다
     try:
-        selection = llm_select(model, contract, question) if selector == "llm" else tfidf_select(contract, question, top_k)
+        # selection = llm_select(model, contract, question) if selector == "llm" else tfidf_select(contract, question, top_k)
+        if selector == "llm":
+            selection = llm_select(model, contract, question)
+        else:
+            selection = tfidf_select(contract, question, top_k)
     except ValueError as error:
         outcome["error"] = str(error)
         return outcome
-    outcome.update(tables=selection.tables, metrics=selection.metrics, steps=[s.as_dict() for s in selection.steps])
+    outcome.update(
+        tables=selection.tables,
+        metrics=selection.metrics,
+        steps=[s.as_dict() for s in selection.steps],
+    )
+    # 지표 선택 소스 끝
     if selection.clarification:
         outcome["clarification"] = selection.clarification
         return _with_tokens(outcome)
 
     record: dict = {}
     chosen = selection.metrics if selector == "llm" else []
-    tools = [make_compile_tool(Compiler(contract), question, record, expected_metrics=chosen),
-             make_clarify_tool(question)]
+    tools = [
+        make_compile_tool(
+            Compiler(contract), question, record, expected_metrics=chosen
+        ),
+        make_clarify_tool(question),
+    ]
     graph = build_graph(model, tools)
 
     started = time.monotonic()
@@ -113,7 +150,11 @@ def run_question(contract: dict, question: str, model, top_k: int = 3,
         {"messages": [SystemMessage(prompt), HumanMessage(question)]},
         {"recursion_limit": MAX_ATTEMPTS * 2 + 3},
     )
-    sql_step = Step("sql", model=model_name(model), elapsed_ms=int((time.monotonic() - started) * 1000))
+    sql_step = Step(
+        "sql",
+        model=model_name(model),
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
     for m in result["messages"]:
         if isinstance(m, AIMessage):
             p, c = usage_of(m)
@@ -121,26 +162,38 @@ def run_question(contract: dict, question: str, model, top_k: int = 3,
             sql_step.completion_tokens += c
 
     tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
-    compiles = [m for m in tool_messages if not str(m.content).startswith(CLARIFY_PREFIX)]
+    compiles = [
+        m for m in tool_messages if not str(m.content).startswith(CLARIFY_PREFIX)
+    ]
     outcome["attempts"] = len(compiles)
 
     success = [m for m in compiles if str(m.content).startswith("SQL:")]
     clarify = [m for m in tool_messages if str(m.content).startswith(CLARIFY_PREFIX)]
     if success:
-        outcome["sql"] = str(success[-1].content)[len("SQL:"):].strip()
+        outcome["sql"] = str(success[-1].content)[len("SQL:") :].strip()
         outcome["ast"] = record.get("ast")
-        sql_step.selected = [json.dumps(outcome["ast"], ensure_ascii=False)] if outcome["ast"] else []
+        sql_step.selected = (
+            [json.dumps(outcome["ast"], ensure_ascii=False)] if outcome["ast"] else []
+        )
         sql_step.reason = f"{outcome['attempts']}번째 시도에서 컴파일 성공"
     elif clarify:
-        outcome["clarification"] = str(clarify[-1].content)[len(CLARIFY_PREFIX):].strip()
+        outcome["clarification"] = str(clarify[-1].content)[
+            len(CLARIFY_PREFIX) :
+        ].strip()
         sql_step.reason = "모델이 되물음"
     else:
-        outcome["error"] = str(compiles[-1].content) if compiles else "모델이 조회를 시도하지 않았습니다"
+        outcome["error"] = (
+            str(compiles[-1].content)
+            if compiles
+            else "모델이 조회를 시도하지 않았습니다"
+        )
         sql_step.reason = outcome["error"]
     outcome["steps"].append(sql_step.as_dict())
     return _with_tokens(outcome)
 
 
 def _with_tokens(outcome: dict) -> dict:
-    outcome["total_tokens"] = sum(s["prompt_tokens"] + s["completion_tokens"] for s in outcome["steps"])
+    outcome["total_tokens"] = sum(
+        s["prompt_tokens"] + s["completion_tokens"] for s in outcome["steps"]
+    )
     return outcome

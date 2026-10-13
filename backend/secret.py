@@ -4,6 +4,7 @@
     python -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
 키를 잃으면 저장된 비밀번호를 풀 수 없다 — 시스템마다 비밀번호를 다시 입력해야 한다.
 """
+
 import base64
 import os
 
@@ -15,13 +16,17 @@ NONCE = 12
 def _key() -> bytes:
     raw = os.environ.get("NL2SQL_SECRET_KEY", "").strip()
     if not raw:
-        raise RuntimeError("NL2SQL_SECRET_KEY 가 없습니다 (backend/.env). 만드는 법은 secret.py 맨 위 주석")
+        raise RuntimeError(
+            "NL2SQL_SECRET_KEY 가 없습니다 (backend/.env). 만드는 법은 secret.py 맨 위 주석"
+        )
     try:
         key = base64.b64decode(raw, validate=True)
     except ValueError:
         raise RuntimeError("NL2SQL_SECRET_KEY 는 base64 여야 합니다") from None
     if len(key) != 32:
-        raise RuntimeError(f"NL2SQL_SECRET_KEY 는 32바이트여야 합니다 (받은 것: {len(key)}바이트)")
+        raise RuntimeError(
+            f"NL2SQL_SECRET_KEY 는 32바이트여야 합니다 (받은 것: {len(key)}바이트)"
+        )
     return key
 
 

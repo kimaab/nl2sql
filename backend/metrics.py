@@ -4,20 +4,37 @@ from uuid import UUID, uuid4
 
 import db
 from compiler import (
-    FILTER_SOURCES, Compiler, build_scope, compile_formula, is_numeric_type, parse_temporal, resolve_ref,
-    resolve_relative, temporal_kind,
+    FILTER_SOURCES,
+    Compiler,
+    build_scope,
+    compile_formula,
+    is_numeric_type,
+    parse_temporal,
+    resolve_ref,
+    resolve_relative,
+    temporal_kind,
 )
-from contract import broken_reasons, load_contract, load_metric_rows, load_tables, metric_entry, metric_tables
+from contract import (
+    broken_reasons,
+    load_contract,
+    load_metric_rows,
+    load_tables,
+    metric_entry,
+    metric_tables,
+)
 from models import ApiException, Metric, MetricHistoryEntry, MetricInput, MetricKind
 
 log = logging.getLogger("nl2sql.metrics")
 
 
 def list_metrics(system_id: UUID) -> list[Metric]:
-    rows = db.query("""
+    rows = db.query(
+        """
         SELECT m.*, t.name AS table_name FROM metric m JOIN meta_table t ON t.id = m.base_table_id
          WHERE m.system_id = %s ORDER BY m.created_at DESC
-    """, str(system_id))
+    """,
+        str(system_id),
+    )
     return [_row_to_metric(r) for r in rows]
 
 
@@ -26,16 +43,22 @@ def get_metric(system_id: UUID, metric_id: UUID) -> Metric:
 
 
 def _get_row(system_id: UUID, metric_id: UUID) -> dict:
-    row = db.one("""
+    row = db.one(
+        """
         SELECT m.*, t.name AS table_name FROM metric m JOIN meta_table t ON t.id = m.base_table_id
          WHERE m.id = %s AND m.system_id = %s
-    """, str(metric_id), str(system_id))
+    """,
+        str(metric_id),
+        str(system_id),
+    )
     if row is None:
         raise ApiException(404, "지표를 찾을 수 없습니다")
     return row
 
 
-def create_metric(system_id: UUID, data: MetricInput, actor: str | None = None) -> Metric:
+def create_metric(
+    system_id: UUID, data: MetricInput, actor: str | None = None
+) -> Metric:
     """지표 생성. 가리키는 테이블·컬럼이 저장된 스키마에 실제로 있는지 여기서 확인한다."""
     _guard_duplicate_name(system_id, data.name)
     table_name = _validate(system_id, data)
@@ -44,35 +67,57 @@ def create_metric(system_id: UUID, data: MetricInput, actor: str | None = None) 
     metric_id = uuid4()
     with db.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO metric (id, system_id, name, description, kind, base_table_id, joins, agg_field,
                                     agg_function, select_columns, expression, series, measures, fixed_filters, synonyms)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (str(metric_id), str(system_id), *_values(data, tables[table_name]["id"])))
+            """,
+                (
+                    str(metric_id),
+                    str(system_id),
+                    *_values(data, tables[table_name]["id"]),
+                ),
+            )
             _record_history(cur, system_id, metric_id, 1, "create", actor)
     _after_save(system_id, metric_id)
     log.info("metric created: %s (%s, kind=%s)", metric_id, data.name, data.kind.value)
     return get_metric(system_id, metric_id)
 
 
-def update_metric(system_id: UUID, metric_id: UUID, data: MetricInput, actor: str | None = None) -> Metric:
+def update_metric(
+    system_id: UUID, metric_id: UUID, data: MetricInput, actor: str | None = None
+) -> Metric:
     """지표 수정. 버전을 올리고 이전 정의는 이력에 남는다."""
     current = _get_row(system_id, metric_id)
     _guard_duplicate_name(system_id, data.name, except_id=metric_id)
-    if current["name"].lower() != data.name.lower() or data.kind is not MetricKind.AGGREGATE:
-        _guard_not_referenced(system_id, current["name"], "이름을 바꾸거나 집계형이 아니게 바꿀")
+    if (
+        current["name"].lower() != data.name.lower()
+        or data.kind is not MetricKind.AGGREGATE
+    ):
+        _guard_not_referenced(
+            system_id, current["name"], "이름을 바꾸거나 집계형이 아니게 바꿀"
+        )
     table_name = _validate(system_id, data)
     tables = load_tables(system_id)
 
     version = current["version"] + 1
     with db.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE metric SET name = %s, description = %s, kind = %s, base_table_id = %s, joins = %s,
                        agg_field = %s, agg_function = %s, select_columns = %s, expression = %s, series = %s,
                        measures = %s, fixed_filters = %s, synonyms = %s, version = %s, updated_at = now()
                  WHERE id = %s AND system_id = %s
-            """, (*_values(data, tables[table_name]["id"]), version, str(metric_id), str(system_id)))
+            """,
+                (
+                    *_values(data, tables[table_name]["id"]),
+                    version,
+                    str(metric_id),
+                    str(system_id),
+                ),
+            )
             _record_history(cur, system_id, metric_id, version, "update", actor)
     _after_save(system_id, metric_id)
     log.info("metric updated: %s (%s, v%d)", metric_id, data.name, version)
@@ -81,29 +126,48 @@ def update_metric(system_id: UUID, metric_id: UUID, data: MetricInput, actor: st
 
 def delete_metric(system_id: UUID, metric_id: UUID, actor: str | None = None) -> None:
     """지표 삭제. 마지막 정의는 이력에 남는다."""
-    row = db.one("SELECT name, version FROM metric WHERE id = %s AND system_id = %s", str(metric_id), str(system_id))
+    row = db.one(
+        "SELECT name, version FROM metric WHERE id = %s AND system_id = %s",
+        str(metric_id),
+        str(system_id),
+    )
     if row is None:
         return
     _guard_not_referenced(system_id, row["name"], "지울")
     with db.connection() as conn:
         with conn.cursor() as cur:
             _record_history(cur, system_id, metric_id, row["version"], "delete", actor)
-            cur.execute("DELETE FROM metric WHERE id = %s AND system_id = %s", (str(metric_id), str(system_id)))
+            cur.execute(
+                "DELETE FROM metric WHERE id = %s AND system_id = %s",
+                (str(metric_id), str(system_id)),
+            )
     log.info("metric deleted: %s", metric_id)
 
 
 def list_metric_history(system_id: UUID, metric_id: UUID) -> list[MetricHistoryEntry]:
-    rows = db.query("""
+    rows = db.query(
+        """
         SELECT version, action, snapshot, created_at FROM metric_history
          WHERE system_id = %s AND metric_id = %s ORDER BY id DESC
-    """, str(system_id), str(metric_id))
+    """,
+        str(system_id),
+        str(metric_id),
+    )
     if not rows:
         raise ApiException(404, "지표 이력을 찾을 수 없습니다")
-    return [MetricHistoryEntry(version=r["version"], action=r["action"], snapshot=r["snapshot"],
-                               created_at=r["created_at"].isoformat()) for r in rows]
+    return [
+        MetricHistoryEntry(
+            version=r["version"],
+            action=r["action"],
+            snapshot=r["snapshot"],
+            created_at=r["created_at"].isoformat(),
+        )
+        for r in rows
+    ]
 
 
 # ── 저장 뒤처리: 테이블 연결 · 상태 ─────────────────────────────────────────
+
 
 def _after_save(system_id: UUID, metric_id: UUID) -> None:
     rebuild_metric_tables(system_id, metric_id)
@@ -118,14 +182,24 @@ def rebuild_metric_tables(system_id: UUID, metric_id: UUID) -> None:
     if target is None:
         return
     tables = load_tables(system_id)
-    links = [(tables[n]["id"], role) for n, role in metric_tables(target, by_name) if n in tables]
+    links = [
+        (tables[n]["id"], role)
+        for n, role in metric_tables(target, by_name)
+        if n in tables
+    ]
     with db.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM metric_table WHERE metric_id = %s AND origin = 'definition'", (str(metric_id),))
-            cur.executemany("""
+            cur.execute(
+                "DELETE FROM metric_table WHERE metric_id = %s AND origin = 'definition'",
+                (str(metric_id),),
+            )
+            cur.executemany(
+                """
                 INSERT INTO metric_table (metric_id, table_id, role, origin) VALUES (%s, %s, %s, 'definition')
                 ON CONFLICT (metric_id, table_id) DO NOTHING
-            """, [(str(metric_id), tid, role) for tid, role in links])
+            """,
+                [(str(metric_id), tid, role) for tid, role in links],
+            )
 
 
 def refresh_statuses(system_id: UUID) -> list[dict]:
@@ -146,12 +220,18 @@ def refresh_statuses(system_id: UUID) -> list[dict]:
     if updates:
         with db.connection() as conn:
             with conn.cursor() as cur:
-                cur.executemany("UPDATE metric SET status = %s, broken_reason = %s WHERE id = %s", updates)
+                cur.executemany(
+                    "UPDATE metric SET status = %s, broken_reason = %s WHERE id = %s",
+                    updates,
+                )
     return [{"name": k, "reason": v} for k, v in sorted(broken.items())]
 
 
-def _record_history(cur, system_id: UUID, metric_id: UUID, version: int, action: str, actor: str | None) -> None:
-    cur.execute("""
+def _record_history(
+    cur, system_id: UUID, metric_id: UUID, version: int, action: str, actor: str | None
+) -> None:
+    cur.execute(
+        """
         INSERT INTO metric_history (system_id, metric_id, version, action, actor, snapshot)
         SELECT m.system_id, m.id, %s, %s, %s,
                jsonb_build_object('name', m.name, 'description', m.description, 'kind', m.kind,
@@ -161,7 +241,9 @@ def _record_history(cur, system_id: UUID, metric_id: UUID, version: int, action:
                                   'series', m.series, 'measures', m.measures, 'synonyms', m.synonyms)
           FROM metric m JOIN meta_table t ON t.id = m.base_table_id
          WHERE m.id = %s AND m.system_id = %s
-    """, (version, action, actor, str(metric_id), str(system_id)))
+    """,
+        (version, action, actor, str(metric_id), str(system_id)),
+    )
 
 
 def _values(data: MetricInput, base_table_id: str) -> tuple:
@@ -182,10 +264,14 @@ def _values(data: MetricInput, base_table_id: str) -> tuple:
     )
 
 
-def _guard_duplicate_name(system_id: UUID, name: str, except_id: UUID | None = None) -> None:
+def _guard_duplicate_name(
+    system_id: UUID, name: str, except_id: UUID | None = None
+) -> None:
     existing = db.one(
         "SELECT id FROM metric WHERE system_id = %s AND lower(name) = lower(%s) AND id <> %s",
-        str(system_id), name, str(except_id or uuid4()),
+        str(system_id),
+        name,
+        str(except_id or uuid4()),
     )
     if existing:
         raise ApiException(409, f"'{name}' 이름의 지표가 이미 있습니다")
@@ -194,7 +280,10 @@ def _guard_duplicate_name(system_id: UUID, name: str, except_id: UUID | None = N
 def _guard_not_referenced(system_id: UUID, name: str, what: str) -> None:
     """파생 지표가 쓰는 지표를 지우거나 바꾸면 그 파생 지표가 조용히 깨진다."""
     users = []
-    for r in db.query("SELECT name, expression FROM metric WHERE system_id = %s AND kind = 'derived'", str(system_id)):
+    for r in db.query(
+        "SELECT name, expression FROM metric WHERE system_id = %s AND kind = 'derived'",
+        str(system_id),
+    ):
         try:
             _, refs = compile_formula(r["expression"], lambda n: "x")
         except ValueError:
@@ -203,7 +292,8 @@ def _guard_not_referenced(system_id: UUID, name: str, what: str) -> None:
             users.append(r["name"])
     if users:
         raise ApiException(
-            400, f"파생 지표 {', '.join(users)}이(가) '{name}'을(를) 쓰고 있어 {what} 수 없습니다. 파생 지표를 먼저 고치십시오"
+            400,
+            f"파생 지표 {', '.join(users)}이(가) '{name}'을(를) 쓰고 있어 {what} 수 없습니다. 파생 지표를 먼저 고치십시오",
         )
 
 
@@ -213,18 +303,31 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
     if not tables:
         raise ApiException(400, "스키마가 비어 있습니다. 동기화를 먼저 실행하십시오")
     columns = {name: [c["name"] for c in t["columns"]] for name, t in tables.items()}
-    types = {(t["name"], c["name"]): c["type"] for t in tables.values() for c in t["columns"]}
-    driver = db.one("SELECT driver FROM meta_system WHERE id = %s", str(system_id))["driver"]
+    types = {
+        (t["name"], c["name"]): c["type"] for t in tables.values() for c in t["columns"]
+    }
+    driver = db.one("SELECT driver FROM meta_system WHERE id = %s", str(system_id))[
+        "driver"
+    ]
 
     try:
-        scope, _ = build_scope(data.table_name, [j.model_dump() for j in data.joins], columns)
+        scope, _ = build_scope(
+            data.table_name, [j.model_dump() for j in data.joins], columns
+        )
     except ValueError as error:
-        raise ApiException(400, str(error).replace("조회할 수 없는 테이블입니다", "테이블을 찾을 수 없습니다")) from None
+        raise ApiException(
+            400,
+            str(error).replace(
+                "조회할 수 없는 테이블입니다", "테이블을 찾을 수 없습니다"
+            ),
+        ) from None
     base = next(iter(scope))
 
     def require(ref, what: str) -> tuple[str, str]:
         try:
-            return resolve_ref(str(ref or ""), scope, base, f"{what} 컬럼을 찾을 수 없습니다")
+            return resolve_ref(
+                str(ref or ""), scope, base, f"{what} 컬럼을 찾을 수 없습니다"
+            )
         except ValueError as error:
             raise ApiException(400, str(error)) from None
 
@@ -249,13 +352,19 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
         source = str(filter_spec.get("source") or "literal").lower()
         if source not in FILTER_SOURCES:
             raise ApiException(
-                400, f"알 수 없는 필터 출처입니다: {source} (사용 가능: {', '.join(FILTER_SOURCES)})")
+                400,
+                f"알 수 없는 필터 출처입니다: {source} (사용 가능: {', '.join(FILTER_SOURCES)})",
+            )
         kind = temporal_kind(types.get((table, column), ""), driver)
         operator = filter_spec.get("operator")
         if operator in ("is_null", "is_not_null"):
             continue
-        if operator in ("contains", "starts_with", "ends_with") and (kind or is_numeric_type(types.get((table, column), ""))):
-            raise ApiException(400, f"{where} 는 문자 컬럼이 아니라 {operator!r} 를 쓸 수 없습니다")
+        if operator in ("contains", "starts_with", "ends_with") and (
+            kind or is_numeric_type(types.get((table, column), ""))
+        ):
+            raise ApiException(
+                400, f"{where} 는 문자 컬럼이 아니라 {operator!r} 를 쓸 수 없습니다"
+            )
 
         # 값이 질문에서 오므로 여기서 검사할 값이 없다.
         if source == "question":
@@ -264,7 +373,8 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
         if source == "relative":
             if not kind:
                 raise ApiException(
-                    400, f"{where} 는 날짜 컬럼이 아니라 상대 기간을 쓸 수 없습니다")
+                    400, f"{where} 는 날짜 컬럼이 아니라 상대 기간을 쓸 수 없습니다"
+                )
             try:
                 resolve_relative(filter_spec.get("value"), where)
             except ValueError as error:
@@ -279,7 +389,11 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
             value_kind, _ = parse_temporal(filter_spec.get("value"), where)
         except ValueError as error:
             raise ApiException(400, str(error)) from None
-        if kind == "datetime" and value_kind == "date" and operator in ("equals", "not_equals"):
+        if (
+            kind == "datetime"
+            and value_kind == "date"
+            and operator in ("equals", "not_equals")
+        ):
             raise ApiException(
                 400,
                 f"{where} 는 시각을 포함하는 컬럼이라 {operator!r} 로는 하루를 고를 수 없습니다 "
@@ -291,28 +405,49 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
     return base
 
 
-def _validate_series(data: MetricInput, scope: dict, base: str, types: dict, driver: str) -> None:
+def _validate_series(
+    data: MetricInput, scope: dict, base: str, types: dict, driver: str
+) -> None:
     """시계열 집계: 값·구분·순서 컬럼은 모두 기본 테이블에 있어야 한다 (LAG 서브쿼리가 기본 테이블만 감싼다)."""
     only_base = {base: scope[base]}
-    labels = (("집계", data.agg_field), ("구분", data.series.partition_by), ("순서", data.series.order_by))
+    labels = (
+        ("집계", data.agg_field),
+        ("구분", data.series.partition_by),
+        ("순서", data.series.order_by),
+    )
     resolved = {}
     for what, ref in labels:
         if ref == "*":
             raise ApiException(400, f"{data.agg_function} 는 * 대신 컬럼이 필요합니다")
         try:
-            resolved[what] = resolve_ref(str(ref or ""), only_base, base, f"{what} 컬럼을 기본 테이블 {base} 에서 찾을 수 없습니다")
+            resolved[what] = resolve_ref(
+                str(ref or ""),
+                only_base,
+                base,
+                f"{what} 컬럼을 기본 테이블 {base} 에서 찾을 수 없습니다",
+            )
         except ValueError as error:
             raise ApiException(400, str(error)) from None
     value_type = types.get(resolved["집계"], "")
     if data.agg_function == "DELTA_SUM" and not is_numeric_type(value_type):
-        raise ApiException(400, f"DELTA_SUM 은 숫자 컬럼에만 씁니다 -> {base}.{resolved['집계'][1]} ({value_type})")
+        raise ApiException(
+            400,
+            f"DELTA_SUM 은 숫자 컬럼에만 씁니다 -> {base}.{resolved['집계'][1]} ({value_type})",
+        )
     if data.agg_function == "CHANGE_COUNT" and is_numeric_type(value_type):
         try:
             float(data.series.baseline)
         except ValueError:
-            raise ApiException(400, f"정상값은 숫자여야 합니다 -> {data.series.baseline!r}") from None
-    if not temporal_kind(types.get(resolved["순서"], ""), driver) and not is_numeric_type(types.get(resolved["순서"], "")):
-        raise ApiException(400, f"순서 컬럼은 날짜·시각이나 숫자 컬럼이어야 합니다 -> {base}.{resolved['순서'][1]}")
+            raise ApiException(
+                400, f"정상값은 숫자여야 합니다 -> {data.series.baseline!r}"
+            ) from None
+    if not temporal_kind(
+        types.get(resolved["순서"], ""), driver
+    ) and not is_numeric_type(types.get(resolved["순서"], "")):
+        raise ApiException(
+            400,
+            f"순서 컬럼은 날짜·시각이나 숫자 컬럼이어야 합니다 -> {base}.{resolved['순서'][1]}",
+        )
 
 
 def _validate_formula(system_id: UUID, data: MetricInput, scope: dict) -> None:
@@ -323,13 +458,22 @@ def _validate_formula(system_id: UUID, data: MetricInput, scope: dict) -> None:
         if comp is None:
             raise ValueError(f"수식의 지표 [{name}] 이(가) 없습니다")
         if comp["kind"] != "aggregate":
-            raise ValueError(f"수식에는 집계형 지표만 쓸 수 있습니다 -> [{name}] 은(는) {comp['kind']}")
+            raise ValueError(
+                f"수식에는 집계형 지표만 쓸 수 있습니다 -> [{name}] 은(는) {comp['kind']}"
+            )
         if len(comp.get("measures") or []) > 1:
             raise ValueError(f"[{name}] 은(는) 측정값이 여럿이라 수식에 쓸 수 없습니다")
         if comp["table_name"] not in scope:
-            raise ValueError(f"[{name}] 의 테이블 {comp['table_name']} 이(가) 이 지표의 범위({', '.join(scope)})에 없습니다")
-        if any(str(f.get("source") or "literal") == "question" for f in comp["fixed_filters"] or []):
-            raise ValueError(f"[{name}] 은(는) 질문에서 값을 받는 필터가 있어 수식에 쓸 수 없습니다")
+            raise ValueError(
+                f"[{name}] 의 테이블 {comp['table_name']} 이(가) 이 지표의 범위({', '.join(scope)})에 없습니다"
+            )
+        if any(
+            str(f.get("source") or "literal") == "question"
+            for f in comp["fixed_filters"] or []
+        ):
+            raise ValueError(
+                f"[{name}] 은(는) 질문에서 값을 받는 필터가 있어 수식에 쓸 수 없습니다"
+            )
         return "x"
 
     try:
@@ -341,16 +485,30 @@ def _validate_formula(system_id: UUID, data: MetricInput, scope: dict) -> None:
 def _draft_compiler(system_id: UUID, data: MetricInput, base: str) -> Compiler:
     """저장 전의 정의를 계약서에 끼운 컴파일러. 질문 없이 정의만 컴파일하므로 질문에서 값을 받는 필터는 뺀다."""
     contract = load_contract(system_id)
-    filters = [f for f in data.fixed_filters if str(f.get("source") or "literal").lower() != "question"]
-    draft = metric_entry({
-        "name": data.name, "description": data.description, "kind": data.kind.value, "table_name": base,
-        "joins": [j.model_dump() for j in data.joins], "select_columns": data.select_columns,
-        "expression": data.expression, "agg_field": data.agg_field, "agg_function": data.agg_function,
-        "fixed_filters": filters,
-        "series": data.series.model_dump() if data.series else None,
-        "measures": [ms.model_dump() for ms in data.measures],
-    })
-    contract["metrics"] = [m for m in contract["metrics"] if m["name"].lower() != data.name.lower()] + [draft]
+    filters = [
+        f
+        for f in data.fixed_filters
+        if str(f.get("source") or "literal").lower() != "question"
+    ]
+    draft = metric_entry(
+        {
+            "name": data.name,
+            "description": data.description,
+            "kind": data.kind.value,
+            "table_name": base,
+            "joins": [j.model_dump() for j in data.joins],
+            "select_columns": data.select_columns,
+            "expression": data.expression,
+            "agg_field": data.agg_field,
+            "agg_function": data.agg_function,
+            "fixed_filters": filters,
+            "series": data.series.model_dump() if data.series else None,
+            "measures": [ms.model_dump() for ms in data.measures],
+        }
+    )
+    contract["metrics"] = [
+        m for m in contract["metrics"] if m["name"].lower() != data.name.lower()
+    ] + [draft]
     return Compiler(contract)
 
 

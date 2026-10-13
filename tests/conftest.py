@@ -12,12 +12,15 @@ sys.path.insert(0, str(ROOT / "collect" / "budongsan"))
 @pytest.fixture
 def contract() -> dict:
     """샘플 쇼핑몰 계약서 (eval/ 의 평가셋과 같은 것)."""
-    return json.loads((ROOT / "eval" / "shoppingmall_contract.json").read_text(encoding="utf-8"))
+    return json.loads(
+        (ROOT / "eval" / "shoppingmall_contract.json").read_text(encoding="utf-8")
+    )
 
 
 @pytest.fixture
 def compiler(contract):
     from compiler import Compiler
+
     return Compiler(contract)
 
 
@@ -28,4 +31,5 @@ def compiler_for(contract):
 
     def make(driver: str):
         return Compiler({**contract, "driver": driver})
+
     return make

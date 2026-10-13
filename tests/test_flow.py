@@ -23,10 +23,14 @@ def test_eval_cases_compile_to_expected_sql(contract):
 
 
 def test_normalize_sql_keeps_literals():
-    assert normalize_sql("SELECT  a\n FROM t WHERE x = 'a  b'") == "SELECT a FROM t WHERE x = 'a  b'"
+    assert (
+        normalize_sql("SELECT  a\n FROM t WHERE x = 'a  b'")
+        == "SELECT a FROM t WHERE x = 'a  b'"
+    )
 
 
 # ------------------------------------------------------------------ 프루닝 (A-04 동의어·코드값, A-02 예시)
+
 
 def test_pruner_finds_table_by_code_meaning_in_column_comment(contract):
     pruned = Pruner(contract).prune("VIP 고객명 알려줘", top_k=2)
@@ -45,11 +49,12 @@ def test_prompt_has_metadata_and_today(contract):
     prompt = system_prompt(contract, pruned, datetime.date(2026, 10, 6))
     assert "[예시]" not in prompt
     metadata = prompt.split("[허용된 메타데이터]\n", 1)[1].split("\n\n[조회 명세", 1)[0]
-    assert "\"매출\"" in metadata and "examples" not in metadata
+    assert '"매출"' in metadata and "examples" not in metadata
     assert "2026-10-06 (화요일)" in prompt
 
 
 # ------------------------------------------------------------------ 에이전트 흐름 (A-05 되묻기)
+
 
 class ScriptedModel:
     """정해진 도구 호출을 차례로 내는 가짜 모델."""
@@ -64,14 +69,19 @@ class ScriptedModel:
     def invoke(self, messages):
         self.seen.append(messages)
         name, args = self.calls.pop(0)
-        return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": f"c{len(self.seen)}"}])
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": name, "args": args, "id": f"c{len(self.seen)}"}],
+        )
 
 
 def test_retry_then_success_records_ast(contract):
-    model = ScriptedModel([
-        ("compile_sql", {"ast": json.dumps({"metric": "없는지표"})}),
-        ("compile_sql", {"ast": json.dumps({"metric": "주문수"})}),
-    ])
+    model = ScriptedModel(
+        [
+            ("compile_sql", {"ast": json.dumps({"metric": "없는지표"})}),
+            ("compile_sql", {"ast": json.dumps({"metric": "주문수"})}),
+        ]
+    )
     out = run_question(contract, "주문 수", model, selector="tfidf")
     assert out["sql"] == 'SELECT COUNT(*) AS "주문수" FROM "TB_ORDER";'
     assert out["attempts"] == 2 and out["ast"] == {"metric": "주문수"}
@@ -82,21 +92,38 @@ def test_retry_then_success_records_ast(contract):
 def test_clarification_ends_without_sql(contract):
     model = ScriptedModel([("ask_user", {"message": "어느 회원의 주문상세인가요?"})])
     out = run_question(contract, "주문상세 보여줘", model, selector="tfidf")
-    assert (out["sql"], out["error"], out["attempts"], out["ast"]) == (None, None, 0, None)
+    assert (out["sql"], out["error"], out["attempts"], out["ast"]) == (
+        None,
+        None,
+        0,
+        None,
+    )
     assert out["clarification"] == "어느 회원의 주문상세인가요?"
 
 
 def test_max_attempts_returns_last_error(contract):
-    model = ScriptedModel([("compile_sql", {"ast": json.dumps({"metric": f"x{i}"})}) for i in range(4)])
+    model = ScriptedModel(
+        [("compile_sql", {"ast": json.dumps({"metric": f"x{i}"})}) for i in range(4)]
+    )
     out = run_question(contract, "?", model, selector="tfidf")
     assert out["sql"] is None and out["attempts"] == 4 and "'x3'" in out["error"]
 
 
 # ------------------------------------------------------------------ 깨진 지표 (T-02)
 
+
 def _row(name, kind="aggregate", **kw):
-    base = {"name": name, "kind": kind, "table_name": "TB_ORDER", "joins": [], "select_columns": [],
-            "agg_field": "*", "agg_function": "COUNT", "expression": None, "fixed_filters": []}
+    base = {
+        "name": name,
+        "kind": kind,
+        "table_name": "TB_ORDER",
+        "joins": [],
+        "select_columns": [],
+        "agg_field": "*",
+        "agg_function": "COUNT",
+        "expression": None,
+        "fixed_filters": [],
+    }
     return {**base, **kw}
 
 
@@ -108,9 +135,19 @@ def test_broken_projection_join_and_derived_cascade(contract):
     tables = _tables(contract)
     rows = [
         _row("ok"),
-        _row("join_ok", "projection", joins=[{"table": "TB_ORDER_ITEM", "on": [
-            {"left": "TB_ORDER.ORDER_ID", "right": "TB_ORDER_ITEM.ORDER_ID"}]}],
-            select_columns=["TB_ORDER.ORDER_ID", "TB_ORDER_ITEM.QTY"]),
+        _row(
+            "join_ok",
+            "projection",
+            joins=[
+                {
+                    "table": "TB_ORDER_ITEM",
+                    "on": [
+                        {"left": "TB_ORDER.ORDER_ID", "right": "TB_ORDER_ITEM.ORDER_ID"}
+                    ],
+                }
+            ],
+            select_columns=["TB_ORDER.ORDER_ID", "TB_ORDER_ITEM.QTY"],
+        ),
         _row("join_bad", "projection", select_columns=["TB_ORDER_ITEM.QTY"]),
         _row("gone", agg_field="NOPE", agg_function="SUM"),
         _row("ratio_bad", "derived", expression="[ok] / [gone]"),
@@ -125,13 +162,27 @@ def test_broken_projection_join_and_derived_cascade(contract):
 def test_join_metric_with_dropped_join_table_is_broken(contract):
     tables = _tables(contract)
     del tables["TB_ORDER_ITEM"]
-    rows = [_row("j", "projection", joins=[{"table": "TB_ORDER_ITEM", "on": [
-        {"left": "TB_ORDER.ORDER_ID", "right": "TB_ORDER_ITEM.ORDER_ID"}]}], select_columns=["ORDER_ID"])]
+    rows = [
+        _row(
+            "j",
+            "projection",
+            joins=[
+                {
+                    "table": "TB_ORDER_ITEM",
+                    "on": [
+                        {"left": "TB_ORDER.ORDER_ID", "right": "TB_ORDER_ITEM.ORDER_ID"}
+                    ],
+                }
+            ],
+            select_columns=["ORDER_ID"],
+        )
+    ]
     assert "조인할 수 없는 테이블" in broken_reasons(rows, tables)["j"]
 
 
 def test_loose_sql_ignores_alias_names_only():
     from evaluate import loose_sql
+
     a = 'SELECT "M", COUNT(*) AS "count_*" FROM "T" GROUP BY "M" ORDER BY "count_*" DESC;'
     b = 'SELECT "M", COUNT(*) AS "member_count" FROM "T" GROUP BY "M" ORDER BY "member_count" DESC;'
     c = 'SELECT "M", SUM("X") AS "member_count" FROM "T" GROUP BY "M" ORDER BY "member_count" DESC;'

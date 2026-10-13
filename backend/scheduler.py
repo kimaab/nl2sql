@@ -28,7 +28,9 @@ class AutoSync:
         try:
             minutes = float(raw)
         except ValueError:
-            raise RuntimeError(f"AUTO_SYNC_MINUTES 는 숫자여야 합니다 (받은 값: {raw!r})") from None
+            raise RuntimeError(
+                f"AUTO_SYNC_MINUTES 는 숫자여야 합니다 (받은 값: {raw!r})"
+            ) from None
         return cls(sync, minutes)
 
     @property
@@ -38,7 +40,9 @@ class AutoSync:
     def start(self) -> None:
         if not self.enabled:
             return
-        self._thread = threading.Thread(target=self._loop, name="auto-sync", daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, name="auto-sync", daemon=True
+        )
         self._thread.start()
         log.info("자동 동기화 시작: %.0f분마다", self._interval / 60)
 
@@ -48,7 +52,9 @@ class AutoSync:
             self._thread.join(timeout=5)
 
     def run_once(self) -> None:
-        for row in db.query("SELECT id, name FROM meta_system WHERE synced_at IS NOT NULL ORDER BY name"):
+        for row in db.query(
+            "SELECT id, name FROM meta_system WHERE synced_at IS NOT NULL ORDER BY name"
+        ):
             if self._stop.is_set():
                 return
             try:

@@ -5,6 +5,7 @@ TO-BE (llm): 테이블 추론(LLM) → 지표 후보 조회(테이블에 연결�
 
 두 방식 모두 계약서(dict)만 보고 돈다 — DB 없이 평가셋으로 비교할 수 있게.
 """
+
 import json
 import logging
 import re
@@ -24,7 +25,8 @@ MAX_METRICS = 2
 @dataclass
 class Step:
     """ask_trace 한 행"""
-    stage: str                  # table | metric | sql
+
+    stage: str  # table | metric | sql
     candidates: list = field(default_factory=list)
     selected: list = field(default_factory=list)
     reason: str = ""
@@ -39,14 +41,15 @@ class Step:
 
 @dataclass
 class Selection:
-    tables: list            # 고른 테이블 이름
-    metrics: list           # 고른 지표 이름
-    pruned: dict            # 프롬프트에 실을 {tables, metrics, relations}
-    steps: list             # [Step]
+    tables: list  # 고른 테이블 이름
+    metrics: list  # 고른 지표 이름
+    pruned: dict  # 프롬프트에 실을 {tables, metrics, relations}
+    steps: list  # [Step]
     clarification: str | None = None
 
 
 # ── 공통 ──────────────────────────────────────────────────────────────────
+
 
 def usage_of(message) -> tuple[int, int]:
     """AIMessage 의 토큰 수 (vLLM·OpenAI 호환 응답 모두)"""
@@ -58,7 +61,11 @@ def usage_of(message) -> tuple[int, int]:
 
 
 def model_name(model) -> str:
-    return str(getattr(model, "model_name", None) or getattr(model, "model", None) or type(model).__name__)
+    return str(
+        getattr(model, "model_name", None)
+        or getattr(model, "model", None)
+        or type(model).__name__
+    )
 
 
 def parse_json(text: str) -> dict:
@@ -70,7 +77,7 @@ def parse_json(text: str) -> dict:
     start, end = body.find("{"), body.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("JSON 객체가 없습니다")
-    parsed = json.loads(body[start:end + 1])
+    parsed = json.loads(body[start : end + 1])
     if not isinstance(parsed, dict):
         raise ValueError("JSON 객체가 아닙니다")
     return parsed
@@ -87,10 +94,23 @@ def ask_json(model, system: str, user: str, step: Step, validate) -> dict:
     last_error = None
     for attempt in range(1, 3):
         if attempt == 1:
-            log.info("%s %s 요청 attempt=%d model=%s\n[system]\n%s\n[user]\n%s",
-                     LLM_LOG, stage, attempt, step.model, system, user)
+            log.info(
+                "%s %s 요청 attempt=%d model=%s\n[system]\n%s\n[user]\n%s",
+                LLM_LOG,
+                stage,
+                attempt,
+                step.model,
+                system,
+                user,
+            )
         else:
-            log.info("%s %s 재요청 attempt=%d\n[user]\n%s", LLM_LOG, stage, attempt, messages[-1].content)
+            log.info(
+                "%s %s 재요청 attempt=%d\n[user]\n%s",
+                LLM_LOG,
+                stage,
+                attempt,
+                messages[-1].content,
+            )
         started = time.monotonic()
         reply = model.invoke(messages)
         elapsed = int((time.monotonic() - started) * 1000)
@@ -98,15 +118,31 @@ def ask_json(model, system: str, user: str, step: Step, validate) -> dict:
         p, c = usage_of(reply)
         step.prompt_tokens += p
         step.completion_tokens += c
-        log.info("%s %s 응답 attempt=%d (토큰 %d+%d, %dms)\n%s", LLM_LOG, stage, attempt, p, c, elapsed, reply.content)
+        log.info(
+            "%s %s 응답 attempt=%d (토큰 %d+%d, %dms)\n%s",
+            LLM_LOG,
+            stage,
+            attempt,
+            p,
+            c,
+            elapsed,
+            reply.content,
+        )
         try:
             parsed = parse_json(reply.content)
             validate(parsed)
             return parsed
         except (ValueError, KeyError, TypeError) as error:
-            log.info("%s %s 응답 형식 오류 attempt=%d: %s", LLM_LOG, stage, attempt, error)
+            log.info(
+                "%s %s 응답 형식 오류 attempt=%d: %s", LLM_LOG, stage, attempt, error
+            )
             last_error = error
-            messages += [reply, HumanMessage(f"형식이 틀렸습니다: {error}. 설명 없이 JSON 객체 하나만 다시 답하십시오.")]
+            messages += [
+                reply,
+                HumanMessage(
+                    f"형식이 틀렸습니다: {error}. 설명 없이 JSON 객체 하나만 다시 답하십시오."
+                ),
+            ]
     raise ValueError(f"{step.stage} 단계 응답을 읽지 못했습니다: {last_error}")
 
 
@@ -124,11 +160,21 @@ def _pruned(contract: dict, table_names: list, metric_names: list) -> dict:
     by_metric = {m["name"]: m for m in contract["metrics"]}
     metrics = [by_metric[n] for n in metric_names if n in by_metric]
     names: list = []
-    for n in list(table_names) + [x for m in metrics for x in m.get("tables", [m["table"]])]:
+    for n in list(table_names) + [
+        x for m in metrics for x in m.get("tables", [m["table"]])
+    ]:
         if n in by_table and n not in names:
             names.append(n)
-    relations = [r for r in contract.get("relations", []) if r["left_table"] in names and r["right_table"] in names]
-    return {"tables": [prompt_table(by_table[n]) for n in names], "metrics": metrics, "relations": relations}
+    relations = [
+        r
+        for r in contract.get("relations", [])
+        if r["left_table"] in names and r["right_table"] in names
+    ]
+    return {
+        "tables": [prompt_table(by_table[n]) for n in names],
+        "metrics": metrics,
+        "relations": relations,
+    }
 
 
 def _match(names, allowed: list) -> list:
@@ -174,7 +220,9 @@ def table_line(t: dict) -> str:
 
 
 def metric_block(m: dict) -> str:
-    lines = [f"- {m['name']}: {' '.join(str(m.get('description') or '').split()) or '(설명 없음)'}"]
+    lines = [
+        f"- {m['name']}: {' '.join(str(m.get('description') or '').split()) or '(설명 없음)'}"
+    ]
     if m.get("synonyms"):
         lines.append(f"  같은 말: {', '.join(m['synonyms'])}")
     return "\n".join(lines)
@@ -184,10 +232,16 @@ def infer_tables(model, contract: dict, question: str) -> tuple[list, list, Step
     """→ (고른 테이블, [이유], Step)"""
     names = [t["name"] for t in contract["tables"]]
     step = Step("table", candidates=names, model=model_name(model))
-    system = TABLE_SYSTEM.format(name=contract.get("name", ""), domain=contract.get("domain") or "(설명 없음)",
-                                 max_tables=MAX_TABLES)
-    user = ("[테이블 목록]\n"
-            + "\n".join(table_line(t) for t in contract["tables"]) + f"\n\n[질문]\n{question}")
+    system = TABLE_SYSTEM.format(
+        name=contract.get("name", ""),
+        domain=contract.get("domain") or "(설명 없음)",
+        max_tables=MAX_TABLES,
+    )
+    user = (
+        "[테이블 목록]\n"
+        + "\n".join(table_line(t) for t in contract["tables"])
+        + f"\n\n[질문]\n{question}"
+    )
 
     def validate(p):
         if not isinstance(p.get("tables"), list):
@@ -200,7 +254,11 @@ def infer_tables(model, contract: dict, question: str) -> tuple[list, list, Step
         real = _match([name], names)
         if real and real[0] not in picked:
             picked.append(real[0])
-            reasons.append(f"{real[0]}: {(item.get('reason') if isinstance(item, dict) else '') or ''}".strip(": "))
+            reasons.append(
+                f"{real[0]}: {(item.get('reason') if isinstance(item, dict) else '') or ''}".strip(
+                    ": "
+                )
+            )
     step.selected = picked[:MAX_TABLES]
     step.reason = " / ".join(reasons[:MAX_TABLES])
     log.info("%s 테이블 선택 결과: %s", LLM_LOG, step.selected)
@@ -210,19 +268,33 @@ def infer_tables(model, contract: dict, question: str) -> tuple[list, list, Step
 def metric_candidates(contract: dict, tables: list) -> list:
     """고른 테이블에 연결된 지표 (metric_table). 검색이 아니라 조회다."""
     wanted = {t.lower() for t in tables}
-    return [m for m in contract["metrics"] if wanted & {x.lower() for x in m.get("tables", [m["table"]])}]
+    return [
+        m
+        for m in contract["metrics"]
+        if wanted & {x.lower() for x in m.get("tables", [m["table"]])}
+    ]
 
 
-def select_metrics(model, question: str, candidates: list) -> tuple[list, Step, str | None]:
+def select_metrics(
+    model, question: str, candidates: list
+) -> tuple[list, Step, str | None]:
     """→ (고른 지표, Step, 되물을 말)"""
     names = [m["name"] for m in candidates]
     step = Step("metric", candidates=names, model=model_name(model))
     if not candidates:
         step.reason = "고른 테이블에 연결된 지표가 없음 — 테이블을 직접 조회"
-        log.info("%s 지표 선택 생략: 후보 없음 — 테이블 직접 조회 question=%r", LLM_LOG, question)
+        log.info(
+            "%s 지표 선택 생략: 후보 없음 — 테이블 직접 조회 question=%r",
+            LLM_LOG,
+            question,
+        )
         return [], step, None
     system = METRIC_SYSTEM.format(max_metrics=MAX_METRICS)
-    user = "[후보 지표]\n" + "\n".join(metric_block(m) for m in candidates) + f"\n\n[질문]\n{question}"
+    user = (
+        "[후보 지표]\n"
+        + "\n".join(metric_block(m) for m in candidates)
+        + f"\n\n[질문]\n{question}"
+    )
 
     def validate(p):
         if not isinstance(p.get("metrics"), list):
@@ -247,18 +319,34 @@ def llm_select(model, contract: dict, question: str) -> Selection:
     tables, _, table_step = infer_tables(model, contract, question)
     if not tables:
         domain = contract.get("domain") or contract.get("name", "")
-        return Selection([], [], {"tables": [], "metrics": [], "relations": []}, [table_step],
-                         clarification=f"질문에 맞는 테이블을 찾지 못했습니다. 이 시스템은 {domain} 에 대한 것입니다. "
-                                       "무엇을 조회하려는지 조금 더 구체적으로 적어 주십시오.")
+        return Selection(
+            [],
+            [],
+            {"tables": [], "metrics": [], "relations": []},
+            [table_step],
+            clarification=f"질문에 맞는 테이블을 찾지 못했습니다. 이 시스템은 {domain} 에 대한 것입니다. "
+            "무엇을 조회하려는지 조금 더 구체적으로 적어 주십시오.",
+        )
     candidates = metric_candidates(contract, tables)
     metrics, metric_step, clarification = select_metrics(model, question, candidates)
-    log.info("선택: 테이블=%s 지표=%s (후보 %d개)%s", tables, metrics, len(candidates),
-             f" 되묻기={clarification}" if clarification else "")
-    return Selection(tables, metrics, _pruned(contract, tables, metrics), [table_step, metric_step],
-                     clarification=clarification)
+    log.info(
+        "선택: 테이블=%s 지표=%s (후보 %d개)%s",
+        tables,
+        metrics,
+        len(candidates),
+        f" 되묻기={clarification}" if clarification else "",
+    )
+    return Selection(
+        tables,
+        metrics,
+        _pruned(contract, tables, metrics),
+        [table_step, metric_step],
+        clarification=clarification,
+    )
 
 
 # ── 기준선: TF-IDF (RAG 식 한 번에 검색) ──────────────────────────────────
+
 
 def tfidf_select(contract: dict, question: str, top_k: int = 3) -> Selection:
     started = time.monotonic()
@@ -266,7 +354,14 @@ def tfidf_select(contract: dict, question: str, top_k: int = 3) -> Selection:
     elapsed = int((time.monotonic() - started) * 1000)
     tables = [t["name"] for t in pruned["tables"]]
     metrics = [m["name"] for m in pruned["metrics"]]
-    step = Step("table", candidates=[t["name"] for t in contract["tables"]] + [m["name"] for m in contract["metrics"]],
-                selected=tables + metrics, reason=f"TF-IDF 상위 {top_k}개", elapsed_ms=elapsed, model="tfidf")
+    step = Step(
+        "table",
+        candidates=[t["name"] for t in contract["tables"]]
+        + [m["name"] for m in contract["metrics"]],
+        selected=tables + metrics,
+        reason=f"TF-IDF 상위 {top_k}개",
+        elapsed_ms=elapsed,
+        model="tfidf",
+    )
     pruned = {**pruned, "tables": [prompt_table(t) for t in pruned["tables"]]}
     return Selection(tables, metrics, pruned, [step])

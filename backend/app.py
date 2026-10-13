@@ -18,19 +18,54 @@ import db
 import secret
 from logging_config import configure_logging
 from models import (
-    ApiException, AskRequest, AskResponse, AskStep, CompileRequest, CompileResponse,
-    HistoryEntry, HistoryPatch, Metric, MetricHistoryEntry,
-    MetricInput, Relation, RelationInput, SyncLog, SyncResult, System, SystemInput,
-    TableInfo, TablePurposeInput,
+    ApiException,
+    AskRequest,
+    AskResponse,
+    AskStep,
+    CompileRequest,
+    CompileResponse,
+    HistoryEntry,
+    HistoryPatch,
+    Metric,
+    MetricHistoryEntry,
+    MetricInput,
+    Relation,
+    RelationInput,
+    SyncLog,
+    SyncResult,
+    System,
+    SystemInput,
+    TableInfo,
+    TablePurposeInput,
 )
 from systems import (
-    create_system, delete_system, get_schema, get_system, list_sync_logs, list_systems, list_tables,
-    set_table_purpose, sync_system, update_system,
+    create_system,
+    delete_system,
+    get_schema,
+    get_system,
+    list_sync_logs,
+    list_systems,
+    list_tables,
+    set_table_purpose,
+    sync_system,
+    update_system,
 )
-from metrics import create_metric, delete_metric, list_metric_history, list_metrics, preview_metric, update_metric
+from metrics import (
+    create_metric,
+    delete_metric,
+    list_metric_history,
+    list_metrics,
+    preview_metric,
+    update_metric,
+)
 from relations import create_relation, delete_relation, list_relations
 from history import (
-    delete_history, export_eval_cases, get_trace, list_history, patch_history, record_ask,
+    delete_history,
+    export_eval_cases,
+    get_trace,
+    list_history,
+    patch_history,
+    record_ask,
 )
 from contract import load_contract
 from compiler import Compiler
@@ -148,13 +183,20 @@ def get_relations(system_id: UUID):
     return list_relations(system_id)
 
 
-@app.post("/api/systems/{system_id}/relations", response_model=Relation, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/systems/{system_id}/relations",
+    response_model=Relation,
+    status_code=status.HTTP_201_CREATED,
+)
 def post_relation(system_id: UUID, req: RelationInput):
     get_system(system_id)
     return create_relation(system_id, req)
 
 
-@app.delete("/api/systems/{system_id}/relations/{relation_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete(
+    "/api/systems/{system_id}/relations/{relation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def delete_relation_detail(system_id: UUID, relation_id: UUID):
     delete_relation(system_id, relation_id)
 
@@ -190,12 +232,18 @@ def post_metric_preview(system_id: UUID, req: MetricInput):
         return CompileResponse(sql=None, error=str(error))
 
 
-@app.get("/api/systems/{system_id}/metrics/{metric_id}/history", response_model=list[MetricHistoryEntry])
+@app.get(
+    "/api/systems/{system_id}/metrics/{metric_id}/history",
+    response_model=list[MetricHistoryEntry],
+)
 def get_metric_history(system_id: UUID, metric_id: UUID):
     return list_metric_history(system_id, metric_id)
 
 
-@app.delete("/api/systems/{system_id}/metrics/{metric_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete(
+    "/api/systems/{system_id}/metrics/{metric_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def delete_metric_detail(system_id: UUID, metric_id: UUID):
     delete_metric(system_id, metric_id)
 
@@ -216,21 +264,42 @@ def post_ask(req: AskRequest):
     """질문에서 SQL 생성: 테이블 추론 → 지표 후보 조회 → 지표 선택 → 조회 명세 → 컴파일"""
     started = time.monotonic()
     contract = load_contract(req.system_id, active_only=True)
+
     outcome = run_question(contract, req.question, make_model())
     elapsed_ms = (time.monotonic() - started) * 1000
 
-    result = "success" if outcome["sql"] else "clarify" if outcome["clarification"] else "fail"
+    result = (
+        "success"
+        if outcome["sql"]
+        else "clarify"
+        if outcome["clarification"]
+        else "fail"
+    )
     log_request.info(
         "system=%s question=%r tables=%s metrics=%s attempts=%d tokens=%d outcome=%s elapsed_ms=%.0f%s",
-        contract["code"], req.question, outcome["tables"], outcome["metrics"], outcome["attempts"],
-        outcome["total_tokens"], result, elapsed_ms, f" detail={outcome['error']}" if result == "fail" else "",
+        contract["code"],
+        req.question,
+        outcome["tables"],
+        outcome["metrics"],
+        outcome["attempts"],
+        outcome["total_tokens"],
+        result,
+        elapsed_ms,
+        f" detail={outcome['error']}" if result == "fail" else "",
     )
     entry_id = record_ask(req.system_id, req.question, outcome, elapsed_ms)
     return AskResponse(
-        id=entry_id, sql=outcome["sql"], error=outcome["error"], attempts=outcome["attempts"],
-        clarification=outcome["clarification"], selected_tables=outcome["tables"],
-        selected_metrics=outcome["metrics"], steps=[AskStep(**{k: v for k, v in s.items() if k != "model"})
-                                                    for s in outcome["steps"]],
+        id=entry_id,
+        sql=outcome["sql"],
+        error=outcome["error"],
+        attempts=outcome["attempts"],
+        clarification=outcome["clarification"],
+        selected_tables=outcome["tables"],
+        selected_metrics=outcome["metrics"],
+        steps=[
+            AskStep(**{k: v for k, v in s.items() if k != "model"})
+            for s in outcome["steps"]
+        ],
     )
 
 
@@ -273,4 +342,5 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

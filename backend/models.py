@@ -22,6 +22,7 @@ DEFAULT_PORTS = {
 
 class SystemInput(BaseModel):
     """시스템 등록 화면이 보내는 것. 수정할 때 password 를 비우면 기존 비밀번호를 둔다."""
+
     code: str
     name: str
     domain_desc: str = ""
@@ -67,6 +68,7 @@ class SystemInput(BaseModel):
 
 class System(BaseModel):
     """저장된 시스템 (비밀번호는 내보내지 않는다)"""
+
     id: UUID
     code: str
     name: str
@@ -96,12 +98,14 @@ SERIES_AGG_FUNCTIONS = ("DELTA_SUM", "CHANGE_COUNT")
 
 class JoinOn(BaseModel):
     """ON 조건 한 쌍. 양쪽 모두 '테이블.컬럼'."""
+
     left: str
     right: str
 
 
 class JoinSpec(BaseModel):
     """지표의 기본 테이블에 붙는 조인 하나"""
+
     table: str
     type: Literal["inner", "left"] = "inner"
     on: list[JoinOn]
@@ -112,8 +116,11 @@ class SeriesSpec(BaseModel):
 
     구분·순서는 컬럼 하나(예전 지표)나 목록이다 — 아파트 거래처럼 '지역+단지+면적' 이 한 묶음인 경우.
     """
+
     partition_by: str | list[str]  # 행을 나누는 컬럼 (예: 차량 ID)
-    order_by: str | list[str]      # 시간 순서 컬럼 (예: 수집 일시). 뒤 컬럼은 같은 시각의 순서를 정한다
+    order_by: (
+        str | list[str]
+    )  # 시간 순서 컬럼 (예: 수집 일시). 뒤 컬럼은 같은 시각의 순서를 정한다
     baseline: str | None = None  # CHANGE_COUNT 의 정상값 (예: 0)
     # DELTA_SUM 의 한 행 최대 증가폭. 넘으면 리셋 복귀·장비 교체로 튄 값으로 보고 0으로 친다.
     max_step: float | None = None
@@ -152,6 +159,7 @@ class Measure(BaseModel):
 
     {"col": "컬럼"} · {"num": 0} · {"fn": "ROUND", "args": [{"fn": "AVG", "args": [{"col": "금액"}]}, {"num": 0}]}
     """
+
     name: str = ""
     expr: dict
 
@@ -167,6 +175,7 @@ class MetricInput(BaseModel):
     집계형(aggregate)은 숫자 하나를, 조회형(projection)은 컬럼 몇 개를, 파생형(derived)은
     집계형 지표를 잇는 수식 하나를 낸다. 어느 쪽이든 fixed_filters는 컴파일러가 강제로 붙인다.
     """
+
     name: str
     description: str = ""
     kind: MetricKind = MetricKind.AGGREGATE
@@ -214,13 +223,19 @@ class MetricInput(BaseModel):
                 raise ValueError("집계형 지표는 agg_field와 agg_function이 필요합니다")
             function = str(self.agg_function).upper()
             if function not in AGG_FUNCTIONS + SERIES_AGG_FUNCTIONS:
-                raise ValueError(f"agg_function은 {', '.join(AGG_FUNCTIONS + SERIES_AGG_FUNCTIONS)} 중 하나여야 합니다")
+                raise ValueError(
+                    f"agg_function은 {', '.join(AGG_FUNCTIONS + SERIES_AGG_FUNCTIONS)} 중 하나여야 합니다"
+                )
             self.agg_function = function
             if function in SERIES_AGG_FUNCTIONS:
                 if self.series is None:
-                    raise ValueError(f"{function} 는 구분 컬럼과 순서 컬럼(series)이 필요합니다")
+                    raise ValueError(
+                        f"{function} 는 구분 컬럼과 순서 컬럼(series)이 필요합니다"
+                    )
                 if function == "CHANGE_COUNT" and self.series.baseline is None:
-                    raise ValueError("CHANGE_COUNT 는 정상값(series.baseline, 예: 0)이 필요합니다")
+                    raise ValueError(
+                        "CHANGE_COUNT 는 정상값(series.baseline, 예: 0)이 필요합니다"
+                    )
                 if function == "DELTA_SUM":
                     self.series.baseline = None
                 else:
@@ -231,7 +246,9 @@ class MetricInput(BaseModel):
             self.expression = None
         elif self.kind is MetricKind.PROJECTION:
             if not self.select_columns:
-                raise ValueError("조회형 지표는 select_columns에 컬럼이 하나 이상 필요합니다")
+                raise ValueError(
+                    "조회형 지표는 select_columns에 컬럼이 하나 이상 필요합니다"
+                )
             seen, unique = set(), []
             for column in self.select_columns:
                 key = column.lower()
@@ -245,7 +262,9 @@ class MetricInput(BaseModel):
             self.series = None
         else:
             if not (self.expression or "").strip():
-                raise ValueError("파생 지표는 expression(예: [매출] - [환불])이 필요합니다")
+                raise ValueError(
+                    "파생 지표는 expression(예: [매출] - [환불])이 필요합니다"
+                )
             self.expression = self.expression.strip()
             self.agg_field = None
             self.agg_function = None
@@ -270,9 +289,13 @@ class MetricInput(BaseModel):
         used = set().union(*(measure_functions(ms.expr) for ms in self.measures))
         if used & (set(MEASURE_ROW_SERIES) | set(SERIES_FUNCTIONS)):
             if self.series is None:
-                raise ValueError("직전 행 비교(PREV·DELTA·DELTA_SUM·CHANGE_COUNT)에는 구분 컬럼과 순서 컬럼(series)이 필요합니다")
+                raise ValueError(
+                    "직전 행 비교(PREV·DELTA·DELTA_SUM·CHANGE_COUNT)에는 구분 컬럼과 순서 컬럼(series)이 필요합니다"
+                )
             if "CHANGE_COUNT" in used and self.series.baseline is None:
-                raise ValueError("CHANGE_COUNT 는 정상값(series.baseline, 예: 0)이 필요합니다")
+                raise ValueError(
+                    "CHANGE_COUNT 는 정상값(series.baseline, 예: 0)이 필요합니다"
+                )
             if "CHANGE_COUNT" not in used:
                 self.series.baseline = None
             if "DELTA_SUM" not in used:
@@ -287,6 +310,7 @@ class MetricInput(BaseModel):
 
 class Metric(BaseModel):
     """업무 지표"""
+
     id: UUID
     name: str
     description: str
@@ -309,6 +333,7 @@ class Metric(BaseModel):
 
 class MetricHistoryEntry(BaseModel):
     """지표 정의의 한 시점"""
+
     version: int
     action: Literal["create", "update", "delete", "retire"]
     snapshot: dict
@@ -317,6 +342,7 @@ class MetricHistoryEntry(BaseModel):
 
 class RelationInput(BaseModel):
     """테이블 관계. left 가 참조하는 쪽(FK), right 가 참조되는 쪽이다."""
+
     left_table: str
     left_column: str
     right_table: str
@@ -339,12 +365,14 @@ class Relation(RelationInput):
 
 class AskRequest(BaseModel):
     """질문 요청"""
+
     system_id: UUID
     question: str
 
 
 class AskStep(BaseModel):
     """질문 처리의 한 단계 (ask_trace 한 행). 화면이 '왜 이 테이블·지표인가' 를 보여준다."""
+
     stage: Literal["table", "metric", "sql"]
     candidates: list[str]
     selected: list[str]
@@ -356,6 +384,7 @@ class AskStep(BaseModel):
 
 class AskResponse(BaseModel):
     """질문 응답. clarification 이 있으면 모델이 되물은 것이다 — sql 은 없다."""
+
     id: UUID | None = None
     sql: str | None
     error: str | None
@@ -397,6 +426,7 @@ class HistoryEntry(BaseModel):
 
 class HistoryPatch(BaseModel):
     """바꿀 것만 보낸다. feedback 을 지우려면 빈 문자열을 보낸다."""
+
     favorite: bool | None = None
     feedback: Literal["up", "down", ""] | None = None
     feedback_note: str | None = None
@@ -404,6 +434,7 @@ class HistoryPatch(BaseModel):
 
 class SyncResult(BaseModel):
     """동기화 결과. 병합이라 추가·변경·삭제 건수로 말한다."""
+
     table_count: int
     column_count: int
     tables_added: int
@@ -431,6 +462,7 @@ class SyncLog(BaseModel):
 
 class TableInfo(BaseModel):
     """테이블 목록 화면용"""
+
     id: UUID
     name: str
     comment: str
@@ -441,11 +473,13 @@ class TableInfo(BaseModel):
 
 class TablePurposeInput(BaseModel):
     """사람이 적는 테이블 용도. 테이블 추론에 쓰인다."""
+
     purpose: str
 
 
 class ApiException(Exception):
     """API 예외"""
+
     def __init__(self, status_code: int, detail: str):
         self.status_code = status_code
         self.detail = detail

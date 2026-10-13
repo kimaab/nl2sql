@@ -18,8 +18,10 @@ _SELECT = """
 
 
 def list_relations(system_id: UUID) -> list[Relation]:
-    rows = db.query(f"{_SELECT} WHERE r.system_id = %s ORDER BY lt.name, rt.name, r.constraint_name, r.left_column",
-                    str(system_id))
+    rows = db.query(
+        f"{_SELECT} WHERE r.system_id = %s ORDER BY lt.name, rt.name, r.constraint_name, r.left_column",
+        str(system_id),
+    )
     return [Relation(**r) for r in rows]
 
 
@@ -28,12 +30,23 @@ def create_relation(system_id: UUID, data: RelationInput) -> Relation:
     tables = load_tables(system_id)
 
     def resolve(table: str, column: str) -> tuple[dict, str]:
-        found = next((t for t in tables.values() if t["name"].lower() == table.lower()), None)
+        found = next(
+            (t for t in tables.values() if t["name"].lower() == table.lower()), None
+        )
         if found is None:
             raise ApiException(400, f"테이블을 찾을 수 없습니다: {table}")
-        col = next((c["name"] for c in found["columns"] if c["name"].lower() == column.lower()), None)
+        col = next(
+            (
+                c["name"]
+                for c in found["columns"]
+                if c["name"].lower() == column.lower()
+            ),
+            None,
+        )
         if col is None:
-            raise ApiException(400, f"컬럼을 찾을 수 없습니다: {found['name']}.{column}")
+            raise ApiException(
+                400, f"컬럼을 찾을 수 없습니다: {found['name']}.{column}"
+            )
         return found, col
 
     left, left_column = resolve(data.left_table, data.left_column)
@@ -41,34 +54,72 @@ def create_relation(system_id: UUID, data: RelationInput) -> Relation:
     if left["id"] == right["id"]:
         raise ApiException(400, "같은 테이블끼리의 관계는 등록할 수 없습니다")
 
-    duplicate = db.one("""
+    duplicate = db.one(
+        """
         SELECT id FROM meta_relation
          WHERE system_id = %s AND (
                (left_table_id = %s AND left_column = %s AND right_table_id = %s AND right_column = %s)
             OR (left_table_id = %s AND left_column = %s AND right_table_id = %s AND right_column = %s))
-    """, str(system_id), left["id"], left_column, right["id"], right_column,
-        right["id"], right_column, left["id"], left_column)
+    """,
+        str(system_id),
+        left["id"],
+        left_column,
+        right["id"],
+        right_column,
+        right["id"],
+        right_column,
+        left["id"],
+        left_column,
+    )
     if duplicate:
         raise ApiException(409, "같은 관계가 이미 있습니다")
 
     relation_id = uuid4()
-    constraint = data.constraint_name.strip() or f"{left['name']}.{left_column}->{right['name']}.{right_column}"
+    constraint = (
+        data.constraint_name.strip()
+        or f"{left['name']}.{left_column}->{right['name']}.{right_column}"
+    )
     with db.connection() as conn:
-        conn.execute("""
+        conn.execute(
+            """
             INSERT INTO meta_relation (id, system_id, constraint_name, left_table_id, left_column,
                                        right_table_id, right_column, source)
             VALUES (%s, %s, %s, %s, %s, %s, %s, 'manual')
-        """, (str(relation_id), str(system_id), constraint, left["id"], left_column, right["id"], right_column))
-    log.info("relation created: %s %s.%s -> %s.%s", relation_id, left["name"], left_column, right["name"], right_column)
+        """,
+            (
+                str(relation_id),
+                str(system_id),
+                constraint,
+                left["id"],
+                left_column,
+                right["id"],
+                right_column,
+            ),
+        )
+    log.info(
+        "relation created: %s %s.%s -> %s.%s",
+        relation_id,
+        left["name"],
+        left_column,
+        right["name"],
+        right_column,
+    )
     return Relation(**db.one(f"{_SELECT} WHERE r.id = %s", str(relation_id)))
 
 
 def delete_relation(system_id: UUID, relation_id: UUID) -> None:
-    row = db.one("SELECT source FROM meta_relation WHERE id = %s AND system_id = %s", str(relation_id), str(system_id))
+    row = db.one(
+        "SELECT source FROM meta_relation WHERE id = %s AND system_id = %s",
+        str(relation_id),
+        str(system_id),
+    )
     if row is None:
         return
     if row["source"] == "fk":
-        raise ApiException(400, "대상 DB의 FK 에서 읽은 관계는 다음 동기화가 다시 만듭니다. FK 를 지우거나 그대로 두십시오")
+        raise ApiException(
+            400,
+            "대상 DB의 FK 에서 읽은 관계는 다음 동기화가 다시 만듭니다. FK 를 지우거나 그대로 두십시오",
+        )
     with db.connection() as conn:
         conn.execute("DELETE FROM meta_relation WHERE id = %s", (str(relation_id),))
     log.info("relation deleted: %s", relation_id)
@@ -79,18 +130,35 @@ def replace_fk_relations(cur, system_id: UUID, relations: list[dict]) -> None:
 
     병합이 끝난 뒤에 부른다 — 테이블 이름을 방금 병합한 id 로 바꾼다.
     """
-    cur.execute("DELETE FROM meta_relation WHERE system_id = %s AND source = 'fk'", (str(system_id),))
+    cur.execute(
+        "DELETE FROM meta_relation WHERE system_id = %s AND source = 'fk'",
+        (str(system_id),),
+    )
     if not relations:
         return
-    cur.execute("SELECT name, id FROM meta_table WHERE system_id = %s AND deleted_at IS NULL", (str(system_id),))
+    cur.execute(
+        "SELECT name, id FROM meta_table WHERE system_id = %s AND deleted_at IS NULL",
+        (str(system_id),),
+    )
     ids = dict(cur.fetchall())
     rows = [
-        (str(uuid4()), str(system_id), r["constraint"], ids[r["left_table"]], r["left_column"],
-         ids[r["right_table"]], r["right_column"])
-        for r in relations if r["left_table"] in ids and r["right_table"] in ids
+        (
+            str(uuid4()),
+            str(system_id),
+            r["constraint"],
+            ids[r["left_table"]],
+            r["left_column"],
+            ids[r["right_table"]],
+            r["right_column"],
+        )
+        for r in relations
+        if r["left_table"] in ids and r["right_table"] in ids
     ]
-    cur.executemany("""
+    cur.executemany(
+        """
         INSERT INTO meta_relation (id, system_id, constraint_name, left_table_id, left_column,
                                    right_table_id, right_column, source)
         VALUES (%s, %s, %s, %s, %s, %s, %s, 'fk')
-    """, rows)
+    """,
+        rows,
+    )
