@@ -219,7 +219,7 @@ def test_nested_aggregate_with_grain_and_no_group():
         }
     )
     assert 'SELECT "deal_date_year", MAX("_m1")' in out
-    assert 'DATE_TRUNC(\'year\', "deal_date") AS "deal_date_year"' in out
+    assert 'CAST(DATE_TRUNC(\'year\', "deal_date") AS DATE) AS "deal_date_year"' in out
 
 
 def test_compare_wraps_compound_measure():

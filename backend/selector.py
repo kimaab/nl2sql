@@ -197,6 +197,7 @@ TABLE_SYSTEM = """당신은 업무 시스템 '{name}' 의 테이블 목록에서
 [규칙]
 - 아래 [테이블 목록] 에 있는 이름만 씁니다.
 - 놓치지 않는 것이 우선입니다. 필요할 수 있는 테이블은 넣으십시오 (최대 {max_tables}개).
+- 테이블 뒤의 [지표: …] 는 그 테이블로 계산하는 업무 지표와 같은 말입니다. 질문이 묻는 값이 어떤 지표와 맞으면 그 테이블을 고르십시오.
 - 질문의 기간·정렬·개수 같은 조건은 테이블을 고르는 데 쓰지 않습니다.
 - 맞는 테이블이 없으면 빈 목록을 돌려줍니다.
 - 설명 없이 JSON 객체 하나로만 답합니다:
@@ -212,11 +213,30 @@ METRIC_SYSTEM = """당신은 사용자 질문이 묻는 '무엇'에 맞는 업�
   {{"metrics": ["지표명"], "reason": "고른 이유", "ambiguous": false, "options": [], "message": ""}}"""
 
 
-def table_line(t: dict) -> str:
-    """테이블 추론에 보내는 한 줄. 용도 → 코멘트 순으로 쓴다."""
+def table_line(t: dict, metrics: list | None = None) -> str:
+    """테이블 추론에 보내는 한 줄. 용도 → 코멘트 순으로 쓰고, 그 테이블에 연결된 지표를 덧붙인다.
+
+    '차량 로그' 같은 코멘트만으로는 가동시간이 어느 테이블에 있는지 알 수 없다 — 지표 이름·같은 말이
+    질문의 말과 테이블을 잇는다.
+    """
     text = t.get("purpose") or t.get("description") or ""
     text = " ".join(str(text).split())
-    return f"- {t['name']}: {text}" if text else f"- {t['name']}"
+    line = f"- {t['name']}: {text}" if text else f"- {t['name']}"
+    words: list = []
+    for m in metrics or []:
+        for w in [m["name"], *(m.get("synonyms") or [])]:
+            if w and w not in words:
+                words.append(w)
+    return f"{line} [지표: {', '.join(words)}]" if words else line
+
+
+def metrics_by_table(contract: dict) -> dict:
+    """{테이블명(소문자): [지표]} — 지표가 쓰는 테이블 (metric_table) 기준"""
+    out: dict = {}
+    for m in contract.get("metrics", []):
+        for name in m.get("tables", [m["table"]]):
+            out.setdefault(name.lower(), []).append(m)
+    return out
 
 
 def metric_block(m: dict) -> str:
@@ -237,9 +257,12 @@ def infer_tables(model, contract: dict, question: str) -> tuple[list, list, Step
         domain=contract.get("domain") or "(설명 없음)",
         max_tables=MAX_TABLES,
     )
+    linked = metrics_by_table(contract)
     user = (
         "[테이블 목록]\n"
-        + "\n".join(table_line(t) for t in contract["tables"])
+        + "\n".join(
+            table_line(t, linked.get(t["name"].lower())) for t in contract["tables"]
+        )
         + f"\n\n[질문]\n{question}"
     )
 

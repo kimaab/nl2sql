@@ -294,9 +294,9 @@ def test_columns_and_aggregations_together_rejected(compiler):
 @pytest.mark.parametrize(
     "driver,expr",
     [
-        ("postgresql", "DATE_TRUNC('month', \"ORDER_DTM\")"),
+        ("postgresql", "CAST(DATE_TRUNC('month', \"ORDER_DTM\") AS DATE)"),
         ("oracle", "TRUNC(\"ORDER_DTM\", 'MM')"),
-        ("mysql", "DATE_FORMAT(`ORDER_DTM`, '%Y-%m-01')"),
+        ("mysql", "CAST(DATE_FORMAT(`ORDER_DTM`, '%Y-%m-01') AS DATE)"),
     ],
 )
 def test_group_by_month_per_driver(compiler_for, driver, expr):

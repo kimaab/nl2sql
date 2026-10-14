@@ -1721,7 +1721,11 @@ class Compiler:
         return f"({sql} + INTERVAL '{hours} hours')"
 
     def _truncate(self, column: str, grain: str) -> str:
-        """날짜를 기간 단위의 첫날로 내린다. 드라이버마다 문법이 다르다."""
+        """날짜를 기간 단위의 첫날로 내린다. 드라이버마다 문법이 다르다.
+
+        결과는 날짜 타입이다 — 타임스탬프로 두면 '2026-10-09 00:00:00' 처럼 쓸모없는 시각이 붙는다.
+        Oracle 의 TRUNC 는 이미 DATE 다.
+        """
         if self.driver == "oracle":
             unit = {
                 "day": "DD",
@@ -1735,11 +1739,13 @@ class Compiler:
             return {
                 "day": f"DATE({column})",
                 "week": f"DATE_SUB(DATE({column}), INTERVAL WEEKDAY({column}) DAY)",
-                "month": f"DATE_FORMAT({column}, '%Y-%m-01')",
+                "month": f"CAST(DATE_FORMAT({column}, '%Y-%m-01') AS DATE)",
                 "quarter": f"MAKEDATE(YEAR({column}), 1) + INTERVAL (QUARTER({column}) - 1) QUARTER",
-                "year": f"DATE_FORMAT({column}, '%Y-01-01')",
+                "year": f"CAST(DATE_FORMAT({column}, '%Y-01-01') AS DATE)",
             }[grain]
-        return f"DATE_TRUNC('{grain}', {column})"
+        if grain == "day":
+            return f"CAST({column} AS DATE)"
+        return f"CAST(DATE_TRUNC('{grain}', {column}) AS DATE)"
 
     def _compare(self, compare, aggregates: list, ctx: dict):
         """기간 비교: 집계마다 기간별 값과 (두 기간이면) 증감률을 만든다."""

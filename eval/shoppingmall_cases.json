@@ -107,7 +107,7 @@
           }
         ]
       },
-      "expected_sql": "SELECT DATE_TRUNC('month', \"ORDER_DTM\") AS \"ORDER_DTM_month\", COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-01-01' AND \"ORDER_DTM\" < DATE '2027-01-01' GROUP BY DATE_TRUNC('month', \"ORDER_DTM\") ORDER BY \"ORDER_DTM_month\" ASC;"
+      "expected_sql": "SELECT CAST(DATE_TRUNC('month', \"ORDER_DTM\") AS DATE) AS \"ORDER_DTM_month\", COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-01-01' AND \"ORDER_DTM\" < DATE '2027-01-01' GROUP BY CAST(DATE_TRUNC('month', \"ORDER_DTM\") AS DATE) ORDER BY \"ORDER_DTM_month\" ASC;"
     },
     {
       "question": "최근 주문 10건",
@@ -662,7 +662,7 @@
           }
         ]
       },
-      "expected_sql": "SELECT DATE_TRUNC('week', \"ORDER_DTM\") AS \"ORDER_DTM_week\", COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' GROUP BY DATE_TRUNC('week', \"ORDER_DTM\") ORDER BY \"ORDER_DTM_week\" ASC;"
+      "expected_sql": "SELECT CAST(DATE_TRUNC('week', \"ORDER_DTM\") AS DATE) AS \"ORDER_DTM_week\", COUNT(*) AS \"주문수\" FROM \"TB_ORDER\" WHERE \"ORDER_DTM\" >= DATE '2026-09-01' AND \"ORDER_DTM\" < DATE '2026-10-01' GROUP BY CAST(DATE_TRUNC('week', \"ORDER_DTM\") AS DATE) ORDER BY \"ORDER_DTM_week\" ASC;"
     },
     {
       "question": "분기별 매출",
@@ -675,7 +675,7 @@
           }
         ]
       },
-      "expected_sql": "SELECT DATE_TRUNC('quarter', \"ORDER_DTM\") AS \"ORDER_DTM_quarter\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY DATE_TRUNC('quarter', \"ORDER_DTM\");"
+      "expected_sql": "SELECT CAST(DATE_TRUNC('quarter', \"ORDER_DTM\") AS DATE) AS \"ORDER_DTM_quarter\", SUM(\"TOTAL_AMT\") AS \"매출\" FROM \"TB_ORDER\" WHERE \"ORDER_STATUS\" != '99' GROUP BY CAST(DATE_TRUNC('quarter', \"ORDER_DTM\") AS DATE);"
     }
   ]
 }

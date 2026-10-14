@@ -211,3 +211,23 @@ def test_judge_per_stage():
         "metric_hit": True,
         "sql_hit": False,
     }  # '지표 없음' 이 정답이면 안 고른 게 맞다
+
+
+def test_table_prompt_lists_linked_metrics_and_synonyms(contract):
+    """코멘트만으로는 값이 어느 테이블에 있는지 모른다 — 테이블 줄에 연결된 지표 이름·같은 말을 싣는다."""
+    contract = {
+        **contract,
+        "metrics": [
+            {**m, "synonyms": ["장사 실적"]} if m["name"] == "매출" else m
+            for m in contract["metrics"]
+        ],
+    }
+    model = FakeLLM([tables_reply("tb_order"), {"metrics": ["매출"], "reason": ""}])
+    llm_select(model, contract, "매출 알려줘")
+    table_prompt = model.prompts[0][1].content
+    line = next(l for l in table_prompt.splitlines() if l.startswith("- TB_ORDER"))
+    assert "[지표: " in line and "매출" in line and "장사 실적" in line
+    linked = {t.lower() for m in contract["metrics"] for t in m.get("tables", [m["table"]])}
+    bare = [t["name"] for t in contract["tables"] if t["name"].lower() not in linked]
+    for name in bare:
+        assert "[지표:" not in next(l for l in table_prompt.splitlines() if l.startswith(f"- {name}"))
