@@ -1775,6 +1775,22 @@ class Compiler:
             "column": resolved,
         }
 
+    def _utc_literal(self, iso: str, hours: int) -> str:
+        """현지 날짜·시각 값을 UTC 로 바꾼 비교 값. 시차를 SQL 에 그대로 적는다.
+
+        TIMESTAMP '2026-10-09 00:00:00' - INTERVAL '9 hours' — 읽는 사람이 현지 날짜를 바로 알아보고,
+        오른쪽이 상수라 컬럼 인덱스는 그대로 탄다 (컬럼에 시차를 더하면 인덱스를 못 쓴다).
+        """
+        local = datetime.datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M:%S")
+        sign, n = ("-", hours) if hours > 0 else ("+", -hours)
+        if self.driver == "mysql":
+            interval = f"INTERVAL {n} HOUR"
+        elif self.driver == "oracle":
+            interval = f"INTERVAL '{n}' HOUR"
+        else:
+            interval = f"INTERVAL '{n} hours'"
+        return f"TIMESTAMP '{local}' {sign} {interval}"
+
     def _local(self, table: str, column: str, sql: str) -> str:
         """UTC 로 저장된 시각 컬럼을 현지 시각으로. 보정값이 없으면 그대로."""
         hours = self.utc_offsets.get((table, column))
@@ -2228,7 +2244,7 @@ class Compiler:
                 "greater_or_equal 과 less_or_equal 로 기간을 지정하십시오"
             )
         if offset:
-            return f"TIMESTAMP '{to_utc(iso, offset)}'"
+            return self._utc_literal(iso, offset)
         return f"{'TIMESTAMP' if value_kind == 'datetime' else 'DATE'} '{iso}'"
 
     def _temporal_compare(
@@ -2259,7 +2275,7 @@ class Compiler:
                 operator, iso = "greater_or_equal", next_day(iso)
         if offset:
             # 값은 현지 시각 — 컬럼에 저장된 UTC 로 바꿔 비교한다
-            return operator, f"TIMESTAMP '{to_utc(iso, offset)}'"
+            return operator, self._utc_literal(iso, offset)
         prefix = "TIMESTAMP" if value_kind == "datetime" else "DATE"
         return operator, f"{prefix} '{iso}'"
 
