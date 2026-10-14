@@ -4,7 +4,7 @@ import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from compiler import Compiler, measure_text
+from compiler import GRAINS, Compiler, by_text, measure_text, split_fixed_by
 from graph import MAX_ATTEMPTS, build_graph
 from selector import Step, llm_select, model_name, tfidf_select, usage_of
 from tool import CLARIFY_PREFIX, make_clarify_tool, make_compile_tool
@@ -21,7 +21,7 @@ ast 는 JSON 객체이고 아래 키만 씁니다. 키 이름을 바꾸지 마�
   operator: equals, not_equals, greater_than, greater_or_equal, less_than, less_or_equal,
   in, not_in (value 는 목록), is_null, is_not_null (value 없음), contains, starts_with, ends_with (문자열 일부 일치).
   OR 는 {"any_of": [조건, 조건]} 으로, 그 안의 AND 묶음은 {"all_of": [조건, 조건]} 으로 적습니다.
-- group_by: ["컬럼"]. 날짜를 기간 단위로 묶을 때는 {"field": "날짜컬럼", "grain": "day|week|month|quarter|year"} — 결과 별칭은 "컬럼_grain" (예: ORDER_DTM_month).
+- group_by: ["컬럼"]. 날짜를 기간 단위로 묶을 때는 {"field": "날짜컬럼", "grain": "hour|day|week|month|quarter|year"} — 결과 별칭은 "컬럼_grain" (예: ORDER_DTM_month).
 - having: 집계 결과 조건 [{"alias": "집계 별칭 또는 지표 이름", "operator": "greater_or_equal", "value": 3}].
 - order_by: [{"field": "컬럼 또는 집계 별칭", "direction": "asc|desc"}]. 집계 질의는 group_by 컬럼이나 집계 별칭으로만 정렬합니다.
   지표에 measures(측정값)가 있으면 그 이름이 결과 컬럼 이름이고, 정렬·having 에 그 이름을 씁니다.
@@ -38,6 +38,18 @@ def _prompt_metric(m: dict) -> dict:
         out["measures"] = [
             {"name": ms["name"], "식": measure_text(ms["expr"])} for ms in m["measures"]
         ]
+        if m.get("kind") != "projection":
+            fixed = [b for ms in m["measures"] for b in split_fixed_by(ms["expr"])[1]]
+            grains = [b for b in fixed if isinstance(b, dict) and b.get("grain")]
+            if fixed:
+                note = f"결과는 기본으로 {', '.join(dict.fromkeys(by_text(b) for b in fixed))} 별로 나뉩니다."
+                for b in grains:
+                    note += (
+                        f" {b['field']} 의 기본 단위는 {b['grain']} 입니다. 다른 단위가 필요하면 group_by 에 "
+                        f'{{"field": "{b["field"]}", "grain": …}} 로 적으십시오 ({"·".join(GRAINS)}) '
+                        "— 더 큰 단위는 기본 단위 값을 합치고, 더 작은 단위는 다시 계산합니다."
+                    )
+                out["묶음"] = note
     return out
 
 
@@ -52,7 +64,10 @@ def system_prompt(
     chosen_metrics: 지표 선택 단계가 고른 지표. 있으면 그 지표를 쓰라고 못박는다 — 이 단계의 모델이
     지표를 두고 원본 컬럼을 직접 집계하면 지표 정의(누적값 증가분·고정 필터)가 사라진다.
     """
-    today = today or datetime.date.today()
+    now = datetime.datetime.now()
+    # "최근 5시간" 은 시각이 있어야 계산된다. 날짜를 정해 부른 경우(평가·테스트)에는 시각을 싣지 않는다.
+    clock = f" 현재 시각은 {now:%H:%M} 입니다." if today is None or today == now.date() else ""
+    today = today or now.date()
     metrics = [_prompt_metric(m) for m in pruned["metrics"]]
     metadata = {"tables": pruned["tables"], "metrics": metrics}
     if pruned.get("relations"):
@@ -78,9 +93,10 @@ def system_prompt(
         f"당신은 자연어 질문을 '{contract['name']}' 데이터베이스"
         f"({contract['driver']}) 조회로 바꾸는 시맨틱 파서입니다.\n"
         f"{domain}"
-        f"오늘은 {today.isoformat()} ({'월화수목금토일'[today.weekday()]}요일) 입니다. "
+        f"오늘은 {today.isoformat()} ({'월화수목금토일'[today.weekday()]}요일) 입니다.{clock} "
         "“최근 7일”, “지난달”, “올해 7월” 같은 표현은 이 날짜를 기준으로 계산해 "
-        "YYYY-MM-DD 형식으로 적으십시오. 기간의 끝은 less_or_equal 로 지정하십시오.\n"
+        "YYYY-MM-DD 형식으로 적으십시오. “최근 5시간” 처럼 시간 단위 기간은 현재 시각을 기준으로 "
+        "YYYY-MM-DD HH:MM 형식으로 적으십시오. 기간의 끝은 less_or_equal 로 지정하십시오.\n"
         f"{utc}"
         "아래 [허용된 메타데이터]에 없는 테이블·컬럼·지표 이름은 절대 만들어내지 "
         "마십시오.\n\n"

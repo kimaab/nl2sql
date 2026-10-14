@@ -329,7 +329,7 @@ def test_grain_on_non_date_column_rejected(compiler):
 def test_unknown_grain_rejected(compiler):
     assert "grain" in error(
         compiler,
-        {"metric": "주문수", "group_by": [{"field": "ORDER_DTM", "grain": "hour"}]},
+        {"metric": "주문수", "group_by": [{"field": "ORDER_DTM", "grain": "minute"}]},
     )
 
 

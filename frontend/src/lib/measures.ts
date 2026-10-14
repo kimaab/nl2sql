@@ -61,7 +61,7 @@ export const isAggregate = (fn: string) => AGGREGATES.includes(fn);
 /** 컬럼 하나만 받는 함수 (직전 행 값·시계열 집계) */
 export const needsColumn = (fn: string) => SERIES_FNS.includes(fn);
 
-export const GRAIN_LABEL: Record<string, string> = { day: "일", week: "주", month: "월", quarter: "분기", year: "연" };
+export const GRAIN_LABEL: Record<string, string> = { hour: "시", day: "일", week: "주", month: "월", quarter: "분기", year: "연" };
 
 /** 묶을 기준의 컬럼 이름 */
 export const byColumn = (b: ByItem): string => (typeof b === "string" ? b : b.field);

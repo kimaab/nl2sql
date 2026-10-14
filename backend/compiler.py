@@ -83,7 +83,8 @@ def to_utc(iso: str, offset_hours: int) -> str:
 FILTER_SOURCES = ("literal", "relative", "question")
 _RELATIVE_RE = re.compile(r"^([+-]?\d+)([dmy])$")
 JOIN_TYPES = {"inner": "INNER JOIN", "left": "LEFT JOIN"}
-GRAINS = ("day", "week", "month", "quarter", "year")
+# 작은 단위부터. hour 는 시각을 포함한 컬럼에만 쓴다 (날짜뿐인 컬럼은 시각이 없다).
+GRAINS = ("hour", "day", "week", "month", "quarter", "year")
 # 지표 정의에서만 쓰는 시계열 집계. 행 순서(series)가 있어야 뜻이 있어서 모델 AST 로는 받지 않는다.
 SERIES_FUNCTIONS = {
     "DELTA_SUM": "누적값 증가분 합 — 직전 행보다 늘어난 만큼만 더한다(리셋으로 줄면 0)",
@@ -740,14 +741,10 @@ class Compiler:
         self._reject_unknown(ast)
 
         metrics = self._metrics(ast)
-        # 지표가 정한 '결과를 나누는 기준' 은 질문의 묶음에 더한다 (같은 기준은 한 번만)
-        fixed = [b for m in metrics for b in m.get("fixed_by") or []]
-        if fixed:
-            group = list(ast.get("group_by") or [])
-            for b in fixed:
-                if _group_key(b) not in {_group_key(g) for g in group}:
-                    group.append(b)
-            ast = {**ast, "group_by": group}
+        # 같은 날짜 컬럼을 두 단위로 묶으면 (월과 일) 결과가 조용히 잘게 쪼개진다
+        _check_grains(ast.get("group_by") or [])
+        # 지표가 정한 '결과를 나누는 기준' 을 질문의 묶음과 맞춘다 (기본 단위·합산)
+        ast, metrics = _merge_fixed_by(ast, metrics)
         # 지표 하나면 그 지표의 고정 필터가 WHERE 로, 여럿이면 지표마다 CASE WHEN 안으로 간다.
         metric = metrics[0] if len(metrics) == 1 else None
         if metrics:
@@ -1761,9 +1758,14 @@ class Compiler:
         grain = str(grain).lower()
         if grain not in GRAINS:
             raise ValueError(f"grain 은 {', '.join(GRAINS)} 중 하나입니다 -> {grain!r}")
-        if not temporal_kind(self.column_types.get((owner, resolved), ""), self.driver):
+        kind = temporal_kind(self.column_types.get((owner, resolved), ""), self.driver)
+        if not kind:
             raise ValueError(
                 f"{owner}.{resolved} 는 날짜 컬럼이 아니라 grain 으로 묶을 수 없습니다"
+            )
+        if grain == "hour" and kind != "datetime":
+            raise ValueError(
+                f"{owner}.{resolved} 는 시각이 없는 날짜 컬럼이라 hour 로 묶을 수 없습니다"
             )
         expr = self._truncate(self._local(owner, resolved, column), grain)
         alias = f"{resolved}_{grain}"
@@ -1806,10 +1808,11 @@ class Compiler:
         """날짜를 기간 단위의 첫날로 내린다. 드라이버마다 문법이 다르다.
 
         결과는 날짜 타입이다 — 타임스탬프로 두면 '2026-10-09 00:00:00' 처럼 쓸모없는 시각이 붙는다.
-        Oracle 의 TRUNC 는 이미 DATE 다.
+        Oracle 의 TRUNC 는 이미 DATE 다. hour 만 시각이 남는다 (그 시의 정각).
         """
         if self.driver == "oracle":
             unit = {
+                "hour": "HH24",
                 "day": "DD",
                 "week": "IW",
                 "month": "MM",
@@ -1819,12 +1822,15 @@ class Compiler:
             return f"TRUNC({column}, '{unit}')"
         if self.driver == "mysql":
             return {
+                "hour": f"CAST(DATE_FORMAT({column}, '%Y-%m-%d %H:00:00') AS DATETIME)",
                 "day": f"DATE({column})",
                 "week": f"DATE_SUB(DATE({column}), INTERVAL WEEKDAY({column}) DAY)",
                 "month": f"CAST(DATE_FORMAT({column}, '%Y-%m-01') AS DATE)",
                 "quarter": f"MAKEDATE(YEAR({column}), 1) + INTERVAL (QUARTER({column}) - 1) QUARTER",
                 "year": f"CAST(DATE_FORMAT({column}, '%Y-01-01') AS DATE)",
             }[grain]
+        if grain == "hour":
+            return f"DATE_TRUNC('hour', {column})"
         if grain == "day":
             return f"CAST({column} AS DATE)"
         return f"CAST(DATE_TRUNC('{grain}', {column}) AS DATE)"
@@ -2401,6 +2407,116 @@ def _group_key(item) -> tuple:
     if isinstance(item, dict):
         return (str(item.get("field", "")).lower(), item.get("grain"))
     return (str(item).lower(), None)
+
+
+def _group_parts(item) -> tuple:
+    """묶음 항목 → (컬럼 이름(테이블 접두 없이, 소문자), 단위 또는 None)"""
+    field = item.get("field", "") if isinstance(item, dict) else item
+    grain = item.get("grain") if isinstance(item, dict) else None
+    return str(field).split(".")[-1].strip().lower(), (str(grain).lower() if grain else None)
+
+
+def _check_grains(group: list) -> None:
+    """질문의 묶음에 같은 날짜 컬럼이 두 단위로 들어 있으면 거부한다 (월과 일, 일과 시각 그대로)."""
+    seen: dict = {}
+    for item in group:
+        field, grain = _group_parts(item)
+        if field in seen and seen[field] != grain:
+            names = [g or "시각 그대로" for g in (seen[field], grain)]
+            raise ValueError(
+                f"group_by 에 {field} 를 {names[0]} 과 {names[1]} 두 단위로 묶었습니다. "
+                "날짜 컬럼은 기간 단위 하나로만 묶으십시오"
+            )
+        seen[field] = grain
+
+
+ROLLUPS = ("SUM", "AVG", "MIN", "MAX", "NONE")
+
+
+def _merge_fixed_by(ast: dict, metrics: list) -> tuple:
+    """지표의 '결과를 나누는 기준' 을 질문의 묶음과 맞춘다 → (ast, metrics).
+
+    날짜 기준 ({"field": 날짜, "grain": "day"}) 은 그 지표의 기본 단위다.
+    - 질문이 그 날짜로 묶지 않으면 기본 단위로 묶는다.
+    - 같은 단위로 물으면 그대로.
+    - 더 큰 단위(월)로 물으면 기본 단위(일)로 먼저 계산한 뒤 질문 단위로 합친다 (_roll_up).
+    - 더 작은 단위(시간)로 물으면 질문 단위로 다시 계산한다 — 기본 단위는 쓰지 않는다.
+    날짜가 아닌 기준 (차량) 은 언제나 결과를 나눈다.
+    """
+    if not any(m.get("fixed_by") for m in metrics):
+        return ast, metrics
+    group = list(ast.get("group_by") or [])
+    for g in group:
+        grain = _group_parts(g)[1]
+        if grain and grain not in GRAINS:
+            raise ValueError(f"grain 은 {', '.join(GRAINS)} 중 하나입니다 -> {grain!r}")
+    out = []
+    for m in metrics:
+        calc = []
+        for b in m.get("fixed_by") or []:
+            field, grain = _group_parts(b)
+            asked = [g for g in group if _group_parts(g)[0] == field]
+            if grain and asked:
+                want = _group_parts(asked[0])[1]
+                if want is None:
+                    raise ValueError(
+                        f"지표 {m['name']!r} 는 {field} 를 기간 단위로 묶습니다. 시각 그대로가 아니라 "
+                        f"{{\"field\": \"{field}\", \"grain\": \"hour\"}} 처럼 단위({', '.join(GRAINS)})로 묶으십시오"
+                    )
+                # 같은 단위 → 그대로. 더 작은 단위(시간) → 질문 단위로 다시 계산 (기본 단위를 쓰지 않음).
+                # 더 큰 단위(월) → 기본 단위로 계산한 뒤 합친다.
+                if GRAINS.index(want) > GRAINS.index(grain):
+                    calc.append(b)
+            elif _group_key(b) not in {_group_key(g) for g in group}:
+                group.append(b)
+        out.append(_roll_up(m, calc) if calc else m)
+    if len(metrics) > 1 and any(o is not m for o, m in zip(out, metrics)):
+        raise ValueError(
+            "지표 여러 개를 함께 물을 때는 지표의 기본 기간 단위보다 큰 단위로 묶을 수 없습니다. "
+            "지표마다 따로 물으십시오"
+        )
+    return {**ast, "group_by": group}, out
+
+
+def _roll_up(metric: dict, calc: list) -> dict:
+    """계산 단위(calc)로 먼저 계산한 뒤 질문의 단위로 합친다.
+
+    이미 집계 안의 집계인 지표 (SUM(… BY 차량)) 는 안쪽 BY 에 계산 단위를 더한다 — 바깥 집계가 합친다.
+    아니면 측정값을 rollup 함수(기본 SUM)로 감싸고 계산 단위를 BY 로 단다. rollup 이 NONE 이면
+    합치지 않고 질문 단위로 다시 계산한다 (월 전체의 MAX - MIN).
+    """
+    if _nested_metric(metric):
+        measures = [{**ms, "expr": _add_inner_by(ms["expr"], calc)} for ms in metric["measures"]]
+        return {**metric, "measures": measures}
+    rollups = {str(ms.get("rollup") or "SUM").upper() for ms in metric["measures"]}
+    if "NONE" in rollups and len(rollups) > 1:
+        raise ValueError(
+            f"지표 {metric['name']!r} 의 측정값이 '다시 계산' 과 '합산' 으로 섞여 있어 "
+            "기본 단위보다 큰 기간으로 묶을 수 없습니다"
+        )
+    if rollups == {"NONE"}:
+        return metric
+    measures = [
+        {
+            **ms,
+            "expr": {
+                "fn": str(ms.get("rollup") or "SUM").upper(),
+                "args": [{**ms["expr"], "by": list(calc)}],
+            },
+        }
+        for ms in metric["measures"]
+    ]
+    return {**metric, "measures": measures}
+
+
+def _add_inner_by(node, calc: list):
+    """식 안의 모든 BY 에 계산 단위를 더한다 (이미 있으면 그대로)"""
+    if not isinstance(node, dict) or "fn" not in node:
+        return node
+    out = {**node, "args": [_add_inner_by(c, calc) for c in _measure_children(node)]}
+    if node.get("by"):
+        out["by"] = list(node["by"]) + [b for b in calc if b not in node["by"]]
+    return out
 
 
 def _nested_metric(metric: dict) -> bool:

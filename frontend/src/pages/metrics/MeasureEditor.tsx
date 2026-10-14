@@ -172,7 +172,10 @@ function byOptions(ctx: Ctx): { item: api.ByItem; label: string }[] {
   return ctx.columns.flatMap((c) =>
     isTemporal(c.type)
       ? [
-          ...Object.entries(GRAIN_LABEL).map(([grain, label]) => ({
+          ...Object.entries(GRAIN_LABEL)
+            // 시 단위는 시각이 있는 컬럼만 (date 는 시각이 없다)
+            .filter(([grain]) => grain !== "hour" || !/^date/i.test(c.type.trim()) || /^datetime/i.test(c.type.trim()))
+            .map(([grain, label]) => ({
             item: { field: c.value, grain },
             label: `${c.value} (${label})`,
           })),
@@ -376,6 +379,22 @@ export function NodeEditor({
   );
 }
 
+const ROLLUP_OPTIONS: { value: NonNullable<api.Measure["rollup"]>; label: string; hint: string }[] = [
+  { value: "SUM", label: "합계", hint: "기본 단위로 계산한 값을 더합니다 (일별 가동시간 → 월 합계)" },
+  { value: "AVG", label: "평균", hint: "기본 단위로 계산한 값의 평균 (하루 평균)" },
+  { value: "MAX", label: "최대", hint: "기본 단위로 계산한 값 중 가장 큰 값" },
+  { value: "MIN", label: "최소", hint: "기본 단위로 계산한 값 중 가장 작은 값" },
+  { value: "NONE", label: "다시 계산", hint: "질문 단위로 식을 다시 계산합니다 (월 전체의 MAX − MIN)" },
+];
+
+/** 합치는 방법을 고를 자리인가 — 맨 위 식이 날짜 단위로 결과를 나누고, 안쪽에 BY 가 없는 지표.
+ *  안쪽 BY 가 있는 지표(SUM(… BY 장비))는 바깥 집계가 합치는 방법이다. */
+function rollupApplies(expr: api.MeasureNode): boolean {
+  if (!isFn(expr)) return false;
+  const timeBy = (expr.by ?? []).some((b) => typeof b !== "string");
+  return timeBy && !expr.args.some(containsBy);
+}
+
 /** 측정값(출력 컬럼) 목록 */
 export function MeasureList({
   kind,
@@ -428,6 +447,25 @@ export function MeasureList({
             </Button>
           </div>
           <NodeEditor node={m.expr} ctx={ctx} onChange={(expr) => set(i, { expr })} />
+          {kind === "aggregate" && rollupApplies(m.expr) && (
+            <div className="expr-by">
+              <span className="expr-arg-label" title="질문이 이 지표의 날짜 단위보다 큰 단위(예: 일 → 월)로 물을 때">
+                더 큰 기간으로 볼 때
+              </span>
+              <select
+                className="select expr-leaf-select"
+                value={m.rollup ?? "SUM"}
+                onChange={(e) => set(i, { rollup: e.target.value as api.Measure["rollup"] })}
+              >
+                {ROLLUP_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">{ROLLUP_OPTIONS.find((o) => o.value === (m.rollup ?? "SUM"))?.hint}</span>
+            </div>
+          )}
         </div>
       ))}
 

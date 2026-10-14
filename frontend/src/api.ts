@@ -62,6 +62,8 @@ export type MeasureNode =
 export interface Measure {
   name: string;
   expr: MeasureNode;
+  /** 기본 기간 단위(일)보다 큰 단위(월)로 물을 때 합치는 방법. NONE = 질문 단위로 다시 계산. 비우면 SUM */
+  rollup?: "SUM" | "AVG" | "MIN" | "MAX" | "NONE" | null;
 }
 
 export interface MetricInput {

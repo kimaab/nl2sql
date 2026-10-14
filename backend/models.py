@@ -4,7 +4,7 @@ from uuid import UUID
 from typing import Literal
 from pydantic import BaseModel, field_validator, model_validator
 
-from compiler import MEASURE_ROW_SERIES, SERIES_FUNCTIONS, measure_functions
+from compiler import MEASURE_ROW_SERIES, ROLLUPS, SERIES_FUNCTIONS, measure_functions
 
 
 class Driver(str, Enum):
@@ -162,11 +162,24 @@ class Measure(BaseModel):
 
     name: str = ""
     expr: dict
+    # 지표의 기본 기간 단위(일)보다 큰 단위(월)로 물을 때 합치는 방법.
+    # SUM·AVG·MIN·MAX 는 기본 단위로 계산한 값을 합치고, NONE 은 질문 단위로 다시 계산한다. 비우면 SUM.
+    rollup: str | None = None
 
     @field_validator("name")
     @classmethod
     def _trim(cls, value: str) -> str:
         return (value or "").strip()
+
+    @field_validator("rollup")
+    @classmethod
+    def _rollup(cls, value):
+        if value is None or not str(value).strip():
+            return None
+        text = str(value).strip().upper()
+        if text not in ROLLUPS:
+            raise ValueError(f"rollup 은 {', '.join(ROLLUPS)} 중 하나입니다")
+        return text
 
 
 class MetricInput(BaseModel):
