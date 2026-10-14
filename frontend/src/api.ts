@@ -51,10 +51,13 @@ export interface SeriesSpec {
 }
 
 /** 측정값 식 트리. 함수를 겹쳐 출력 컬럼 하나를 만든다 (백엔드 compiler 의 측정값 식). */
+/** 묶을 기준 하나. 컬럼 이름이나 날짜 컬럼 + 단위 ({"field": "collect_datetime", "grain": "day"}) */
+export type ByItem = string | { field: string; grain: string };
+
 export type MeasureNode =
   | { col: string }
   | { num: number }
-  | { fn: string; args: MeasureNode[]; by?: string[] };
+  | { fn: string; args: MeasureNode[]; by?: ByItem[] };
 
 export interface Measure {
   name: string;

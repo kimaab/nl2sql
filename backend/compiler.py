@@ -544,6 +544,7 @@ MEASURE_SCALARS = {
     "LEAST": (2, 8),
 }
 MEASURE_ARITHMETIC = {"ADD": "+", "SUB": "-", "MUL": "*", "DIV": "/"}
+MAX_ARITHMETIC_ARGS = 8
 # 직전 행 값. 지표의 series(구분·순서) 로 직전 행을 정한다.
 MEASURE_ROW_SERIES = ("PREV", "DELTA")
 MAX_MEASURE_DEPTH = 12
@@ -569,21 +570,63 @@ def measure_columns(node) -> list:
         return []
     if "col" in node:
         return [str(node["col"])]
-    out = [str(b) for b in node.get("by") or []]
+    out = [by_column(b) for b in node.get("by") or []]
     for child in _measure_children(node):
         out += measure_columns(child)
     return out
 
 
 def measure_nested(node) -> bool:
-    """BY 로 묶은 안쪽 집계가 있는가 (집계형 지표에서 '집계 안의 집계')."""
+    """BY 로 묶은 안쪽 값이 있는가 (집계형 지표에서 '집계 안의 집계').
+
+    BY 는 집계 함수(MAX(x) BY 차량)에도, 집계를 품은 식(ABS(MAX(x) - MIN(x)) BY 차량)에도 붙는다.
+    """
     if not isinstance(node, dict):
         return False
-    if node.get("by") and str(node.get("fn", "")).upper() in MEASURE_AGGREGATES + tuple(
-        SERIES_FUNCTIONS
-    ):
+    if node.get("by") and "fn" in node:
         return True
     return any(measure_nested(c) for c in _measure_children(node))
+
+
+def by_text(item) -> str:
+    """BY 항목 하나를 읽을 수 있게. 컬럼 이름이나 {"field": 날짜컬럼, "grain": "day"}"""
+    if isinstance(item, dict):
+        return f"{item.get('field')}({item.get('grain')})" if item.get("grain") else str(item.get("field"))
+    return str(item)
+
+
+def by_column(item) -> str:
+    return str(item.get("field")) if isinstance(item, dict) else str(item)
+
+
+def split_fixed_by(node, in_agg: bool = False) -> tuple:
+    """집계형 지표의 측정값에서 '결과를 나누는 기준'을 떼어 낸다 → (BY 를 뗀 식, [기준]).
+
+    집계 밖에 있는 BY (ABS(MAX(x) - MIN(x)) BY 차량, SUM(x) BY 차량) 는 바깥 집계가 없으니
+    '먼저 묶고 다시 집계' 가 아니라 결과를 그 기준별로 나눈다 — 질문의 group_by 에 더해진다.
+    집계 안의 BY (SUM(ABS(…) BY 차량)) 는 그대로 둔다 — 안쪽 질의의 묶음이다.
+    """
+    if not isinstance(node, dict) or "fn" not in node:
+        return node, []
+    out = {k: v for k, v in node.items() if k != "by" or in_agg}
+    fixed = [] if in_agg else list(node.get("by") or [])
+    inside = in_agg or str(node["fn"]).upper() in MEASURE_AGGREGATES + tuple(SERIES_FUNCTIONS)
+    args = []
+    for child in _measure_children(node):
+        expr, more = split_fixed_by(child, inside)
+        args.append(expr)
+        fixed += [b for b in more if b not in fixed]
+    out["args"] = args
+    return out, fixed
+
+
+def measure_has_aggregate(node) -> bool:
+    """식 안에 집계 함수가 있는가"""
+    if not isinstance(node, dict) or "fn" not in node:
+        return False
+    if str(node["fn"]).upper() in MEASURE_AGGREGATES + tuple(SERIES_FUNCTIONS):
+        return True
+    return any(measure_has_aggregate(c) for c in _measure_children(node))
 
 
 def measure_text(node) -> str:
@@ -604,12 +647,16 @@ def measure_text(node) -> str:
                 f"({text})"
                 if isinstance(child, dict)
                 and str(child.get("fn", "")).upper() in MEASURE_ARITHMETIC
+                and not child.get("by")
                 else text
             )
 
-        return f" {MEASURE_ARITHMETIC[fn]} ".join(side(a) for a in args) or "?"
+        text = f" {MEASURE_ARITHMETIC[fn]} ".join(side(a) for a in args) or "?"
+        if node.get("by"):
+            return f"({text} BY {', '.join(by_text(b) for b in node['by'])})"
+        return text
     inner = ", ".join(measure_text(a) for a in args) or ("*" if fn == "COUNT" else "")
-    by = f" BY {', '.join(str(b) for b in node['by'])}" if node.get("by") else ""
+    by = f" BY {', '.join(by_text(b) for b in node['by'])}" if node.get("by") else ""
     return f"{fn}({inner}{by})"
 
 
@@ -672,7 +719,7 @@ class Compiler:
             for c in t["columns"]
         }
         self.relations = contract.get("relations", [])
-        self.metrics = {m["name"]: m for m in contract.get("metrics", [])}
+        self.metrics = {m["name"]: _with_fixed_by(m) for m in contract.get("metrics", [])}
         self.driver = contract["driver"]
         # UTC 로 저장된 시각 컬럼의 현지 시차(시간). 날짜 묶음·표시는 컬럼에 더하고,
         # 필터 값은 반대로 UTC 로 바꿔 비교한다 — 컬럼을 감싸지 않아야 인덱스를 탄다.
@@ -693,6 +740,14 @@ class Compiler:
         self._reject_unknown(ast)
 
         metrics = self._metrics(ast)
+        # 지표가 정한 '결과를 나누는 기준' 은 질문의 묶음에 더한다 (같은 기준은 한 번만)
+        fixed = [b for m in metrics for b in m.get("fixed_by") or []]
+        if fixed:
+            group = list(ast.get("group_by") or [])
+            for b in fixed:
+                if _group_key(b) not in {_group_key(g) for g in group}:
+                    group.append(b)
+            ast = {**ast, "group_by": group}
         # 지표 하나면 그 지표의 고정 필터가 WHERE 로, 여럿이면 지표마다 CASE WHEN 안으로 간다.
         metric = metrics[0] if len(metrics) == 1 else None
         if metrics:
@@ -894,8 +949,9 @@ class Compiler:
         inner = f"SELECT {', '.join(inner_select)} {source}"
         if where:
             inner += " WHERE " + " AND ".join(where)
+        # 질문의 묶음과 BY 기준이 같으면 한 번만 (예: 차량별로 묻고 지표도 차량별로 먼저 묶을 때)
         inner += " GROUP BY " + ", ".join(
-            [g["expr"] for g in group_items] + state["by_sql"]
+            dict.fromkeys([g["expr"] for g in group_items] + state["by_sql"])
         )
 
         select = [self._alias(a) for a in group_aliases] + [
@@ -1067,25 +1123,38 @@ class Compiler:
         if not isinstance(args, list):
             raise ValueError(f"{fn} 의 args 는 목록입니다 -> {args!r}")
         if node.get("by") and fn not in MEASURE_AGGREGATES + tuple(SERIES_FUNCTIONS):
-            raise ValueError(f"BY 는 집계 함수에만 씁니다 -> {fn}")
+            # 집계를 품은 식에 BY — 식 전체를 안쪽 질의에서 계산한다 (SUM(ABS(MAX(x) - MIN(x)) BY 차량))
+            if not measure_has_aggregate(node):
+                raise ValueError(
+                    f"BY 는 집계 함수나 집계를 품은 식에만 씁니다 -> {measure_text(node)}"
+                )
+            if state["mode"] != "outer" or not in_agg:
+                raise ValueError(
+                    f"BY 식은 집계형 지표에서 바깥 집계 함수 안에 넣으십시오 (예: SUM(ABS(MAX(x) - MIN(x)) BY 차량)) -> {measure_text(node)}"
+                )
+            return self._inner_aggregate(fn, node, node["by"], state, depth)
 
         def sub(child, inside=in_agg):
             return self._measure(child, state, depth + 1, inside)
 
         if fn in MEASURE_ARITHMETIC:
-            if len(args) != 2:
+            # 더하기·빼기·곱하기는 값을 이어 붙인다 (a - b - c 는 왼쪽부터). 나누기는 두 개만.
+            if fn == "DIV" and len(args) != 2:
                 raise ValueError(
                     f"{fn} 은(는) 값 두 개를 받습니다 -> {measure_text(node)}"
                 )
-            (left, li), (right, ri) = sub(args[0]), sub(args[1])
-            left = f"({left})" if li["compound"] else left
-            right = f"({right})" if ri["compound"] else right
+            if not 2 <= len(args) <= MAX_ARITHMETIC_ARGS:
+                raise ValueError(
+                    f"{fn} 은(는) 값 2~{MAX_ARITHMETIC_ARGS}개를 받습니다 -> {measure_text(node)}"
+                )
+            parts = [sub(a) for a in args]
+            terms = [f"({s})" if i["compound"] else s for s, i in parts]
             sql = (
-                f"{left} * 1.0 / NULLIF({right}, 0)"
+                f"{terms[0]} * 1.0 / NULLIF({terms[1]}, 0)"
                 if fn == "DIV"
-                else f"{left} {MEASURE_ARITHMETIC[fn]} {right}"
+                else f" {MEASURE_ARITHMETIC[fn]} ".join(terms)
             )
-            return sql, _merge(li, ri, compound=True)
+            return sql, _merge(*(i for _, i in parts), compound=True)
 
         if fn in MEASURE_SCALARS:
             low, high = MEASURE_SCALARS[fn]
@@ -1187,13 +1256,7 @@ class Compiler:
             function = fn
         if mode == "row":
             partition = [
-                self._column_sql(
-                    *self._ref(
-                        str(b), ctx["scope"], ctx["base"], "BY 컬럼을 찾을 수 없습니다"
-                    ),
-                    ctx["qualify"],
-                )
-                for b in by
+                self._group_item(b, ctx)["expr"] for b in by
             ]
             over = f"PARTITION BY {', '.join(partition)}" if partition else ""
             return f"{self._agg_sql(function, target, None)} OVER ({over})", {
@@ -1212,25 +1275,28 @@ class Compiler:
     ) -> tuple[str, dict]:
         """중첩 집계의 안쪽. 안쪽 질의의 컬럼으로 등록하고, 바깥에서는 그 별칭을 행 값처럼 쓴다."""
         ctx = state["ctx"]
-        resolved = [
-            self._ref(str(b), ctx["scope"], ctx["base"], "BY 컬럼을 찾을 수 없습니다")
-            for b in by
-        ]
+        # 기준은 컬럼이나 {"field": 날짜컬럼, "grain": "day"} — 날짜 묶음·UTC 보정은 group_by 와 같다
+        resolved = [self._group_item(b, ctx)["expr"] for b in by]
         if state["by"] is None:
             state["by"] = resolved
-            state["by_sql"] = [
-                self._column_sql(t, c, ctx["qualify"]) for t, c in resolved
-            ]
+            state["by_sql"] = resolved
         elif state["by"] != resolved:
             raise ValueError(
                 f"지표 {state['metric']!r} 의 BY 묶음 기준은 하나로 같아야 합니다 -> "
-                f"{', '.join(c for _, c in state['by'])} / {', '.join(c for _, c in resolved)}"
+                f"{', '.join(state['by'])} / {', '.join(resolved)}"
             )
         plain = {k: v for k, v in node.items() if k != "by"}
         inner_state = {**state, "mode": "aggregate", "cond": None}
-        sql, _ = self._measure_agg(
-            fn, plain, plain.get("args") or [], inner_state, depth, False
-        )
+        if fn in MEASURE_AGGREGATES or fn in SERIES_FUNCTIONS:
+            sql, _ = self._measure_agg(
+                fn, plain, plain.get("args") or [], inner_state, depth, False
+            )
+        else:
+            sql, info = self._measure(plain, inner_state, depth, False)
+            if info["row"]:
+                raise ValueError(
+                    f"BY 식 안의 컬럼은 모두 집계 함수 안에 넣으십시오 -> {measure_text(node)}"
+                )
         alias = state["inner"].setdefault(sql, f"_m{len(state['inner']) + 1}")
         return self._identifier(alias), {"agg": False, "row": True, "compound": False}
 
@@ -2299,6 +2365,26 @@ def _merge(*infos, compound: bool = False) -> dict:
         "row": any(i["row"] for i in infos),
         "compound": compound,
     }
+
+
+def _with_fixed_by(metric: dict) -> dict:
+    """집계형 지표의 '결과를 나누는 기준' 을 측정값에서 떼어 fixed_by 로 둔다 (split_fixed_by)."""
+    if metric.get("kind") == "projection" or not metric.get("measures"):
+        return metric
+    measures, fixed = [], []
+    for ms in metric["measures"]:
+        expr, more = split_fixed_by(ms.get("expr"))
+        measures.append({**ms, "expr": expr})
+        fixed += [b for b in more if b not in fixed]
+    if not fixed:
+        return metric
+    return {**metric, "measures": measures, "fixed_by": fixed}
+
+
+def _group_key(item) -> tuple:
+    if isinstance(item, dict):
+        return (str(item.get("field", "")).lower(), item.get("grain"))
+    return (str(item).lower(), None)
 
 
 def _nested_metric(metric: dict) -> bool:

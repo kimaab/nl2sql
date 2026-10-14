@@ -294,7 +294,6 @@ def test_previous_row_inside_aggregate():
         ("aggregate", AMT, "집계되지 않은 값"),
         ("aggregate", fn("SUB", fn("MAX", AMT), AMT), "집계되지 않은 값"),
         ("aggregate", fn("AVG", fn("SUM", AMT)), "BY(묶음 기준)"),
-        ("aggregate", fn("COUNT", by=["deal_ym"]), "바깥 집계 함수 안에"),
         (
             "aggregate",
             fn("SUB", fn("AVG", fn("COUNT", by=["deal_ym"])), fn("MAX", AMT)),
@@ -302,7 +301,7 @@ def test_previous_row_inside_aggregate():
         ),
         ("aggregate", fn("SUM", {"num": 1}), "컬럼이 없습니다"),
         ("aggregate", fn("ROUND", fn("AVG", AMT), AMT), "자릿수"),
-        ("aggregate", fn("SUB", fn("MAX", AMT)), "두 개"),
+        ("aggregate", fn("SUB", fn("MAX", AMT)), "2~8개"),
         ("aggregate", fn("MEDIAN", AMT), "쓸 수 없는 함수"),
         ("aggregate", fn("MAX", fn("PREV", AMT)), "구분 컬럼"),
         ("projection", fn("AVG", fn("SUM", AMT)), "겹칠 수 없습니다"),
@@ -398,3 +397,75 @@ def test_input_names_measures_and_drops_unused_series():
             table_name="t",
             measures=[{"expr": fn("SUM", AMT)}, {"expr": fn("MAX", AMT)}],
         )
+
+
+def test_by_on_expression_computes_whole_expression_inside():
+    """SUM(ABS(MAX(x) - MIN(x)) BY 묶음) — 식 전체가 안쪽 질의의 컬럼 하나가 된다"""
+    span = fn("ABS", fn("SUB", fn("MAX", AMT), fn("MIN", AMT)), by=["apartment_name"])
+    out = make(metric("가격폭 합", "aggregate", [("가격폭 합", fn("SUM", span))])).compile(
+        {"metric": "가격폭 합", "group_by": ["legal_dong"]}
+    )
+    assert out == (
+        'SELECT "legal_dong", SUM("_m1") AS "가격폭 합" FROM (SELECT "legal_dong" AS "legal_dong", '
+        'ABS(MAX("deal_amount_manwon") - MIN("deal_amount_manwon")) AS "_m1" FROM "apartment_trade" '
+        'GROUP BY "legal_dong", "apartment_name") "nested" GROUP BY "legal_dong";'
+    )
+    assert measure_text(fn("SUM", span)) == (
+        "SUM(ABS(MAX(deal_amount_manwon) - MIN(deal_amount_manwon) BY apartment_name))"
+    )
+
+
+@pytest.mark.parametrize(
+    "expr,message",
+    [
+        (fn("SUM", fn("ABS", AMT, by=["apartment_name"])), "집계 함수나 집계를 품은 식"),
+        (
+            fn("SUM", fn("SUB", fn("MAX", AMT), AMT, by=["apartment_name"])),
+            "모두 집계 함수 안",
+        ),
+    ],
+)
+def test_by_expression_errors(expr, message):
+    compiler = make(metric("m", "aggregate", [("m", expr)]))
+    assert message in error(compiler, {"metric": "m"})
+
+
+def test_arithmetic_chains_more_than_two_values():
+    """빼기·더하기는 값을 이어 붙인다 — a - b - c (왼쪽부터)"""
+    span = fn("SUB", fn("MAX", AMT), fn("MIN", AMT), fn("AVG", AMT))
+    out = make(metric("m", "aggregate", [("m", span)])).compile({"metric": "m"})
+    assert out == (
+        'SELECT MAX("deal_amount_manwon") - MIN("deal_amount_manwon") - AVG("deal_amount_manwon") AS "m" '
+        'FROM "apartment_trade";'
+    )
+    assert measure_text(span) == (
+        "MAX(deal_amount_manwon) - MIN(deal_amount_manwon) - AVG(deal_amount_manwon)"
+    )
+    too_many = fn("DIV", AMT, AMT, AMT)
+    assert "두 개" in error(make(metric("d", "projection", [("d", too_many)])), {"metric": "d"})
+
+
+def test_by_outside_aggregate_splits_result():
+    """바깥 집계 없는 BY 는 결과를 그 기준별로 나눈다 — 질문의 묶음에 더해진다 (daily_stats 모양)"""
+    span = fn(
+        "ABS",
+        fn("SUB", fn("MAX", AMT), fn("MIN", AMT)),
+        by=[{"field": "deal_date", "grain": "day"}, "apartment_name"],
+    )
+    compiler = make(metric("가격폭", "aggregate", [("가격폭", span)]))
+    assert compiler.compile({"metric": "가격폭"}) == (
+        'SELECT CAST("deal_date" AS DATE) AS "deal_date_day", "apartment_name", '
+        'ABS(MAX("deal_amount_manwon") - MIN("deal_amount_manwon")) AS "가격폭" '
+        'FROM "apartment_trade" GROUP BY CAST("deal_date" AS DATE), "apartment_name";'
+    )
+    # 질문이 같은 기준으로 묶어도 한 번만
+    same = compiler.compile({"metric": "가격폭", "group_by": ["apartment_name"]})
+    assert same.count('"apartment_name"') == 2  # SELECT 와 GROUP BY 에 한 번씩
+
+
+def test_inner_by_accepts_date_grain():
+    """안쪽 BY 기준에도 날짜 단위를 쓴다 — SUM(COUNT(*) BY 월) 처럼"""
+    expr = fn("AVG", fn("COUNT", by=[{"field": "deal_date", "grain": "month"}]))
+    out = make(metric("월평균 건수", "aggregate", [("월평균 건수", expr)])).compile({"metric": "월평균 건수"})
+    assert "GROUP BY CAST(DATE_TRUNC('month', \"deal_date\") AS DATE)" in out
+    assert measure_text(expr) == "AVG(COUNT(* BY deal_date(month)))"

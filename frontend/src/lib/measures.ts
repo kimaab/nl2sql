@@ -1,4 +1,4 @@
-import type { Measure, MeasureNode, MetricInput } from "../api";
+import type { ByItem, Measure, MeasureNode, MetricInput } from "../api";
 
 /** 측정값 식에 쓸 수 있는 함수. 백엔드 compiler 의 MEASURE_* 와 같다. */
 export type FnGroup = "집계" | "계산" | "함수" | "직전 행";
@@ -35,9 +35,9 @@ export const MEASURE_FUNCTIONS: FnSpec[] = [
     max: 1,
     hint: "정상값에서 다른 값으로 바뀐 순간만 셉니다 (집계형 전용)",
   },
-  { fn: "ADD", label: "＋ 더하기", group: "계산", min: 2, max: 2, hint: "a + b" },
-  { fn: "SUB", label: "－ 빼기", group: "계산", min: 2, max: 2, hint: "a - b" },
-  { fn: "MUL", label: "× 곱하기", group: "계산", min: 2, max: 2, hint: "a × b" },
+  { fn: "ADD", label: "＋ 더하기", group: "계산", min: 2, max: 8, hint: "a + b + … ( + 값 으로 더 붙입니다)" },
+  { fn: "SUB", label: "－ 빼기", group: "계산", min: 2, max: 8, hint: "a - b - … ( + 값 으로 더 붙입니다)" },
+  { fn: "MUL", label: "× 곱하기", group: "계산", min: 2, max: 8, hint: "a × b × … ( + 값 으로 더 붙입니다)" },
   { fn: "DIV", label: "÷ 나누기", group: "계산", min: 2, max: 2, hint: "a ÷ b. 0으로 나누면 비웁니다(NULL)" },
   { fn: "ROUND", label: "반올림 ROUND", group: "함수", min: 1, max: 2, hint: "두 번째 값은 소수 자릿수 (0이면 정수)" },
   { fn: "ABS", label: "절댓값 ABS", group: "함수", min: 1, max: 1, hint: "부호를 뗍니다 — 증감의 크기" },
@@ -56,10 +56,18 @@ const AGGREGATES = ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "DELT
 
 export const isCol = (n: MeasureNode): n is { col: string } => "col" in n;
 export const isNum = (n: MeasureNode): n is { num: number } => "num" in n;
-export const isFn = (n: MeasureNode): n is { fn: string; args: MeasureNode[]; by?: string[] } => "fn" in n;
+export const isFn = (n: MeasureNode): n is { fn: string; args: MeasureNode[]; by?: ByItem[] } => "fn" in n;
 export const isAggregate = (fn: string) => AGGREGATES.includes(fn);
 /** 컬럼 하나만 받는 함수 (직전 행 값·시계열 집계) */
 export const needsColumn = (fn: string) => SERIES_FNS.includes(fn);
+
+export const GRAIN_LABEL: Record<string, string> = { day: "일", week: "주", month: "월", quarter: "분기", year: "연" };
+
+/** 묶을 기준의 컬럼 이름 */
+export const byColumn = (b: ByItem): string => (typeof b === "string" ? b : b.field);
+/** 묶을 기준을 읽을 수 있게 — 백엔드 by_text 와 같은 모양 (collect_datetime(day)) */
+export const byText = (b: ByItem): string => (typeof b === "string" ? b : `${b.field}(${b.grain})`);
+export const byKey = (b: ByItem): string => (typeof b === "string" ? b : `${b.field}|${b.grain}`);
 
 /** 사람이 읽는 식. 백엔드 measure_text 와 같은 모양이다. */
 export function exprText(n: MeasureNode | undefined): string {
@@ -68,11 +76,12 @@ export function exprText(n: MeasureNode | undefined): string {
   if (isNum(n)) return String(n.num);
   const args = n.args ?? [];
   if (ARITH[n.fn]) {
-    const side = (c: MeasureNode) => (isFn(c) && ARITH[c.fn] ? `(${exprText(c)})` : exprText(c));
-    return args.map(side).join(` ${ARITH[n.fn]} `) || "?";
+    const side = (c: MeasureNode) => (isFn(c) && ARITH[c.fn] && !c.by?.length ? `(${exprText(c)})` : exprText(c));
+    const text = args.map(side).join(` ${ARITH[n.fn]} `) || "?";
+    return n.by?.length ? `(${text} BY ${n.by.map(byText).join(", ")})` : text;
   }
   const inner = args.map(exprText).join(", ") || (n.fn === "COUNT" ? "*" : "");
-  const by = n.by?.length ? ` BY ${n.by.join(", ")}` : "";
+  const by = n.by?.length ? ` BY ${n.by.map(byText).join(", ")}` : "";
   return `${n.fn}(${inner}${by})`;
 }
 
@@ -100,7 +109,7 @@ export function exprComplete(n: MeasureNode): boolean {
   if (isNum(n)) return Number.isFinite(n.num);
   const spec = FN[n.fn];
   if (!spec || n.args.length < spec.min || n.args.length > spec.max) return false;
-  return n.args.every(exprComplete) && (n.by ?? []).every(Boolean);
+  return n.args.every(exprComplete) && (n.by ?? []).every((b) => Boolean(byColumn(b)));
 }
 
 /** 컬럼 참조를 모두 바꾼다 (조인이 생기거나 사라질 때). null 을 돌려주면 그 컬럼은 빈 칸이 된다. */
@@ -110,7 +119,13 @@ export function mapColumns(n: MeasureNode, fix: (ref: string) => string | null):
   return {
     ...n,
     args: n.args.map((a) => mapColumns(a, fix)),
-    ...(n.by ? { by: n.by.map((b) => fix(b) ?? "").filter(Boolean) } : {}),
+    ...(n.by
+      ? {
+          by: n.by
+            .map((b): ByItem => (typeof b === "string" ? fix(b) ?? "" : { ...b, field: fix(b.field) ?? "" }))
+            .filter((b) => Boolean(byColumn(b))),
+        }
+      : {}),
   };
 }
 
@@ -123,7 +138,7 @@ export function wrap(n: MeasureNode, fn: string): MeasureNode {
 }
 
 /** 같은 자리에서 함수만 바꾼다. 값 개수를 새 함수에 맞춘다. */
-export function changeFn(n: { fn: string; args: MeasureNode[]; by?: string[] }, fn: string): MeasureNode {
+export function changeFn(n: { fn: string; args: MeasureNode[]; by?: ByItem[] }, fn: string): MeasureNode {
   const spec = FN[fn];
   const args = n.args.slice(0, spec.max);
   while (args.length < spec.min) args.push({ num: 0 });

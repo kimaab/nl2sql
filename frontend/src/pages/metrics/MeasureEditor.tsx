@@ -1,11 +1,15 @@
 import { useState } from "react";
 import type * as api from "../../api";
 import { Button, Chip } from "../../components/ui";
+import { isTemporal } from "../../lib/metrics";
 import {
+  byColumn,
+  byKey,
   changeFn,
   exprText,
   FN,
   FN_GROUPS,
+  GRAIN_LABEL,
   isAggregate,
   isCol,
   isFn,
@@ -28,16 +32,18 @@ type Ctx = {
 
 const SERIES_AGGREGATES = ["DELTA_SUM", "CHANGE_COUNT"];
 
-/** 이 노드를 감쌀 수 있는 함수인가 */
-function canWrap(fn: string, node: api.MeasureNode, ctx: Ctx, insideAgg: boolean): boolean {
+/** 이 노드를 감쌀 수 있는 함수인가. aggs = 이 노드를 감싼 집계 함수 수 */
+function canWrap(fn: string, node: api.MeasureNode, ctx: Ctx, aggs: number): boolean {
   if (needsColumn(fn)) {
     if (!isCol(node) || !ctx.baseColumns.includes(node.col)) return false;
-    if (SERIES_AGGREGATES.includes(fn)) return ctx.kind === "aggregate" && !insideAgg;
+    if (SERIES_AGGREGATES.includes(fn)) return ctx.kind === "aggregate" && aggs === 0;
     return true;
   }
   if (isAggregate(fn)) {
-    // 조회형은 집계를 겹칠 수 없다 (윈도 안의 윈도). 집계형은 한 단계까지 겹친다 (BY).
-    if (insideAgg) return false;
+    // 조회형은 집계를 겹칠 수 없다 (윈도 안의 윈도). 집계형은 한 단계까지 겹친다 (BY) —
+    // 바깥 집계 안(aggs 1)에서도 안쪽 질의의 집계(MAX·MIN …)는 더 넣을 수 있다.
+    if (ctx.kind === "aggregate" && aggs === 1) return !(isFn(node) && containsAggregate(node));
+    if (aggs > 0) return false;
     if (isFn(node) && containsAggregate(node)) return ctx.kind === "aggregate" && !containsBy(node);
     return true;
   }
@@ -52,22 +58,25 @@ function containsBy(n: api.MeasureNode): boolean {
   return isFn(n) && (Boolean(n.by?.length) || n.args.some(containsBy));
 }
 
-/** 집계를 집계로 감쌀 때 안쪽 집계에 BY 칸을 열어 둔다 — 비워 두면 저장되지 않아 고르게 된다 */
+/** 집계를 집계로 감쌀 때 안쪽에 BY 칸을 열어 둔다 — 비워 두면 저장되지 않아 고르게 된다.
+ *  감싸는 값이 집계를 품은 식(ABS(MAX − MIN))이면 식 전체에 하나만 연다 — 식이 통째로 안쪽 질의에서 계산된다. */
 function openBy(n: api.MeasureNode): api.MeasureNode {
   if (!isFn(n)) return n;
-  if (isAggregate(n.fn)) return { ...n, by: n.by?.length ? n.by : [""] };
-  return { ...n, args: n.args.map(openBy) };
+  return { ...n, by: n.by?.length ? n.by : [""] };
 }
 
 function WrapSelect({
   node,
   ctx,
-  insideAgg,
+  aggs,
+  byHere,
   onChange,
 }: {
   node: api.MeasureNode;
   ctx: Ctx;
-  insideAgg: boolean;
+  aggs: number;
+  /** 바깥 집계 바로 아래 식 — 감싸면 BY 가 새 바깥 식으로 따라 올라간다 */
+  byHere: boolean;
   onChange: (n: api.MeasureNode) => void;
 }) {
   return (
@@ -79,12 +88,19 @@ function WrapSelect({
         const fn = e.target.value;
         if (!fn) return;
         const inner = isAggregate(fn) && ctx.kind === "aggregate" && containsAggregate(node) ? openBy(node) : node;
-        onChange(wrap(inner, fn));
+        const wrapped = wrap(inner, fn);
+        if (byHere && !isAggregate(fn) && isFn(inner) && inner.by?.length && isFn(wrapped)) {
+          // ABS(…) BY 차량 을 빼기로 감싸면 (ABS(…) - b) BY 차량 — 새로 붙는 b 도 같은 묶음 안에서 계산된다
+          const { by, ...plain } = inner;
+          onChange({ ...wrapped, args: [plain, ...wrapped.args.slice(1)], by });
+          return;
+        }
+        onChange(wrapped);
       }}
     >
       <option value="">ƒ 감싸기</option>
       {FN_GROUPS.map((g) => {
-        const options = MEASURE_FUNCTIONS.filter((f) => f.group === g && canWrap(f.fn, node, ctx, insideAgg));
+        const options = MEASURE_FUNCTIONS.filter((f) => f.group === g && canWrap(f.fn, node, ctx, aggs));
         return options.length ? (
           <optgroup key={g} label={g}>
             {options.map((f) => (
@@ -99,8 +115,11 @@ function WrapSelect({
   );
 }
 
+/** 값을 이어 붙일 수 있는 계산의 '추가' 버튼 이름 */
+const ARITH_ADD: Record<string, string> = { ADD: "더할 값", SUB: "뺄 값", MUL: "곱할 값" };
+
 function argLabel(fn: string, i: number): string {
-  if (fn === "ADD" || fn === "SUB" || fn === "MUL" || fn === "DIV") return i === 0 ? "a" : "b";
+  if (fn === "ADD" || fn === "SUB" || fn === "MUL" || fn === "DIV") return "abcdefgh"[i] ?? "";
   if (fn === "ROUND") return i === 0 ? "값" : "자릿수";
   if (FN[fn].max > 2) return `값 ${i + 1}`;
   return "";
@@ -148,61 +167,94 @@ function LeafEditor({
   );
 }
 
+/** 묶을 기준 고르기 목록 — 날짜 컬럼은 그대로 묶거나 일·주·월·분기·연 단위로 묶는다 */
+function byOptions(ctx: Ctx): { item: api.ByItem; label: string }[] {
+  return ctx.columns.flatMap((c) =>
+    isTemporal(c.type)
+      ? [
+          ...Object.entries(GRAIN_LABEL).map(([grain, label]) => ({
+            item: { field: c.value, grain },
+            label: `${c.value} (${label})`,
+          })),
+          { item: c.value, label: `${c.value} (시각 그대로)` },
+        ]
+      : [{ item: c.value, label: c.value }]
+  );
+}
+
+const byLabel = (b: api.ByItem) => (typeof b === "string" ? b : `${b.field} (${GRAIN_LABEL[b.grain] ?? b.grain})`);
+
 function ByEditor({
   by,
   ctx,
+  inner,
   onChange,
 }: {
-  by: string[];
+  by: api.ByItem[];
   ctx: Ctx;
-  onChange: (by: string[] | undefined) => void;
+  /** 바깥 집계 안의 기준인가 — 먼저 묶어 계산한 뒤 바깥 집계로 합친다. 아니면 결과를 이 기준별로 나눈다 */
+  inner: boolean;
+  onChange: (by: api.ByItem[] | undefined) => void;
 }) {
+  // 감쌀 때 열어 둔 빈 칸("")은 '아직 고르지 않음' — 고르기 전에는 저장되지 않는다
+  const chosen = by.filter((b) => Boolean(byColumn(b)));
+  const taken = new Set(chosen.map(byKey));
+  const options = byOptions(ctx).filter((o) => !taken.has(byKey(o.item)));
+  const meaning =
+    ctx.kind === "projection"
+      ? "이 기준별로 따로 집계합니다 (윈도)"
+      : inner
+        ? "먼저 이 기준으로 묶어 계산한 뒤 바깥 집계로 합칩니다"
+        : "결과를 이 기준별로 나눠 보여 줍니다";
   return (
     <div className="expr-by">
-      <span className="expr-arg-label" title={ctx.kind === "aggregate" ? "이 기준으로 먼저 묶어 집계한 뒤, 바깥 함수가 그 결과를 다시 집계합니다" : "이 기준별로 따로 집계합니다 (윈도)"}>
-        {ctx.kind === "aggregate" ? "먼저 묶을 기준 BY" : "묶음별 BY"}
+      <span className="expr-arg-label" title={`${meaning}. 여러 개 고를 수 있습니다`}>
+        묶을 기준
       </span>
-      {by.map((b, i) => (
-        <span key={i} className="row" style={{ gap: 4 }}>
-          <select
-            className="select expr-leaf-select"
-            value={b}
-            onChange={(e) => onChange(by.map((x, k) => (k === i ? e.target.value : x)))}
-          >
-            <option value="" disabled>
-              기준 컬럼
-            </option>
-            {ctx.columns.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.value}
-              </option>
-            ))}
-          </select>
-          <Button size="sm" variant="ghost" onClick={() => onChange(by.filter((_, k) => k !== i))}>
-            ✕
-          </Button>
-        </span>
+      {chosen.map((b) => (
+        <Chip key={byKey(b)} selected onClick={() => onChange(chosen.filter((x) => byKey(x) !== byKey(b)))}>
+          {byLabel(b)} ✕
+        </Chip>
       ))}
-      <Button size="sm" variant="ghost" onClick={() => onChange([...by, ""])}>
-        + 기준
-      </Button>
+      <select
+        className="select expr-leaf-select"
+        value=""
+        aria-label="묶을 기준 추가"
+        onChange={(e) => {
+          const picked = options.find((o) => byKey(o.item) === e.target.value);
+          if (picked) onChange([...chosen, picked.item]);
+        }}
+      >
+        <option value="">{chosen.length ? "+ 기준 추가" : "기준 컬럼 고르기"}</option>
+        {options.map((o) => (
+          <option key={byKey(o.item)} value={byKey(o.item)}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      <span className="field-hint">
+        {chosen.length === 0 && by.length > 0 ? "기준을 하나 이상 고르세요" : meaning}
+      </span>
     </div>
   );
 }
 
-/** 식 트리의 노드 하나. 함수 노드는 값(args)마다 자기 자신을 다시 그린다. */
+/** 식 트리의 노드 하나. 함수 노드는 값(args)마다 자기 자신을 다시 그린다.
+ *  aggs: 이 노드를 감싼 집계 함수 수. byHere: 집계형 지표에서 바깥 집계 바로 아래 값인가 (BY 를 다는 자리). */
 export function NodeEditor({
   node,
   ctx,
   onChange,
-  insideAgg = false,
+  aggs = 0,
+  byHere = false,
   onlyBase = false,
   depth = 0,
 }: {
   node: api.MeasureNode;
   ctx: Ctx;
   onChange: (n: api.MeasureNode) => void;
-  insideAgg?: boolean;
+  aggs?: number;
+  byHere?: boolean;
   onlyBase?: boolean;
   depth?: number;
 }) {
@@ -210,17 +262,27 @@ export function NodeEditor({
     return (
       <div className="expr-leaf">
         <LeafEditor node={node} ctx={ctx} onlyBase={onlyBase} onChange={onChange} />
-        {!onlyBase && <WrapSelect node={node} ctx={ctx} insideAgg={insideAgg} onChange={onChange} />}
+        {!onlyBase && <WrapSelect node={node} ctx={ctx} aggs={aggs} byHere={byHere} onChange={onChange} />}
       </div>
     );
   }
 
   const spec = FN[node.fn];
   const agg = isAggregate(node.fn);
-  const argsInsideAgg = insideAgg || agg;
+  const argsAggs = aggs + (agg ? 1 : 0);
   const by = node.by ?? [];
-  // 조회형: 집계는 언제나 윈도라 BY 가 묶음 기준이 된다. 집계형: 다른 집계 안에서만 BY 를 쓴다.
-  const showBy = agg && !SERIES_AGGREGATES.includes(node.fn) && (ctx.kind === "projection" || insideAgg || by.length > 0);
+  // 조회형: 집계는 언제나 윈도라 BY 가 묶음 기준이 된다.
+  // 집계형: 집계가 하나라도 있으면 두 자리에 칸을 연다.
+  //  - 측정값 맨 위 식: 결과를 이 기준별로 나눈다 (질문의 묶음에 더해짐)
+  //  - 바깥 집계 바로 아래 식: 먼저 묶어 계산한 뒤 바깥 집계로 합친다 (안쪽 질의)
+  // 이미 적힌 BY 는 어디에 있든 보여 준다.
+  const showBy =
+    by.length > 0 ||
+    (ctx.kind === "projection"
+      ? agg && !SERIES_AGGREGATES.includes(node.fn)
+      : (depth === 0 || byHere) && !SERIES_AGGREGATES.includes(node.fn) && (agg || containsAggregate(node)));
+  // 바깥 집계(aggs 0 의 집계)의 값이 BY 자리다
+  const childByHere = ctx.kind === "aggregate" && agg && aggs === 0;
   const setArg = (i: number, n: api.MeasureNode) => onChange({ ...node, args: node.args.map((a, k) => (k === i ? n : a)) });
 
   return (
@@ -250,7 +312,7 @@ export function NodeEditor({
         </select>
         <span className="field-hint expr-hint">{spec?.hint}</span>
         <span className="spacer" />
-        <WrapSelect node={node} ctx={ctx} insideAgg={insideAgg} onChange={onChange} />
+        <WrapSelect node={node} ctx={ctx} aggs={aggs} byHere={byHere} onChange={onChange} />
         <Button
           size="sm"
           variant="ghost"
@@ -267,7 +329,8 @@ export function NodeEditor({
             <NodeEditor
               node={a}
               ctx={ctx}
-              insideAgg={argsInsideAgg}
+              aggs={argsAggs}
+              byHere={childByHere}
               onlyBase={needsColumn(node.fn)}
               depth={depth + 1}
               onChange={(n) => setArg(i, n)}
@@ -284,11 +347,19 @@ export function NodeEditor({
             <Button
               size="sm"
               variant="ghost"
+              aria-label={`+ ${node.fn === "ROUND" ? "자릿수" : ARITH_ADD[node.fn] ?? "값"}`}
+              title={ARITH_ADD[node.fn] ? "값을 하나 더 이어 붙입니다 (a − b − c …). 새 값은 컬럼을 고른 뒤 ƒ 감싸기로 MAX·MIN 등을 씌웁니다" : undefined}
               onClick={() =>
-                onChange({ ...node, args: [...node.args, node.fn === "ROUND" ? { num: 0 } : { col: ctx.columns[0]?.value ?? "" }] })
+                onChange({
+                  ...node,
+                  args: [
+                    ...node.args,
+                    node.fn === "ROUND" ? { num: 0 } : ARITH_ADD[node.fn] ? { num: node.fn === "MUL" ? 1 : 0 } : { col: ctx.columns[0]?.value ?? "" },
+                  ],
+                })
               }
             >
-              + {node.fn === "ROUND" ? "자릿수" : "값"}
+              + {node.fn === "ROUND" ? "자릿수" : ARITH_ADD[node.fn] ?? "값"}
             </Button>
           </div>
         )}
@@ -297,6 +368,7 @@ export function NodeEditor({
         <ByEditor
           by={by}
           ctx={ctx}
+          inner={aggs > 0}
           onChange={(b) => onChange(b && b.length ? { ...node, by: b } : { fn: node.fn, args: node.args })}
         />
       )}
