@@ -23,7 +23,8 @@ def load_tables(system_id: UUID) -> dict:
     rows = db.query(
         """
         SELECT t.id AS table_id, t.name AS table_name, t.comment AS table_note, t.purpose,
-               c.name AS column_name, c.data_type, c.comment AS column_note, c.is_pk
+               c.name AS column_name, c.data_type, c.comment AS column_note, c.is_pk,
+               c.utc_offset_hours
           FROM meta_table t
           LEFT JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
          WHERE t.system_id = %s AND t.deleted_at IS NULL
@@ -52,6 +53,8 @@ def load_tables(system_id: UUID) -> dict:
             }
             if r["is_pk"]:
                 column["is_pk"] = True
+            if r["utc_offset_hours"]:
+                column["utc_offset"] = r["utc_offset_hours"]
             table["columns"].append(column)
     return tables
 

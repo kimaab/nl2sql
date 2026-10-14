@@ -37,6 +37,7 @@ from models import (
     SystemInput,
     TableInfo,
     TablePurposeInput,
+    UtcOffsetInput,
 )
 from systems import (
     create_system,
@@ -47,6 +48,7 @@ from systems import (
     list_systems,
     list_tables,
     set_table_purpose,
+    set_utc_offset,
     sync_system,
     update_system,
 )
@@ -174,6 +176,11 @@ def get_tables(system_id: UUID):
 @app.put("/api/systems/{system_id}/tables/{table_id}/purpose", response_model=TableInfo)
 def put_table_purpose(system_id: UUID, table_id: UUID, req: TablePurposeInput):
     return set_table_purpose(system_id, table_id, req.purpose)
+
+
+@app.put("/api/systems/{system_id}/tables/{table_id}/utc-offset", response_model=TableInfo)
+def put_utc_offset(system_id: UUID, table_id: UUID, req: UtcOffsetInput):
+    return set_utc_offset(system_id, table_id, req.column, req.utc_offset_hours)
 
 
 # ── 관계 ───────────────────────────────────────────────────────────────

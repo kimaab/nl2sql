@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import db
 import secret
 from catalog import read_catalog
+from compiler import temporal_kind
 from models import (
     ApiException,
     Driver,
@@ -15,6 +16,7 @@ from models import (
     System,
     SystemInput,
     TableInfo,
+    TimeColumn,
 )
 from relations import replace_fk_relations
 
@@ -405,6 +407,7 @@ def list_tables(system_id: UUID) -> list[TableInfo]:
     """,
         str(system_id),
     )
+    times = _time_columns(system_id)
     return [
         TableInfo(
             id=r["id"],
@@ -413,9 +416,58 @@ def list_tables(system_id: UUID) -> list[TableInfo]:
             purpose=r["purpose"],
             column_count=r["column_count"],
             metric_count=r["metric_count"],
+            time_columns=times.get(r["id"], []),
         )
         for r in rows
     ]
+
+
+def _time_columns(system_id: UUID) -> dict:
+    """테이블별 시각 컬럼 (UTC 보정값을 적을 수 있는 컬럼). 날짜뿐인 컬럼은 시차가 뜻이 없어 뺀다."""
+    rows = db.query(
+        """
+        SELECT c.table_id, c.name, c.data_type, c.utc_offset_hours, s.driver
+          FROM meta_column c
+          JOIN meta_table t ON t.id = c.table_id
+          JOIN meta_system s ON s.id = t.system_id
+         WHERE t.system_id = %s AND t.deleted_at IS NULL AND c.deleted_at IS NULL
+         ORDER BY c.table_id, c.ordinal
+    """,
+        str(system_id),
+    )
+    out: dict = {}
+    for r in rows:
+        if temporal_kind(r["data_type"], r["driver"]) == "datetime":
+            out.setdefault(r["table_id"], []).append(
+                TimeColumn(
+                    name=r["name"],
+                    data_type=r["data_type"],
+                    utc_offset_hours=r["utc_offset_hours"],
+                )
+            )
+    return out
+
+
+def set_utc_offset(
+    system_id: UUID, table_id: UUID, column: str, hours: int | None
+) -> TableInfo:
+    found = next((t for t in list_tables(system_id) if t.id == table_id), None)
+    if found is None:
+        raise ApiException(404, "테이블을 찾을 수 없습니다")
+    if column not in {c.name for c in found.time_columns}:
+        raise ApiException(
+            400, f"{column} 은(는) 시각을 포함한 날짜 컬럼이 아니라 UTC 보정을 쓸 수 없습니다"
+        )
+    with db.connection() as conn:
+        conn.execute(
+            """
+            UPDATE meta_column SET utc_offset_hours = %s, updated_at = now()
+             WHERE table_id = %s AND name = %s AND deleted_at IS NULL
+        """,
+            (hours, str(table_id), column),
+        )
+    log.info("utc offset %s.%s = %s", found.name, column, hours)
+    return next(t for t in list_tables(system_id) if t.id == table_id)
 
 
 def set_table_purpose(system_id: UUID, table_id: UUID, purpose: str) -> TableInfo:

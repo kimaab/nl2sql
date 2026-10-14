@@ -74,6 +74,12 @@ def next_day(iso_date: str) -> str:
     return d.isoformat()
 
 
+def to_utc(iso: str, offset_hours: int) -> str:
+    """현지 날짜·시각을 UTC 시각 문자열로. '2026-10-09' (+9) -> '2026-10-08 15:00:00'"""
+    local = datetime.datetime.fromisoformat(iso)
+    return (local - datetime.timedelta(hours=offset_hours)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 FILTER_SOURCES = ("literal", "relative", "question")
 _RELATIVE_RE = re.compile(r"^([+-]?\d+)([dmy])$")
 JOIN_TYPES = {"inner": "INNER JOIN", "left": "LEFT JOIN"}
@@ -668,6 +674,15 @@ class Compiler:
         self.relations = contract.get("relations", [])
         self.metrics = {m["name"]: m for m in contract.get("metrics", [])}
         self.driver = contract["driver"]
+        # UTC 로 저장된 시각 컬럼의 현지 시차(시간). 날짜 묶음·표시는 컬럼에 더하고,
+        # 필터 값은 반대로 UTC 로 바꿔 비교한다 — 컬럼을 감싸지 않아야 인덱스를 탄다.
+        self.utc_offsets = {
+            (t["name"], c["name"]): int(c["utc_offset"])
+            for t in contract["tables"]
+            for c in t["columns"]
+            if c.get("utc_offset")
+            and temporal_kind(c.get("type", ""), self.driver) == "datetime"
+        }
         self.quote = self._QUOTE.get(contract["driver"], '"')
 
     # ------------------------------------------------------------ 진입점
@@ -1031,7 +1046,11 @@ class Compiler:
                 ctx["base"],
                 "측정값의 컬럼을 찾을 수 없습니다",
             )
-            return self._column_sql(owner, column, ctx["qualify"]), {
+            sql = self._column_sql(owner, column, ctx["qualify"])
+            if state["mode"] == "row" and depth == 0:
+                # 조회형 지표가 시각 컬럼을 그대로 보여 줄 때만 현지 시각으로 — 식 안의 값은 건드리지 않는다
+                sql = self._local(owner, column, sql)
+            return sql, {
                 "agg": False,
                 "row": True,
                 "compound": False,
@@ -1462,11 +1481,15 @@ class Compiler:
         out = []
         for column in columns:
             owner, resolved = self._ref(str(column), ctx["scope"], ctx["base"])
+            sql = self._column_sql(owner, resolved, ctx["qualify"])
+            local = self._local(owner, resolved, sql)
             out.append(
                 {
                     "table": owner,
                     "column": resolved,
-                    "sql": self._column_sql(owner, resolved, ctx["qualify"]),
+                    "sql": sql if local == sql else f"{local} AS {self._alias(resolved)}",
+                    # 보정한 컬럼은 정렬도 결과 별칭으로 — DISTINCT 목록은 SELECT 의 식으로만 정렬된다
+                    "alias": None if local == sql else resolved,
                 }
             )
         return out
@@ -1676,7 +1699,7 @@ class Compiler:
             raise ValueError(
                 f"{owner}.{resolved} 는 날짜 컬럼이 아니라 grain 으로 묶을 수 없습니다"
             )
-        expr = self._truncate(column, grain)
+        expr = self._truncate(self._local(owner, resolved, column), grain)
         alias = f"{resolved}_{grain}"
         return {
             "expr": expr,
@@ -1685,6 +1708,17 @@ class Compiler:
             "table": owner,
             "column": resolved,
         }
+
+    def _local(self, table: str, column: str, sql: str) -> str:
+        """UTC 로 저장된 시각 컬럼을 현지 시각으로. 보정값이 없으면 그대로."""
+        hours = self.utc_offsets.get((table, column))
+        if not hours:
+            return sql
+        if self.driver == "mysql":
+            return f"({sql} + INTERVAL {hours} HOUR)"
+        if self.driver == "oracle":
+            return f"({sql} + INTERVAL '{hours}' HOUR)"
+        return f"({sql} + INTERVAL '{hours} hours')"
 
     def _truncate(self, column: str, grain: str) -> str:
         """날짜를 기간 단위의 첫날로 내린다. 드라이버마다 문법이 다르다."""
@@ -1889,6 +1923,16 @@ class Compiler:
                 raise ValueError(
                     f"distinct 목록은 조회한 컬럼으로만 정렬할 수 있습니다 -> {field}"
                 )
+            shifted = next(
+                (
+                    c["alias"]
+                    for c in row_columns or []
+                    if c.get("alias") and (c["table"], c["column"]) == (owner, resolved)
+                ),
+                None,
+            )
+            if shifted:
+                column = self._alias(shifted)
             out.append(self._order_term(column, direction))
         return out
 
@@ -2041,8 +2085,9 @@ class Compiler:
                     f"{operator!r}의 value는 비어 있지 않은 목록이어야 합니다 -> {values!r}"
                 )
             if temporal:
+                offset = self.utc_offsets.get((table, resolved))
                 rendered = ", ".join(
-                    self._temporal_value(temporal, v, where) for v in values
+                    self._temporal_value(temporal, v, where, offset) for v in values
                 )
             else:
                 rendered = ", ".join(self._value(data_type, v, where) for v in values)
@@ -2056,7 +2101,11 @@ class Compiler:
 
         if temporal:
             operator, rendered = self._temporal_compare(
-                temporal, operator, spec.get("value"), where
+                temporal,
+                operator,
+                spec.get("value"),
+                where,
+                self.utc_offsets.get((table, resolved)),
             )
             return f"{column} {self._OPERATORS[operator]} {rendered}"
         rendered = self._value(data_type, spec.get("value"), where)
@@ -2090,7 +2139,9 @@ class Compiler:
             raise ValueError(f"{where} 의 값은 숫자입니다 -> {value!r}") from None
         return str(int(number)) if number.is_integer() else str(number)
 
-    def _temporal_value(self, column_kind: str, value, where: str) -> str:
+    def _temporal_value(
+        self, column_kind: str, value, where: str, offset: int | None = None
+    ) -> str:
         """날짜 값을 타입이 붙은 리터럴로.
 
         Oracle 은 문자열→DATE 암묵 변환이 NLS_DATE_FORMAT 에 좌우돼서
@@ -2104,9 +2155,18 @@ class Compiler:
                 f"(자정인 행만 걸립니다) -> {value!r}. "
                 "greater_or_equal 과 less_or_equal 로 기간을 지정하십시오"
             )
+        if offset:
+            return f"TIMESTAMP '{to_utc(iso, offset)}'"
         return f"{'TIMESTAMP' if value_kind == 'datetime' else 'DATE'} '{iso}'"
 
-    def _temporal_compare(self, column_kind: str, operator: str, value, where: str):
+    def _temporal_compare(
+        self,
+        column_kind: str,
+        operator: str,
+        value,
+        where: str,
+        offset: int | None = None,
+    ):
         """시각을 포함한 컬럼에 날짜만 주면, 그 날 하루가 온전히 들어오도록 맞춘다.
 
         `<= 2026-01-31` 을 그대로 두면 31일 00:00 까지만 걸려서 그날 낮에
@@ -2125,6 +2185,9 @@ class Compiler:
                 operator, iso = "less_than", next_day(iso)
             elif operator == "greater_than":
                 operator, iso = "greater_or_equal", next_day(iso)
+        if offset:
+            # 값은 현지 시각 — 컬럼에 저장된 UTC 로 바꿔 비교한다
+            return operator, f"TIMESTAMP '{to_utc(iso, offset)}'"
         prefix = "TIMESTAMP" if value_kind == "datetime" else "DATE"
         return operator, f"{prefix} '{iso}'"
 

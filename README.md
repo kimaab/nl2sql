@@ -23,6 +23,7 @@
 - **여러 데이터베이스 지원**: MySQL, PostgreSQL, Oracle
 - **스키마 동기화**: 대상 DB 의 테이블·컬럼·PK·FK 를 읽어 **이름 기준 병합** — 테이블 id 가 유지되어 지표 연결이 끊기지 않고, 사라진 테이블·컬럼은 지우지 않고 표시(soft delete). `AUTO_SYNC_MINUTES` 로 주기 실행
 - **테이블 용도**: 사람이 적은 용도(없으면 DB 코멘트) 한 줄을 보고 LLM 이 테이블을 고름. 코드값의 뜻은 DB 컬럼 코멘트에 적어 둠
+- **시각 컬럼 UTC 보정**: DB 가 UTC 로 저장하는 시각 컬럼에 현지 시차(예: KST +9)를 적어 두면, 날짜 묶음·표시는 현지 시각으로, 기간 조건은 UTC 로 바꿔 비교 (컬럼은 감싸지 않아 인덱스 유지)
 - **업무 지표**: 집계형·조회형·파생형(`[매출] - [환불]`), 시계열(`DELTA_SUM`·`CHANGE_COUNT` → `LAG` 서브쿼리), 고정 필터 강제, 동의어, 버전 이력. 저장하면 (깨지지 않은 한) 바로 `active` 가 되어 질문에 쓰임
 - **조회 표현**: 집계·목록, 정렬·개수 제한, 기간 단위 묶음, NULL·부분 일치·OR, HAVING, DISTINCT, 기간 비교(증감률), 관계를 따라가는 조인
 - **되묻기**: 테이블·지표를 정할 수 없으면 후보를 보여주고 되묻기 (서버는 이전 질문을 기억하지 않음)
@@ -120,6 +121,7 @@ nl2sql/
 - `GET /api/sync-logs?system_id=` - 동기화 기록
 - `GET /api/systems/{id}/schema` - 저장된 스키마
 - `GET /api/systems/{id}/tables`, `PUT /api/systems/{id}/tables/{table_id}/purpose` - 테이블 용도
+- `PUT /api/systems/{id}/tables/{table_id}/utc-offset` - 시각 컬럼 UTC 보정 `{column, utc_offset_hours}` (null 이면 보정 없음)
 
 ### 관계
 - `GET|POST /api/systems/{id}/relations`, `DELETE .../relations/{relation_id}` - 관계 (FK 관계는 지울 수 없음)

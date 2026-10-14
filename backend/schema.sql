@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS meta_column (
     UNIQUE (table_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_meta_column_table ON meta_column (table_id);
+-- UTC 로 저장된 시각 컬럼의 현지 시차(시간, 예: KST = 9). 사람이 적고, 동기화는 건드리지 않는다.
+-- 컴파일러가 날짜 묶음·표시는 현지 시각으로, 필터 값은 UTC 로 바꿔 비교한다.
+ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS utc_offset_hours SMALLINT;
 
 -- 테이블 관계. FK 는 동기화가(source='fk'), 나머지는 사람이(source='manual') 관리한다.
 CREATE TABLE IF NOT EXISTS meta_relation (

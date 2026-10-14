@@ -5,6 +5,9 @@ import { SystemPicker, useSystemParam } from "../../components/SystemPicker";
 import { useToast } from "../../components/Toast";
 import { errorMessage } from "../../lib/format";
 
+/** UTC 보정으로 고를 수 있는 시차 (0 은 '보정 없음') */
+const OFFSETS = Array.from({ length: 27 }, (_, i) => i - 12).filter((h) => h !== 0);
+
 /** 테이블 용도. 테이블 추론(LLM)이 보는 것은 용도 → 코멘트 순이다. */
 export function TablesPage() {
   const { systems, sysId, setSysId } = useSystemParam();
@@ -32,6 +35,16 @@ export function TablesPage() {
       setTables((prev) => (prev ?? []).map((x) => (x.id === t.id ? saved : x)));
       setDrafts(({ [t.id]: _, ...rest }) => rest);
       toast("용도를 저장했습니다", "ok");
+    } catch (err) {
+      toast("저장 실패: " + errorMessage(err), "error");
+    }
+  }
+
+  async function saveOffset(t: api.TableInfo, column: string, hours: number | null) {
+    try {
+      const saved = await api.setUtcOffset(sysId, t.id, column, hours);
+      setTables((prev) => (prev ?? []).map((x) => (x.id === t.id ? saved : x)));
+      toast(hours ? `${column}: UTC${hours > 0 ? "+" : ""}${hours} 로 보정합니다` : `${column}: 보정하지 않습니다`, "ok");
     } catch (err) {
       toast("저장 실패: " + errorMessage(err), "error");
     }
@@ -71,6 +84,9 @@ export function TablesPage() {
                 <tr>
                   <th>테이블</th>
                   <th>용도 (테이블 추론에 쓰임)</th>
+                  <th title="DB 에 UTC 로 저장된 시각 컬럼이면 현지 시차를 고릅니다. 날짜 묶음·기간 조건·표시가 현지 시각 기준이 됩니다.">
+                    시각 컬럼 UTC 보정
+                  </th>
                   <th className="num">지표</th>
                 </tr>
               </thead>
@@ -96,6 +112,34 @@ export function TablesPage() {
                           </Button>
                         )}
                       </div>
+                    </td>
+                    <td>
+                      {t.time_columns.length === 0 ? (
+                        <span className="muted">—</span>
+                      ) : (
+                        t.time_columns.map((c) => (
+                          <div key={c.name} className="row" style={{ gap: 6, marginBottom: 4 }}>
+                            <span className="cell-sub" style={{ minWidth: 120 }} title={c.data_type}>
+                              {c.name}
+                            </span>
+                            <select
+                              className="select"
+                              style={{ width: 130 }}
+                              value={c.utc_offset_hours ?? ""}
+                              onChange={(e) => saveOffset(t, c.name, e.target.value === "" ? null : Number(e.target.value))}
+                            >
+                              <option value="">보정 없음</option>
+                              {OFFSETS.map((h) => (
+                                <option key={h} value={h}>
+                                  UTC{h > 0 ? "+" : ""}
+                                  {h}
+                                  {h === 9 ? " (KST)" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        ))
+                      )}
                     </td>
                     <td className="num">{t.metric_count}</td>
                   </tr>

@@ -106,6 +106,13 @@ export interface SchemaTable {
   columns: SchemaColumn[];
 }
 
+/** 시각을 포함한 날짜 컬럼. utc_offset_hours 가 있으면 DB 는 UTC 로 저장하고 현지 시각으로 보정한다 */
+export interface TimeColumn {
+  name: string;
+  data_type: string;
+  utc_offset_hours: number | null;
+}
+
 export interface TableInfo {
   id: string;
   name: string;
@@ -113,6 +120,7 @@ export interface TableInfo {
   purpose: string;
   column_count: number;
   metric_count: number;
+  time_columns: TimeColumn[];
 }
 
 export interface RelationInput {
@@ -239,6 +247,11 @@ export const getSchema = (id: string) => request<{ tables: SchemaTable[] }>(`/sy
 export const listTables = (id: string) => request<TableInfo[]>(`/systems/${id}/tables`);
 export const setTablePurpose = (id: string, tableId: string, purpose: string) =>
   request<TableInfo>(`/systems/${id}/tables/${tableId}/purpose`, { method: "PUT", body: { purpose } });
+export const setUtcOffset = (id: string, tableId: string, column: string, hours: number | null) =>
+  request<TableInfo>(`/systems/${id}/tables/${tableId}/utc-offset`, {
+    method: "PUT",
+    body: { column, utc_offset_hours: hours },
+  });
 
 // 관계
 export const listRelations = (sysId: string) => request<Relation[]>(`/systems/${sysId}/relations`);

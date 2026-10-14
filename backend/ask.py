@@ -59,6 +59,13 @@ def system_prompt(
         metadata["relations"] = pruned["relations"]
 
     domain = f"업무 영역: {contract['domain']}\n" if contract.get("domain") else ""
+    utc = ""
+    if any(c.get("utc_offset") for t in pruned["tables"] for c in t.get("columns", [])):
+        utc = (
+            "utc_offset 이 붙은 컬럼은 DB 에 UTC 로 저장돼 있지만, 날짜 묶음·필터·표시는 "
+            "현지 시각(UTC+utc_offset)으로 자동 보정됩니다. 날짜·시각은 현지 기준 그대로 적고 "
+            "직접 바꾸지 마십시오.\n"
+        )
     chosen = ""
     if chosen_metrics:
         names = ", ".join(f"'{n}'" for n in chosen_metrics)
@@ -74,6 +81,7 @@ def system_prompt(
         f"오늘은 {today.isoformat()} ({'월화수목금토일'[today.weekday()]}요일) 입니다. "
         "“최근 7일”, “지난달”, “올해 7월” 같은 표현은 이 날짜를 기준으로 계산해 "
         "YYYY-MM-DD 형식으로 적으십시오. 기간의 끝은 less_or_equal 로 지정하십시오.\n"
+        f"{utc}"
         "아래 [허용된 메타데이터]에 없는 테이블·컬럼·지표 이름은 절대 만들어내지 "
         "마십시오.\n\n"
         f"[허용된 메타데이터]\n{json.dumps(metadata, ensure_ascii=False, indent=2)}\n\n"

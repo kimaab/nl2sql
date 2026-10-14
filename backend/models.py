@@ -460,6 +460,14 @@ class SyncLog(BaseModel):
     finished_at: str
 
 
+class TimeColumn(BaseModel):
+    """시각을 포함한 날짜 컬럼과 UTC 보정값 (None = 보정 없음)"""
+
+    name: str
+    data_type: str
+    utc_offset_hours: int | None = None
+
+
 class TableInfo(BaseModel):
     """테이블 목록 화면용"""
 
@@ -469,6 +477,23 @@ class TableInfo(BaseModel):
     purpose: str
     column_count: int
     metric_count: int
+    time_columns: list[TimeColumn] = []
+
+
+class UtcOffsetInput(BaseModel):
+    """시각 컬럼의 UTC 보정값. DB 가 UTC 로 저장할 때 현지 시차(예: KST = 9)를 적는다."""
+
+    column: str
+    utc_offset_hours: int | None = None
+
+    @field_validator("utc_offset_hours")
+    @classmethod
+    def _range(cls, value):
+        if value == 0:
+            return None
+        if value is not None and not -12 <= value <= 14:
+            raise ValueError("UTC 보정값은 -12 ~ +14 시간입니다")
+        return value
 
 
 class TablePurposeInput(BaseModel):
