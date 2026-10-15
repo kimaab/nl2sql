@@ -1,0 +1,26 @@
+# 로컬 개발용 메타데이터 DB (PostgreSQL)
+# 실행: docker compose up -d
+# 테이블은 백엔드 기동 때 backend/schema.sql 이 만든다.
+# backend/.env: DB_URL=postgresql://postgres:password1!@localhost:5432/nl2sql
+services:
+  db:
+    image: postgres:17
+    container_name: nl2sql-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password1!
+      POSTGRES_DB: nl2sql
+      TZ: Asia/Seoul
+    ports:
+      - "5432:5432"
+    volumes:
+      - nl2sql-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nl2sql"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  nl2sql-db-data:
