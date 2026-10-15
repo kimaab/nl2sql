@@ -4,7 +4,7 @@ from uuid import UUID
 from typing import Literal
 from pydantic import BaseModel, field_validator, model_validator
 
-from compiler import MEASURE_ROW_SERIES, ROLLUPS, SERIES_FUNCTIONS, measure_functions
+from compiler import GRAINS, ROLLUPS
 
 
 class Driver(str, Enum):
@@ -85,17 +85,6 @@ class System(BaseModel):
     active_metric_count: int
 
 
-class MetricKind(str, Enum):
-    AGGREGATE = "aggregate"
-    PROJECTION = "projection"
-    DERIVED = "derived"
-
-
-AGG_FUNCTIONS = ("SUM", "COUNT", "AVG", "MIN", "MAX", "COUNT_DISTINCT")
-# 지표 정의에서만 쓰는 시계열 집계 (compiler.SERIES_FUNCTIONS). 행 순서(series)가 필요하다.
-SERIES_AGG_FUNCTIONS = ("DELTA_SUM", "CHANGE_COUNT")
-
-
 class JoinOn(BaseModel):
     """ON 조건 한 쌍. 양쪽 모두 '테이블.컬럼'."""
 
@@ -111,65 +100,121 @@ class JoinSpec(BaseModel):
     on: list[JoinOn]
 
 
-class SeriesSpec(BaseModel):
-    """직전 행 비교의 행 순서. 누적 카운터·직전 거래는 이 순서로 직전 행과 비교한다.
+def _clean_names(values: list[str]) -> list[str]:
+    seen, out = set(), []
+    for v in values:
+        text = (v or "").strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            out.append(text)
+    return out
 
-    구분·순서는 컬럼 하나(예전 지표)나 목록이다 — 아파트 거래처럼 '지역+단지+면적' 이 한 묶음인 경우.
+
+def _dimension(item):
+    """디멘젼 하나: 컬럼 이름이나 {"field": 날짜컬럼, "grain": "day"}"""
+    if isinstance(item, str):
+        text = item.strip()
+        if not text:
+            raise ValueError("디멘젼 컬럼이 비어 있습니다")
+        return text
+    if isinstance(item, dict) and str(item.get("field") or "").strip():
+        grain = str(item.get("grain") or "").strip().lower()
+        if grain and grain not in GRAINS:
+            raise ValueError(f"grain 은 {', '.join(GRAINS)} 중 하나입니다 -> {grain!r}")
+        field = str(item["field"]).strip()
+        return {"field": field, "grain": grain} if grain else field
+    raise ValueError(f'디멘젼은 컬럼 이름이나 {{"field", "grain"}} 입니다 -> {item!r}')
+
+
+class MetricInput(BaseModel):
+    """업무 지표 = 테이블(조인) + 디멘젼 + 허용 계산식.
+
+    무엇을 조회·집계할지는 질문마다 LLM 이 정한다. 디멘젼은 집계 계산식이 뜻을 갖는 단위다
+    (예: 장비 × 일 — 누적값의 MAX - MIN 이 하루 가동시간이 되는 단위). fixed_filters 는 컴파일러가 늘 붙인다.
     """
 
-    partition_by: str | list[str]  # 행을 나누는 컬럼 (예: 차량 ID)
-    order_by: (
-        str | list[str]
-    )  # 시간 순서 컬럼 (예: 수집 일시). 뒤 컬럼은 같은 시각의 순서를 정한다
-    baseline: str | None = None  # CHANGE_COUNT 의 정상값 (예: 0)
-    # DELTA_SUM 의 한 행 최대 증가폭. 넘으면 리셋 복귀·장비 교체로 튄 값으로 보고 0으로 친다.
-    max_step: float | None = None
+    name: str
+    description: str = ""
+    table_name: str
+    joins: list[JoinSpec] = []
+    dimensions: list[str | dict] = []
+    formulas: list[str] = []
+    fixed_filters: list[dict] = []
+    synonyms: list[str] = []
 
-    @field_validator("partition_by", "order_by")
+    @field_validator("synonyms", "formulas")
     @classmethod
-    def _not_blank(cls, value):
-        if isinstance(value, list):
-            cleaned = [str(v or "").strip() for v in value if str(v or "").strip()]
-            if not cleaned:
-                raise ValueError("구분 컬럼과 순서 컬럼이 필요합니다")
-            return cleaned[0] if len(cleaned) == 1 else cleaned
+    def _clean_lists(cls, values: list[str]) -> list[str]:
+        return _clean_names(values)
+
+    @field_validator("dimensions")
+    @classmethod
+    def _clean_dimensions(cls, values: list) -> list:
+        out = []
+        for v in values:
+            d = _dimension(v)
+            if d not in out:
+                out.append(d)
+        return out
+
+    @field_validator("name", "table_name")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
         cleaned = (value or "").strip()
         if not cleaned:
-            raise ValueError("구분 컬럼과 순서 컬럼이 필요합니다")
+            raise ValueError("must not be blank")
         return cleaned
 
-    @field_validator("max_step")
-    @classmethod
-    def _positive(cls, value):
-        if value is not None and value <= 0:
-            raise ValueError("최대 증가폭은 0보다 커야 합니다")
-        return value
 
-    @field_validator("baseline", mode="before")
-    @classmethod
-    def _baseline_text(cls, value):
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
+class Metric(BaseModel):
+    """업무 지표"""
+
+    id: UUID
+    name: str
+    description: str
+    table_name: str
+    joins: list[JoinSpec]
+    dimensions: list[str | dict]
+    formulas: list[str]
+    fixed_filters: list[dict]
+    synonyms: list[str]
+    status: Literal["draft", "active", "broken", "retired"]
+    broken_reason: str | None
+    version: int
+    updated_at: str | None
 
 
-class Measure(BaseModel):
-    """지표의 출력 컬럼 하나. expr 은 함수를 겹친 식 트리다 (compiler 의 측정값 식).
+class FormulaMode(str, Enum):
+    FORCED = "forced"  # 질문에 '계산된 <이름>' 이 있을 때만 쓴다
+    ORGANIC = "organic"  # LLM 이 맞다고 보면 이름이 없어도 쓴다
 
-    {"col": "컬럼"} · {"num": 0} · {"fn": "ROUND", "args": [{"fn": "AVG", "args": [{"col": "금액"}]}, {"num": 0}]}
-    """
 
-    name: str = ""
-    expr: dict
-    # 지표의 기본 기간 단위(일)보다 큰 단위(월)로 물을 때 합치는 방법.
-    # SUM·AVG·MIN·MAX 는 기본 단위로 계산한 값을 합치고, NONE 은 질문 단위로 다시 계산한다. 비우면 SUM.
+class FormulaInput(BaseModel):
+    """시스템 계산식. expr 이 없고 source_sql 이 있으면 SQL 을 풀어 expr 을 만든다."""
+
+    name: str
+    description: str = ""
+    column_name: str | None = None
+    mode: FormulaMode = FormulaMode.ORGANIC
+    expr: dict | None = None
+    source_sql: str | None = None
     rollup: str | None = None
 
     @field_validator("name")
     @classmethod
-    def _trim(cls, value: str) -> str:
-        return (value or "").strip()
+    def _name(cls, value: str) -> str:
+        cleaned = re.sub(r"\s+", " ", (value or "").strip())
+        if not cleaned:
+            raise ValueError("must not be blank")
+        if "[" in cleaned or "]" in cleaned:
+            raise ValueError("계산식 이름에는 [ ] 를 쓸 수 없습니다")
+        return cleaned
+
+    @field_validator("column_name", "source_sql")
+    @classmethod
+    def _blank_none(cls, value):
+        text = (value or "").strip()
+        return text or None
 
     @field_validator("rollup")
     @classmethod
@@ -181,167 +226,49 @@ class Measure(BaseModel):
             raise ValueError(f"rollup 은 {', '.join(ROLLUPS)} 중 하나입니다")
         return text
 
-
-class MetricInput(BaseModel):
-    """업무 지표 입력.
-
-    집계형(aggregate)은 숫자 하나를, 조회형(projection)은 컬럼 몇 개를, 파생형(derived)은
-    집계형 지표를 잇는 수식 하나를 낸다. 어느 쪽이든 fixed_filters는 컴파일러가 강제로 붙인다.
-    """
-
-    name: str
-    description: str = ""
-    kind: MetricKind = MetricKind.AGGREGATE
-    table_name: str
-    joins: list[JoinSpec] = []
-    agg_field: str | None = None
-    agg_function: str | None = None
-    select_columns: list[str] = []
-    expression: str | None = None
-    series: SeriesSpec | None = None
-    # 집계형·조회형의 출력 컬럼 목록. 있으면 agg_field·agg_function·select_columns 대신 이것을 쓴다.
-    measures: list[Measure] = []
-    fixed_filters: list[dict] = []
-    synonyms: list[str] = []
-
-    @field_validator("synonyms")
-    @classmethod
-    def _clean_synonyms(cls, values: list[str]) -> list[str]:
-        seen, out = set(), []
-        for v in values:
-            text = (v or "").strip()
-            if text and text.lower() not in seen:
-                seen.add(text.lower())
-                out.append(text)
-        return out
-
-    @field_validator("name", "table_name")
-    @classmethod
-    def _not_blank(cls, value: str) -> str:
-        cleaned = (value or "").strip()
-        if not cleaned:
-            raise ValueError("must not be blank")
-        return cleaned
-
     @model_validator(mode="after")
-    def _shape_matches_kind(self):
-        # 종류에 맞지 않는 필드를 남겨두면 "집계로 저장했는데 컬럼 목록이 딸려 있는"
-        # 행이 생기고, 나중에 어느 쪽이 진짜인지 알 수 없게 된다.
-        if self.measures and self.kind is not MetricKind.DERIVED:
-            self._shape_measures()
-            return self
-        self.measures = []
-        if self.kind is MetricKind.AGGREGATE:
-            if not self.agg_field or not self.agg_function:
-                raise ValueError("집계형 지표는 agg_field와 agg_function이 필요합니다")
-            function = str(self.agg_function).upper()
-            if function not in AGG_FUNCTIONS + SERIES_AGG_FUNCTIONS:
-                raise ValueError(
-                    f"agg_function은 {', '.join(AGG_FUNCTIONS + SERIES_AGG_FUNCTIONS)} 중 하나여야 합니다"
-                )
-            self.agg_function = function
-            if function in SERIES_AGG_FUNCTIONS:
-                if self.series is None:
-                    raise ValueError(
-                        f"{function} 는 구분 컬럼과 순서 컬럼(series)이 필요합니다"
-                    )
-                if function == "CHANGE_COUNT" and self.series.baseline is None:
-                    raise ValueError(
-                        "CHANGE_COUNT 는 정상값(series.baseline, 예: 0)이 필요합니다"
-                    )
-                if function == "DELTA_SUM":
-                    self.series.baseline = None
-                else:
-                    self.series.max_step = None
-            else:
-                self.series = None
-            self.select_columns = []
-            self.expression = None
-        elif self.kind is MetricKind.PROJECTION:
-            if not self.select_columns:
-                raise ValueError(
-                    "조회형 지표는 select_columns에 컬럼이 하나 이상 필요합니다"
-                )
-            seen, unique = set(), []
-            for column in self.select_columns:
-                key = column.lower()
-                if key not in seen:
-                    seen.add(key)
-                    unique.append(column)
-            self.select_columns = unique
-            self.agg_field = None
-            self.agg_function = None
-            self.expression = None
-            self.series = None
-        else:
-            if not (self.expression or "").strip():
-                raise ValueError(
-                    "파생 지표는 expression(예: [매출] - [환불])이 필요합니다"
-                )
-            self.expression = self.expression.strip()
-            self.agg_field = None
-            self.agg_function = None
-            self.select_columns = []
-            self.series = None
+    def _has_body(self):
+        if self.expr is None and not self.source_sql:
+            raise ValueError("계산식은 식(expr)이나 SQL(source_sql)이 필요합니다")
         return self
 
-    def _shape_measures(self) -> None:
-        """측정값 정의: 이름을 채우고, 직전 행 비교를 쓰지 않으면 series 를 지운다."""
-        names = set()
-        for ms in self.measures:
-            if not ms.name:
-                if "col" in ms.expr:
-                    ms.name = str(ms.expr["col"]).split(".")[-1]
-                elif len(self.measures) == 1:
-                    ms.name = self.name
-                else:
-                    raise ValueError("측정값이 여럿이면 각각 이름이 필요합니다")
-            if ms.name.lower() in names:
-                raise ValueError(f"측정값 이름이 겹칩니다: {ms.name}")
-            names.add(ms.name.lower())
-        used = set().union(*(measure_functions(ms.expr) for ms in self.measures))
-        if used & (set(MEASURE_ROW_SERIES) | set(SERIES_FUNCTIONS)):
-            if self.series is None:
-                raise ValueError(
-                    "직전 행 비교(PREV·DELTA·DELTA_SUM·CHANGE_COUNT)에는 구분 컬럼과 순서 컬럼(series)이 필요합니다"
-                )
-            if "CHANGE_COUNT" in used and self.series.baseline is None:
-                raise ValueError(
-                    "CHANGE_COUNT 는 정상값(series.baseline, 예: 0)이 필요합니다"
-                )
-            if "CHANGE_COUNT" not in used:
-                self.series.baseline = None
-            if "DELTA_SUM" not in used:
-                self.series.max_step = None
-        else:
-            self.series = None
-        self.agg_field = None
-        self.agg_function = None
-        self.select_columns = []
-        self.expression = None
 
-
-class Metric(BaseModel):
-    """업무 지표"""
+class Formula(BaseModel):
+    """저장된 계산식. level 은 식에서 정해진다 (집계 함수가 있으면 aggregate)."""
 
     id: UUID
     name: str
     description: str
-    kind: MetricKind
-    table_name: str
-    joins: list[JoinSpec]
-    agg_field: str | None
-    agg_function: str | None
-    select_columns: list[str]
-    expression: str | None
-    series: SeriesSpec | None
-    measures: list[Measure] = []
-    fixed_filters: list[dict]
-    synonyms: list[str]
-    status: Literal["draft", "active", "broken", "retired"]
-    broken_reason: str | None
-    version: int
+    column_name: str | None
+    mode: FormulaMode
+    expr: dict
+    text: str
+    level: Literal["row", "aggregate"]
+    source_sql: str | None
+    rollup: str | None
+    refs: list[str]
+    used_by: list[str]
     updated_at: str | None
+
+
+class FormulaParseRequest(BaseModel):
+    sql: str
+
+
+class ParsedFormula(BaseModel):
+    name: str | None
+    expr: dict
+    text: str
+    level: Literal["row", "aggregate"]
+
+
+class FormulaParseResponse(BaseModel):
+    """SQL 을 푼 결과. 디멘젼·테이블은 지표 등록에 쓸 후보, outer 는 질문이 정할 바깥 집계 참고."""
+
+    formulas: list[ParsedFormula]
+    dimensions: list[str | dict]
+    table: str | None
+    outer: list[str]
 
 
 class MetricHistoryEntry(BaseModel):

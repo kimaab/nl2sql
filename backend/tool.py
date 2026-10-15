@@ -87,7 +87,7 @@ def make_compile_tool(
             return f"error: {detail}"
 
         try:
-            sql = compiler.compile(parsed)
+            sql = compiler.compile(parsed, question)
         except (ValueError, KeyError, TypeError) as error:
             log.info(
                 "attempt=%d outcome=error question=%r ast=%s detail=%s",

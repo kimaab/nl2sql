@@ -1,8 +1,5 @@
-import type { Metric, MetricInput, SchemaTable } from "../api";
-import { exprText, legacyMeasures, measureLabel, toList } from "./measures";
-
-/** 예전 정의의 시계열 집계 (이력·목록 표시용). 새 정의는 측정값 식으로 쓴다. */
-const isSeries = (fn: string | null | undefined) => fn === "DELTA_SUM" || fn === "CHANGE_COUNT";
+import type { ByItem, Metric, MetricInput, SchemaTable } from "../api";
+import { GRAIN_LABEL } from "./measures";
 
 export const OPERATORS: { value: string; label: string; symbol: string; noValue?: boolean }[] = [
   { value: "equals", label: "같음", symbol: "=" },
@@ -31,20 +28,13 @@ export const SOURCES: { value: string; label: string; hint: string }[] = [
   },
 ];
 
-export const KIND_LABEL: Record<string, string> = { aggregate: "집계", projection: "조회", derived: "파생" };
-
 export const EMPTY_METRIC: MetricInput = {
   name: "",
   description: "",
-  kind: "aggregate",
   table_name: "",
   joins: [],
-  agg_field: null,
-  agg_function: null,
-  select_columns: [],
-  expression: null,
-  series: null,
-  measures: [{ name: "", expr: { fn: "COUNT", args: [] } }],
+  dimensions: [],
+  formulas: [],
   fixed_filters: [],
   synonyms: [],
 };
@@ -62,27 +52,23 @@ export const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | undefined> =
   retired: undefined,
 };
 
-/** 저장된 지표를 수정 폼의 입력으로. 예전 정의(agg_field·select_columns)는 측정값으로 바꿔 다룬다. */
+/** 저장된 지표를 수정 폼의 입력으로 */
 export function toInput(m: Metric): MetricInput {
-  const measures = m.kind === "derived" ? [] : legacyMeasures(m);
   return {
     name: m.name,
     description: m.description,
-    kind: m.kind,
     table_name: m.table_name,
     joins: m.joins ?? [],
-    agg_field: measures.length ? null : m.agg_field,
-    agg_function: measures.length ? null : m.agg_function,
-    select_columns: measures.length ? [] : m.select_columns,
-    expression: m.expression,
-    series: m.series
-      ? { ...m.series, partition_by: toList(m.series.partition_by), order_by: toList(m.series.order_by) }
-      : null,
-    measures,
+    dimensions: m.dimensions ?? [],
+    formulas: m.formulas ?? [],
     fixed_filters: m.fixed_filters,
     synonyms: m.synonyms ?? [],
   };
 }
+
+/** 디멘젼 하나를 읽을 수 있게 — collect_datetime (일) */
+export const dimensionLabel = (d: ByItem) =>
+  typeof d === "string" ? d : `${d.field} (${GRAIN_LABEL[d.grain] ?? d.grain})`;
 
 /** 날짜 컬럼인지만 본다. 시각 포함 여부는 백엔드가 드라이버를 보고 판정한다. */
 export function isTemporal(type: string): boolean {
@@ -121,39 +107,16 @@ function filterToSql(f: Record<string, any>): string {
 
 /** 미리보기·상세·이력에서 보여줄 정의. 줄 단위로 나눠 둔다. */
 export function definitionLines(m: Partial<MetricInput>): string {
-  const measures = m.kind === "derived" ? [] : m.measures ?? [];
-  const seriesNote = m.series
-    ? ` <${toList(m.series.partition_by).join("·") || "…"}별, ${toList(m.series.order_by).join("·") || "…"} 순>`
-    : "";
-  const select = measures.length
-    ? measures
-        .map((x) => `${exprText(x.expr)} AS ${measureLabel(x, m.name ?? "", measures.length)}`)
-        .join(",\n       ") + seriesNote
-    : m.kind === "projection"
-      ? m.select_columns?.length
-        ? m.select_columns.join(", ")
-        : "…"
-      : m.kind === "derived"
-        ? m.expression || "…"
-        : isSeries(m.agg_function)
-          ? `${m.agg_function}(${m.agg_field ?? "…"}` +
-            (m.agg_function === "CHANGE_COUNT" ? `, 정상=${m.series?.baseline ?? "…"}` : "") +
-            (m.agg_function === "DELTA_SUM" && m.series?.max_step ? `, 한 행 최대 +${m.series.max_step}` : "") +
-            `)${seriesNote}`
-          : `${m.agg_function ?? "COUNT"}(${m.agg_field ?? "*"})`;
-  const lines = [`SELECT ${select}`, `FROM ${m.table_name || "…"}`];
+  const lines = [`FROM ${m.table_name || "…"}`];
   for (const j of m.joins ?? []) {
     const on = j.on.map((p) => `${p.left} = ${p.right}`).join(" AND ") || "…";
     lines.push(`${j.type === "left" ? "LEFT" : "INNER"} JOIN ${j.table || "…"} ON ${on}`);
   }
   const where = (m.fixed_filters ?? []).map(filterToSql);
   if (where.length) lines.push("WHERE " + where.join("\n  AND "));
+  lines.push(`-- 디멘젼: ${(m.dimensions ?? []).map(dimensionLabel).join(", ") || "없음"}`);
+  lines.push(`-- 계산식: ${(m.formulas ?? []).join(", ") || "없음"}`);
   return lines.join("\n");
-}
-
-/** 파생 지표 수식에서 참조한 지표 이름들 */
-export function formulaRefs(expression: string | null | undefined): string[] {
-  return [...(expression ?? "").matchAll(/\[([^\]]+)\]/g)].map((m) => m[1].trim());
 }
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();

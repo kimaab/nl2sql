@@ -169,11 +169,17 @@ def test_manual_relation_and_model_join_compile(client, ds):
 
 def test_metric_lifecycle_links_status_and_history(client, ds):
     base = f"/api/systems/{ds}/metrics"
+    item = client.post(
+        f"/api/systems/{ds}/formulas",
+        json={"name": "수량 합", "source_sql": "SUM(QTY)", "description": "주문 상품 수량"},
+    )
+    assert item.status_code == 200, item.text
+    assert item.json()["expr"] == {"fn": "SUM", "args": [{"col": "QTY"}]}
+    assert item.json()["level"] == "aggregate" and item.json()["mode"] == "organic"
     detail = client.post(
         base,
         json={
             "name": "주문상세",
-            "kind": "projection",
             "table_name": "TB_ORDER",
             "joins": [
                 {
@@ -184,7 +190,8 @@ def test_metric_lifecycle_links_status_and_history(client, ds):
                     ],
                 }
             ],
-            "select_columns": ["TB_ORDER.ORDER_ID", "TB_ORDER_ITEM.QTY"],
+            "dimensions": ["TB_ORDER.MEMBER_ID"],
+            "formulas": ["수량 합"],
             "fixed_filters": [
                 {
                     "field": "TB_ORDER.MEMBER_ID",
@@ -197,7 +204,7 @@ def test_metric_lifecycle_links_status_and_history(client, ds):
     assert detail.status_code == 200, detail.text
     # 깨지지 않았으면 저장하자마자 active
     assert detail.json()["status"] == "active" and detail.json()["version"] == 1
-    assert "examples" not in detail.json()
+    assert detail.json()["formulas"] == ["수량 합"]
     links = _q(
         """SELECT t.name, mt.role FROM metric_table mt JOIN meta_table t ON t.id = mt.table_id
                   WHERE mt.metric_id = %s ORDER BY mt.role, t.name""",
@@ -205,95 +212,55 @@ def test_metric_lifecycle_links_status_and_history(client, ds):
     )
     assert links == [("TB_ORDER", "base"), ("TB_ORDER_ITEM", "join")]
 
-    cnt = client.post(
-        base,
-        json={
-            "name": "주문수",
-            "table_name": "TB_ORDER",
-            "agg_field": "*",
-            "agg_function": "COUNT",
-        },
-    ).json()
-    assert cnt["status"] == "active"
-    cancel = client.post(
-        base,
-        json={
-            "name": "취소주문수",
-            "table_name": "TB_ORDER",
-            "agg_field": "*",
-            "agg_function": "COUNT",
-            "fixed_filters": [
-                {"field": "ORDER_STATUS", "operator": "equals", "value": "99"}
-            ],
-        },
-    ).json()
-    ratio = client.post(
-        base,
-        json={
-            "name": "취소율",
-            "kind": "derived",
-            "table_name": "TB_ORDER",
-            "expression": "[취소주문수] / [주문수]",
-        },
-    )
-    assert ratio.status_code == 200, ratio.text
-    assert (
-        client.delete(f"{base}/{cnt['id']}").status_code == 400
-    )  # 파생 지표가 쓰는 지표
+    cnt = client.post(base, json={"name": "주문", "table_name": "TB_ORDER"}).json()
+    assert cnt["status"] == "active" and cnt["dimensions"] == []
+    # 지표가 허용한 계산식은 지울 수 없다
+    assert client.delete(f"/api/systems/{ds}/formulas/{item.json()['id']}").status_code == 400
 
     updated = client.put(
-        f"{base}/{cancel['id']}",
+        f"{base}/{cnt['id']}",
         json={
-            "name": "취소주문수",
-            "description": "취소 건수",
+            "name": "주문",
+            "description": "주문 기록",
             "table_name": "TB_ORDER",
-            "agg_field": "ORDER_ID",
-            "agg_function": "COUNT_DISTINCT",
-            "synonyms": ["취소 건수"],
+            "dimensions": [{"field": "ORDER_DTM", "grain": "day"}],
+            "synonyms": ["주문 건수"],
             "fixed_filters": [
-                {"field": "ORDER_STATUS", "operator": "equals", "value": "99"}
+                {"field": "ORDER_STATUS", "operator": "not_equals", "value": "99"}
             ],
         },
     )
-    assert (
-        updated.status_code == 200
-        and updated.json()["version"] == 2
-        and updated.json()["synonyms"] == ["취소 건수"]
-    )
-    history = client.get(f"{base}/{cancel['id']}/history").json()
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["version"] == 2 and updated.json()["synonyms"] == ["주문 건수"]
+    history = client.get(f"{base}/{cnt['id']}/history").json()
     assert [h["version"] for h in history] == [2, 1]
-    assert (
-        history[1]["snapshot"]["agg_field"] == "*"
-        and history[0]["snapshot"]["agg_function"] == "COUNT_DISTINCT"
+    assert history[1]["snapshot"]["dimensions"] == []
+    assert history[0]["snapshot"]["dimensions"] == [{"field": "ORDER_DTM", "grain": "day"}]
+    bad = client.post(
+        base,
+        json={"name": "x", "table_name": "TB_ORDER", "dimensions": [{"field": "MEMBER_ID", "grain": "day"}]},
     )
+    assert bad.status_code == 400 and "날짜 컬럼이 아니라" in bad.text
 
     out = client.post(
-        f"/api/systems/{ds}/compile", json={"ast": {"metric": "취소율"}}
+        f"/api/systems/{ds}/compile",
+        json={"ast": {"metric": "주문", "aggregations": [{"field": "*", "function": "COUNT", "alias": "주문수"}]}},
     ).json()
-    assert out["sql"] == (
-        'SELECT COUNT(DISTINCT CASE WHEN "ORDER_STATUS" = \'99\' THEN "ORDER_ID" END) * 1.0 '
-        '/ NULLIF(COUNT(*), 0) AS "취소율" FROM "TB_ORDER";'
-    )
-    client.delete(f"{base}/{ratio.json()['id']}")
-    assert (
-        client.get(f"{base}/{ratio.json()['id']}/history").json()[0]["action"]
-        == "delete"
-    )
+    assert out["sql"] == 'SELECT COUNT(*) AS "주문수" FROM "TB_ORDER" WHERE "ORDER_STATUS" != \'99\';'
+    client.delete(f"{base}/{cnt['id']}")
+    assert client.get(f"{base}/{cnt['id']}/history").json()[0]["action"] == "delete"
+    assert client.post(base, json={"name": "주문수", "table_name": "TB_ORDER"}).status_code == 200
 
 
 class FakeLLM:
-    """질문 처리용 가짜 LLM. 프롬프트를 보고 알맞은 JSON 을 낸다."""
+    """질문 처리용 가짜 LLM. 지표 선택은 '주문수', 조회는 건수."""
 
     model_name = "fake"
 
     def invoke(self, messages):
         from langchain_core.messages import AIMessage
 
-        system = messages[0].content
-        if "테이블을 고르는" in system:
-            body = {"tables": [{"name": "TB_ORDER", "reason": "주문"}]}
-        else:
-            body = {"metrics": ["주문수"], "reason": "건수"}
+        body = {"metric": "주문수", "reason": "건수"}
         return AIMessage(content=json.dumps(body, ensure_ascii=False))
 
     def bind_tools(self, tools):
@@ -301,13 +268,17 @@ class FakeLLM:
 
         class Bound:
             def invoke(self, messages):
+                ast = {
+                    "metric": "주문수",
+                    "aggregations": [{"field": "*", "function": "COUNT", "alias": "주문수"}],
+                }
                 return AIMessage(
                     content="",
                     tool_calls=[
                         {
                             "name": "compile_sql",
                             "id": "c1",
-                            "args": {"ast": json.dumps({"metric": "주문수"})},
+                            "args": {"ast": json.dumps(ast, ensure_ascii=False)},
                         }
                     ],
                 )
@@ -321,7 +292,6 @@ def test_ask_uses_active_metric(client, ds, monkeypatch):
     # 보강·검수·평가 API 는 없다
     for path in ("enrich", "review", "eval-runs"):
         assert client.get(f"/api/systems/{ds}/{path}").status_code == 404
-    # 예시 질문 없이도 저장된 지표는 바로 질문에 쓰인다
     metric = next(
         m
         for m in client.get(f"/api/systems/{ds}/metrics").json()
@@ -337,9 +307,9 @@ def test_ask_uses_active_metric(client, ds, monkeypatch):
     assert res["selected_tables"] == ["TB_ORDER"] and res["selected_metrics"] == [
         "주문수"
     ]
-    assert [s["stage"] for s in res["steps"]] == ["table", "metric", "sql"]
+    assert [s["stage"] for s in res["steps"]] == ["metric", "sql"]
     trace = client.get(f"/api/history/{res['id']}/trace").json()
-    assert [t["stage"] for t in trace] == ["table", "metric", "sql"]
+    assert [t["stage"] for t in trace] == ["metric", "sql"]
     entry = client.get(f"/api/history?system_id={ds}").json()[0]
     assert entry["selected_metrics"] == ["주문수"]
 
@@ -347,14 +317,14 @@ def test_ask_uses_active_metric(client, ds, monkeypatch):
 def test_sync_merge_keeps_ids_and_soft_deletes(client, ds):
     before = dict(_q("SELECT name, id FROM meta_table WHERE system_id = %s", ds))
     client.post(
-        f"/api/systems/{ds}/metrics",
-        json={
-            "name": "합계",
-            "table_name": "TB_ORDER",
-            "agg_field": "TOTAL_AMT",
-            "agg_function": "SUM",
-        },
+        f"/api/systems/{ds}/formulas",
+        json={"name": "금액 합", "source_sql": "SUM(TOTAL_AMT)"},
     )
+    saved = client.post(
+        f"/api/systems/{ds}/metrics",
+        json={"name": "합계", "table_name": "TB_ORDER", "formulas": ["금액 합"]},
+    )
+    assert saved.status_code == 200, saved.text
     with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
         conn.execute(f'ALTER TABLE {TARGET_SCHEMA}."TB_ORDER" DROP COLUMN "TOTAL_AMT"')
         conn.execute(f'CREATE TABLE {TARGET_SCHEMA}."TB_NEW" ("ID" int)')
@@ -454,163 +424,93 @@ def test_history_feedback_and_export(client, ds):
     assert client.delete(f"/api/history/{fail}").status_code == 204
 
 
-def test_series_metrics_registered_and_compiled(client, ds):
+def test_cumulative_counter_formula_per_vehicle_day(client, ds):
+    """누적값 계산식(MAX - MIN)을 장비 × 일 디멘젼으로 계산하고, 날짜별 합계로 다시 집계한다"""
     with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
         conn.execute(
-            f'CREATE TABLE {TARGET_SCHEMA}."VLOG" ("VID" varchar(10), "TS" timestamp, "HOURS" real, "ERR" smallint)'
+            f'CREATE TABLE {TARGET_SCHEMA}."VLOG" ("VID" varchar(10), "TS" timestamp, "HOURS" real)'
         )
         conn.execute(f"""INSERT INTO {TARGET_SCHEMA}."VLOG" VALUES
-            ('a', '2026-10-01 00:00', 10, 0), ('a', '2026-10-01 00:01', 11, 2), ('a', '2026-10-01 00:02', 11, 2),
-            ('a', '2026-10-01 00:03', 3, 0), ('a', '2026-10-01 00:04', 4, 5), ('b', '2026-10-01 00:00', 7, 0)""")
+            ('a', '2026-10-01 01:00', 10), ('a', '2026-10-01 05:00', 14), ('a', '2026-10-02 01:00', 15),
+            ('a', '2026-10-02 09:00', 18), ('b', '2026-10-01 02:00', 7), ('b', '2026-10-01 03:00', 9)""")
     assert client.post(f"/api/systems/{ds}/sync").status_code == 200
-    base = f"/api/systems/{ds}/metrics"
-    series = {"partition_by": "VID", "order_by": "TS"}
-    hours = client.post(
-        base,
+    parsed = client.post(
+        f"/api/systems/{ds}/formulas/parse",
         json={
-            "name": "가동",
-            "table_name": "VLOG",
-            "agg_field": "HOURS",
-            "agg_function": "DELTA_SUM",
-            "series": series,
+            "sql": 'SELECT d, SUM(h) FROM (SELECT DATE("TS") AS d, "VID", ABS(MAX("HOURS") - MIN("HOURS")) AS h '
+            'FROM "VLOG" GROUP BY DATE("TS"), "VID") s GROUP BY d'
+        },
+    ).json()
+    assert [f["text"] for f in parsed["formulas"]] == ["ABS(MAX(HOURS) - MIN(HOURS))"]
+    assert parsed["dimensions"] == [{"field": "TS", "grain": "day"}, "VID"] and parsed["table"] == "VLOG"
+    formula = client.post(
+        f"/api/systems/{ds}/formulas",
+        json={
+            "name": "가동시간",
+            "mode": "forced",
+            "column_name": "HOURS",
+            "expr": parsed["formulas"][0]["expr"],
         },
     )
-    assert hours.status_code == 200, hours.text
-    assert hours.json()["series"] == {**series, "baseline": None, "max_step": None}
-    assert (
-        client.post(
-            base,
-            json={
-                "name": "오류",
-                "table_name": "VLOG",
-                "agg_field": "ERR",
-                "agg_function": "CHANGE_COUNT",
-                "series": {**series, "baseline": 0},
-            },
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            base,
-            json={
-                "name": "시간당오류",
-                "kind": "derived",
-                "table_name": "VLOG",
-                "expression": "[오류] / [가동]",
-            },
-        ).status_code
-        == 200
-    )
-    sql = client.post(
-        f"/api/systems/{ds}/compile",
-        json={"ast": {"metric": "시간당오류", "group_by": ["VID"]}},
-    ).json()["sql"]
-    with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
-        conn.execute(f"SET search_path TO {TARGET_SCHEMA}")
-        rows = dict(conn.execute(sql).fetchall())
-    assert float(rows["a"]) == 1.0 and rows["b"] is None
-
-
-def test_measure_metrics_preview_save_and_run(client, ds):
-    with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
-        conn.execute(
-            f'CREATE TABLE {TARGET_SCHEMA}."TRADE" ("APT" varchar(10), "YM" varchar(6), "DT" date, '
-            '"AMT" bigint, "CANCEL" boolean)'
-        )
-        conn.execute(f"""INSERT INTO {TARGET_SCHEMA}."TRADE" VALUES
-            ('a', '202601', '2026-01-05', 100, false), ('a', '202601', '2026-01-20', 999, true),
-            ('a', '202602', '2026-02-03', 130, false), ('b', '202602', '2026-02-10', 200, false),
-            ('b', '202603', '2026-03-01', 150, false)""")
-    assert client.post(f"/api/systems/{ds}/sync").status_code == 200
-    base = f"/api/systems/{ds}/metrics"
-    amt = {"col": "AMT"}
-    change = {
-        "name": "거래 변동",
-        "kind": "projection",
-        "table_name": "TRADE",
-        "series": {"partition_by": ["APT"], "order_by": ["DT"]},
-        "fixed_filters": [{"field": "CANCEL", "operator": "equals", "value": "false"}],
-        "measures": [
-            {"expr": {"col": "APT"}},
-            {"name": "이전", "expr": {"fn": "PREV", "args": [amt]}},
-            {"name": "차이", "expr": {"fn": "DELTA", "args": [amt]}},
-            {
-                "name": "변동폭",
-                "expr": {"fn": "ABS", "args": [{"fn": "DELTA", "args": [amt]}]},
-            },
-            {
-                "name": "평균",
-                "expr": {
-                    "fn": "ROUND",
-                    "args": [{"fn": "AVG", "args": [amt]}, {"num": 0}],
-                },
-            },
-        ],
+    assert formula.status_code == 200, formula.text
+    definition = {
+        "name": "장비 가동",
+        "table_name": "VLOG",
+        "dimensions": parsed["dimensions"],
+        "formulas": ["가동시간"],
     }
-    preview = client.post(f"{base}/preview", json=change).json()
-    assert preview["error"] is None and "LAG(" in preview["sql"]
-    bad = client.post(f"{base}/preview", json={**change, "kind": "aggregate"}).json()
-    assert "집계되지 않은 값" in bad["error"]
-    assert client.post(base, json={**change, "kind": "aggregate"}).status_code == 400
-
-    saved = client.post(base, json=change)
-    assert saved.status_code == 200, saved.text
-    assert [m["name"] for m in saved.json()["measures"]] == [
-        "APT",
-        "이전",
-        "차이",
-        "변동폭",
-        "평균",
-    ]
-    assert saved.json()["agg_function"] is None and saved.json()["select_columns"] == []
-
-    monthly = client.post(
-        base,
-        json={
-            "name": "월평균 건수",
-            "table_name": "TRADE",
-            "measures": [
-                {
-                    "expr": {
-                        "fn": "AVG",
-                        "args": [{"fn": "COUNT", "args": [], "by": ["YM"]}],
-                    }
-                }
-            ],
-        },
-    )
-    assert monthly.status_code == 200, monthly.text
+    preview = client.post(f"/api/systems/{ds}/metrics/preview", json=definition).json()
+    assert preview["error"] is None and preview["sql"].startswith("-- 가동시간\n")
+    metric = client.post(f"/api/systems/{ds}/metrics", json=definition)
+    assert metric.status_code == 200, metric.text
 
     def run(ast):
-        out = client.post(f"/api/systems/{ds}/compile", json={"ast": ast}).json()
+        out = client.post(
+            f"/api/systems/{ds}/compile", json={"ast": {"metric": "장비 가동", **ast}}
+        ).json()
         assert out["error"] is None, out["error"]
         with psycopg.connect(TEST_DB_URL, autocommit=True) as conn:
             conn.execute(f"SET search_path TO {TARGET_SCHEMA}")
             return conn.execute(out["sql"]).fetchall()
 
-    # 2월 이후 변동이 가장 큰 거래: b 의 200 → 150. 평균은 2월 이후 해제 안 된 거래 (130+200+150)/3
-    top = run(
+    per = run(
         {
-            "metric": "거래 변동",
-            "filters": [
-                {"field": "DT", "operator": "greater_or_equal", "value": "2026-02-01"}
-            ],
-            "order_by": [{"field": "변동폭", "direction": "desc"}],
-            "limit": 1,
+            "aggregations": [{"formula": "가동시간"}],
+            "order_by": [{"field": "TS_day"}, {"field": "VID"}],
         }
     )
-    assert [tuple(map(str, r)) for r in top] == [("b", "200", "-50", "50", "160")]
-    # a 의 2월 거래는 해제 거래(999)가 아니라 1월 100 과 비교한다
-    rows = run(
+    assert [(str(r[0]), r[1], float(r[2])) for r in per] == [
+        ("2026-10-01", "a", 4.0),
+        ("2026-10-01", "b", 2.0),
+        ("2026-10-02", "a", 3.0),
+    ]
+    daily = run(
         {
-            "metric": "거래 변동",
-            "filters": [{"field": "APT", "operator": "equals", "value": "a"}],
-            "order_by": [{"field": "DT", "direction": "asc"}],
+            "aggregations": [{"formula": "가동시간", "function": "SUM"}],
+            "group_by": [{"field": "TS", "grain": "day"}],
+            "order_by": [{"field": "TS_day"}],
         }
     )
-    assert [(r[1], r[2]) for r in rows] == [(None, None), (100, 30)]
-    assert float(run({"metric": "월평균 건수"})[0][0]) == pytest.approx(5 / 3)
-    assert {
-        r[0]: float(r[1]) for r in run({"metric": "월평균 건수", "group_by": ["APT"]})
-    } == {"a": 1.5, "b": 1.0}
+    assert [(str(r[0]), float(r[1])) for r in daily] == [("2026-10-01", 6.0), ("2026-10-02", 3.0)]
+    monthly = run(
+        {
+            "aggregations": [{"formula": "가동시간"}],
+            "group_by": [{"field": "TS", "grain": "month"}, "VID"],
+        }
+    )
+    assert {r[1]: float(r[2]) for r in monthly} == {"a": 7.0, "b": 2.0}
+    # 다른 계산식이 가리키는 계산식은 이름을 바꿀 수 없고, 서로 가리키게 만들 수도 없다
+    double = client.post(
+        f"/api/systems/{ds}/formulas", json={"name": "가동 두배", "source_sql": "[가동시간] * 2"}
+    )
+    assert double.status_code == 200, double.text
+    renamed = client.put(
+        f"/api/systems/{ds}/formulas/{formula.json()['id']}",
+        json={"name": "가동", "expr": parsed["formulas"][0]["expr"]},
+    )
+    assert renamed.status_code == 400 and "가동 두배" in renamed.text
+    loop = client.put(
+        f"/api/systems/{ds}/formulas/{formula.json()['id']}",
+        json={"name": "가동시간", "source_sql": "[가동 두배] + 1"},
+    )
+    assert loop.status_code == 400 and "서로를 참조" in loop.text

@@ -4,7 +4,7 @@ import * as api from "../../api";
 import { Alert, Badge, Button, EmptyState, Loading, PageHeader, SqlBlock } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage, formatDateTime } from "../../lib/format";
-import { definitionLines, KIND_LABEL, OPERATORS, SOURCES, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
+import { definitionLines, dimensionLabel, OPERATORS, SOURCES, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
 
 const ACTION_LABEL = { create: "등록", update: "수정", delete: "삭제", retire: "사용 중지" } as const;
 
@@ -88,7 +88,6 @@ export function MetricDetail() {
         <div className="card">
           <div className="card-head">
             <span className="card-title">정의</span>
-            <Badge tone="primary">{KIND_LABEL[metric.kind]}</Badge>
             <Badge tone={STATUS_TONE[metric.status]}>{STATUS_LABEL[metric.status]}</Badge>
             <span className="faint">v{metric.version}</span>
           </div>
@@ -187,6 +186,10 @@ export function MetricDetail() {
             <dd>
               <code>{[metric.table_name, ...metric.joins.map((j) => j.table)].join(", ")}</code>
             </dd>
+            <dt>디멘젼</dt>
+            <dd>{metric.dimensions.map(dimensionLabel).join(", ") || "없음"}</dd>
+            <dt>계산식</dt>
+            <dd>{metric.formulas.join(", ") || "없음"}</dd>
             {metric.updated_at && (
               <>
                 <dt>마지막 수정</dt>

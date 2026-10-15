@@ -112,16 +112,13 @@ def test_max_attempts_returns_last_error(contract):
 # ------------------------------------------------------------------ 깨진 지표 (T-02)
 
 
-def _row(name, kind="aggregate", **kw):
+def _row(name, **kw):
     base = {
         "name": name,
-        "kind": kind,
         "table_name": "TB_ORDER",
         "joins": [],
-        "select_columns": [],
-        "agg_field": "*",
-        "agg_function": "COUNT",
-        "expression": None,
+        "dimensions": [],
+        "formulas": [],
         "fixed_filters": [],
     }
     return {**base, **kw}
@@ -131,53 +128,38 @@ def _tables(contract):
     return {t["name"]: t for t in contract["tables"]}
 
 
-def test_broken_projection_join_and_derived_cascade(contract):
+JOIN_ITEM = {
+    "table": "TB_ORDER_ITEM",
+    "on": [{"left": "TB_ORDER.ORDER_ID", "right": "TB_ORDER_ITEM.ORDER_ID"}],
+}
+FORMULAS = [
+    {"name": "주문 금액", "expr": {"fn": "MUL", "args": [{"col": "QTY"}, {"col": "PRICE"}]}},
+    {"name": "없는 값", "expr": {"fn": "SUM", "args": [{"col": "NOPE"}]}},
+]
+
+
+def test_broken_metrics_dimensions_formulas_filters_and_old_format(contract):
     tables = _tables(contract)
     rows = [
-        _row("ok"),
-        _row(
-            "join_ok",
-            "projection",
-            joins=[
-                {
-                    "table": "TB_ORDER_ITEM",
-                    "on": [
-                        {"left": "TB_ORDER.ORDER_ID", "right": "TB_ORDER_ITEM.ORDER_ID"}
-                    ],
-                }
-            ],
-            select_columns=["TB_ORDER.ORDER_ID", "TB_ORDER_ITEM.QTY"],
-        ),
-        _row("join_bad", "projection", select_columns=["TB_ORDER_ITEM.QTY"]),
-        _row("gone", agg_field="NOPE", agg_function="SUM"),
-        _row("ratio_bad", "derived", expression="[ok] / [gone]"),
-        _row("ratio_ok", "derived", expression="[ok] * 2"),
-        _row("ratio_proj", "derived", expression="[join_ok] + 1"),
+        _row("ok", dimensions=["MEMBER_ID"]),
+        _row("join_ok", joins=[JOIN_ITEM], formulas=["주문 금액"]),
+        _row("formula_out_of_scope", formulas=["주문 금액"]),
+        _row("formula_gone_column", formulas=["없는 값"]),
+        _row("dim_gone", dimensions=[{"field": "NOPE_DT", "grain": "day"}]),
+        _row("filter_gone", fixed_filters=[{"field": "NOPE", "operator": "equals", "value": 1}]),
+        _row("old", dimensions=None),
     ]
-    broken = broken_reasons(rows, tables)
-    assert set(broken) == {"join_bad", "gone", "ratio_bad", "ratio_proj"}
-    assert "gone" in broken["ratio_bad"] and "집계형이 아닙니다" in broken["ratio_proj"]
+    broken = broken_reasons(rows, tables, FORMULAS)
+    assert set(broken) == {"formula_out_of_scope", "formula_gone_column", "dim_gone", "filter_gone", "old"}
+    assert "계산식 주문 금액" in broken["formula_out_of_scope"]
+    assert "디멘젼" in broken["dim_gone"] and "예전 형식" in broken["old"]
 
 
 def test_join_metric_with_dropped_join_table_is_broken(contract):
     tables = _tables(contract)
     del tables["TB_ORDER_ITEM"]
-    rows = [
-        _row(
-            "j",
-            "projection",
-            joins=[
-                {
-                    "table": "TB_ORDER_ITEM",
-                    "on": [
-                        {"left": "TB_ORDER.ORDER_ID", "right": "TB_ORDER_ITEM.ORDER_ID"}
-                    ],
-                }
-            ],
-            select_columns=["ORDER_ID"],
-        )
-    ]
-    assert "조인할 수 없는 테이블" in broken_reasons(rows, tables)["j"]
+    rows = [_row("j", joins=[JOIN_ITEM])]
+    assert "조인할 수 없는 테이블" in broken_reasons(rows, tables, [])["j"]
 
 
 def test_loose_sql_ignores_alias_names_only():

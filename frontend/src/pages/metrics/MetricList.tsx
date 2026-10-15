@@ -4,7 +4,7 @@ import * as api from "../../api";
 import { Badge, Button, EmptyState, Loading, PageHeader } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage } from "../../lib/format";
-import { definitionLines, KIND_LABEL, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
+import { dimensionLabel, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
 
 interface Loaded {
   system: api.System;
@@ -52,7 +52,7 @@ export function MetricList() {
     <div className="page wide">
       <PageHeader
         title="지표"
-        desc="스키마에서 뽑을 수 없는 업무 개념입니다. 질문이 지표에 걸리면 집계식과 고정 필터가 자동으로 적용됩니다."
+        desc="지표는 테이블 · 디멘젼 · 허용 계산식입니다. 질문이 지표에 걸리면 그 테이블과 고정 필터·계산식 안에서 SQL 이 만들어집니다."
         actions={
           <Button
             variant="primary"
@@ -97,7 +97,7 @@ export function MetricList() {
             desc={
               rows.length === 0
                 ? "먼저 시스템을 등록하고 스키마를 동기화하세요."
-                : "자주 쓰는 집계나 조회를 지표로 등록해 두면 질문 정확도가 올라갑니다."
+                : "질문에 쓸 테이블을 지표로 등록하세요. 지표가 없는 테이블은 질문에 쓰이지 않습니다."
             }
             action={
               <Button
@@ -114,9 +114,10 @@ export function MetricList() {
               <thead>
                 <tr>
                   <th style={{ width: "26%" }}>이름</th>
-                  <th>종류</th>
                   <th>시스템</th>
-                  <th>정의</th>
+                  <th>테이블</th>
+                  <th>디멘젼</th>
+                  <th>계산식</th>
                   <th>상태</th>
                 </tr>
               </thead>
@@ -131,13 +132,12 @@ export function MetricList() {
                       <div className="cell-title">{m.name}</div>
                       <div className="cell-sub">{m.description || "설명 없음"}</div>
                     </td>
-                    <td>
-                      <Badge tone="primary">{KIND_LABEL[m.kind]}</Badge>
-                    </td>
                     <td>{row.system.name}</td>
                     <td>
-                      <code className="muted">{definitionLines(m).replace(/\n\s*/g, " ")}</code>
+                      <code>{[m.table_name, ...m.joins.map((j) => j.table)].join(", ")}</code>
                     </td>
+                    <td className="muted">{m.dimensions.map(dimensionLabel).join(", ") || "없음"}</td>
+                    <td className="muted">{m.formulas.join(", ") || "없음"}</td>
                     <td>
                       <span title={m.broken_reason ?? ""}>
                         <Badge tone={STATUS_TONE[m.status]}>{STATUS_LABEL[m.status]}</Badge>

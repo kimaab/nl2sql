@@ -13,6 +13,7 @@ import {
   isAggregate,
   isCol,
   isFn,
+  isFormula,
   isNum,
   MEASURE_FUNCTIONS,
   measureLabel,
@@ -23,11 +24,13 @@ import {
 
 export type ColumnOption = { value: string; type: string; table: string };
 
-type Ctx = {
+export type Ctx = {
   kind: "aggregate" | "projection";
   columns: ColumnOption[];
   /** 기본 테이블 컬럼 — 직전 행 값(PREV·DELTA)과 시계열 집계는 이것만 받는다 */
   baseColumns: string[];
+  /** 값 자리에 고를 수 있는 다른 계산식 이름 (계산식 등록 화면) */
+  formulas?: string[];
 };
 
 const SERIES_AGGREGATES = ["DELTA_SUM", "CHANGE_COUNT"];
@@ -131,18 +134,22 @@ function LeafEditor({
   onlyBase,
   onChange,
 }: {
-  node: { col: string } | { num: number };
+  node: { col: string } | { num: number } | { formula: string };
   ctx: Ctx;
   onlyBase: boolean;
   onChange: (n: api.MeasureNode) => void;
 }) {
   const options = onlyBase ? ctx.columns.filter((c) => ctx.baseColumns.includes(c.value)) : ctx.columns;
+  const formulas = onlyBase ? [] : ctx.formulas ?? [];
   return (
     <>
       <select
         className="select expr-leaf-select"
-        value={isCol(node) ? node.col : "__num"}
-        onChange={(e) => onChange(e.target.value === "__num" ? { num: 0 } : { col: e.target.value })}
+        value={isCol(node) ? node.col : isFormula(node) ? `__f:${node.formula}` : "__num"}
+        onChange={(e) => {
+          const v = e.target.value;
+          onChange(v === "__num" ? { num: 0 } : v.startsWith("__f:") ? { formula: v.slice(4) } : { col: v });
+        }}
       >
         <option value="" disabled>
           컬럼 선택
@@ -152,6 +159,15 @@ function LeafEditor({
             {c.value} ({c.type})
           </option>
         ))}
+        {formulas.length > 0 && (
+          <optgroup label="다른 계산식">
+            {formulas.map((f) => (
+              <option key={f} value={`__f:${f}`}>
+                [{f}]
+              </option>
+            ))}
+          </optgroup>
+        )}
         {!onlyBase && <option value="__num">숫자 입력…</option>}
       </select>
       {isNum(node) && (

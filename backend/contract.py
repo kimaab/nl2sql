@@ -5,11 +5,11 @@ import db
 from models import ApiException
 from compiler import (
     build_scope,
-    compile_formula,
+    by_column,
+    expand_formula,
+    locate_columns,
     measure_columns,
-    measure_nested,
     resolve_ref,
-    series_list,
 )
 
 log = logging.getLogger("nl2sql.contract")
@@ -95,8 +95,8 @@ def load_relations(system_id: UUID, tables: dict) -> list[dict]:
 
 
 def load_metric_rows(system_id: UUID) -> list[dict]:
-    """지표 행 + 기본 테이블 이름. table_name 키는 정의 검사·전개 코드가 그대로 쓴다."""
-    return db.query(
+    """지표 행 + 기본 테이블 이름 + 허용 계산식 이름 (formulas)."""
+    rows = db.query(
         """
         SELECT m.*, t.name AS table_name
           FROM metric m JOIN meta_table t ON t.id = m.base_table_id
@@ -104,6 +104,34 @@ def load_metric_rows(system_id: UUID) -> list[dict]:
     """,
         str(system_id),
     )
+    links: dict = {}
+    for r in db.query(
+        """
+        SELECT mf.metric_id, f.name FROM metric_formula mf
+          JOIN formula f ON f.id = mf.formula_id
+         WHERE f.system_id = %s ORDER BY f.name
+    """,
+        str(system_id),
+    ):
+        links.setdefault(r["metric_id"], []).append(r["name"])
+    for r in rows:
+        r["formulas"] = links.get(r["id"], [])
+    return rows
+
+
+def load_formula_rows(system_id: UUID) -> list[dict]:
+    return db.query(
+        "SELECT * FROM formula WHERE system_id = %s ORDER BY name", str(system_id)
+    )
+
+
+def formula_entry(f: dict) -> dict:
+    """계약서의 계산식 항목"""
+    entry = {"name": f["name"], "mode": f["mode"], "expr": f["expr"]}
+    for key in ("description", "column_name", "rollup"):
+        if f.get(key):
+            entry[key] = f[key]
+    return entry
 
 
 def load_contract(system_id: UUID, active_only: bool = False) -> dict:
@@ -127,26 +155,11 @@ def load_contract(system_id: UUID, active_only: bool = False) -> dict:
         )
 
     statuses = ("active",) if active_only else ("active", "draft")
-    metric_rows = [m for m in load_metric_rows(system_id) if m["status"] in statuses]
-    links: dict = {}
-    for r in db.query(
-        """
-        SELECT mt.metric_id, t.name FROM metric_table mt
-          JOIN metric m ON m.id = mt.metric_id JOIN meta_table t ON t.id = mt.table_id
-         WHERE m.system_id = %s AND t.deleted_at IS NULL ORDER BY mt.role, t.name
-    """,
-        str(system_id),
-    ):
-        links.setdefault(r["metric_id"], []).append(r["name"])
-
-    metrics = []
-    for m in metric_rows:
-        entry = metric_entry(m)
-        entry["tables"] = links.get(m["id"], [m["table_name"]])
-        if m.get("synonyms"):
-            entry["synonyms"] = m["synonyms"]
-        metrics.append(entry)
-
+    metrics = [
+        metric_entry(m)
+        for m in load_metric_rows(system_id)
+        if m["status"] in statuses and m.get("dimensions") is not None
+    ]
     return {
         "name": row["name"],
         "code": row["code"],
@@ -155,11 +168,12 @@ def load_contract(system_id: UUID, active_only: bool = False) -> dict:
         "tables": list(tables.values()),
         "relations": load_relations(system_id, tables),
         "metrics": metrics,
+        "formulas": [formula_entry(f) for f in load_formula_rows(system_id)],
     }
 
 
-def metric_tables(m: dict, by_name: dict) -> list[tuple[str, str]]:
-    """지표가 쓰는 테이블 [(이름, role)]. 기본 테이블 → base, 조인 → join, 파생은 구성 지표의 테이블 → join.
+def metric_tables(m: dict) -> list[tuple[str, str]]:
+    """지표가 쓰는 테이블 [(이름, role)]. 기본 테이블 → base, 조인 → join.
 
     metric_table 의 정의(origin=definition) 행을 만드는 규칙이다.
     """
@@ -167,16 +181,6 @@ def metric_tables(m: dict, by_name: dict) -> list[tuple[str, str]]:
     for j in m.get("joins") or []:
         if j.get("table"):
             out.append((j["table"], "join"))
-    if m.get("kind") == "derived" and m.get("expression"):
-        names: list = []
-        try:
-            compile_formula(m["expression"], lambda n: names.append(n) or "x")
-        except ValueError:
-            pass
-        for n in names:
-            comp = by_name.get(n.lower())
-            if comp:
-                out.append((comp["table_name"], "join"))
     seen, unique = set(), []
     for name, role in out:
         if name.lower() not in seen:
@@ -191,93 +195,41 @@ def metric_entry(m: dict) -> dict:
         "name": m["name"],
         "description": m["description"],
         "table": m["table_name"],
-        "kind": m["kind"],
+        "dimensions": m.get("dimensions") or [],
+        "formulas": m.get("formulas") or [],
         "fixed_filters": m["fixed_filters"] or [],
+        "tables": [name for name, _ in metric_tables(m)],
     }
     if m.get("joins"):
         entry["joins"] = m["joins"]
-    if m.get("measures") and m["kind"] != "derived":
-        entry["measures"] = m["measures"]
-        if m.get("series"):
-            entry["series"] = m["series"]
-    elif m["kind"] == "projection":
-        entry["columns"] = m["select_columns"] or []
-    elif m["kind"] == "derived":
-        entry["expression"] = m["expression"]
-    else:
-        entry["aggregation"] = {
-            "field": m["agg_field"],
-            "function": m["agg_function"],
-        }
-        if m.get("series"):
-            entry["series"] = m["series"]
+    if m.get("synonyms"):
+        entry["synonyms"] = m["synonyms"]
     return entry
 
 
-def broken_reasons(metric_rows: list[dict], tables: dict) -> dict:
-    """{지표명: 깨진 이유}. 파생 지표는 구성 지표가 깨지면 함께 깨진다."""
+OLD_FORMAT = "예전 형식 지표입니다 — 테이블·디멘젼·계산식으로 다시 등록하십시오"
+
+
+def broken_reasons(metric_rows: list[dict], tables: dict, formulas: list[dict]) -> dict:
+    """{지표명: 깨진 이유}. 동기화로 테이블·컬럼이 사라졌거나 허용 계산식의 컬럼이 범위에 없으면 깨진다."""
     columns = {name: [c["name"] for c in t["columns"]] for name, t in tables.items()}
-    by_name = {m["name"]: m for m in metric_rows}
+    by_name = {f["name"]: f for f in formulas}
     out = {}
     for m in metric_rows:
-        if m["kind"] != "derived":
-            reason = _broken_reason(m, columns)
-            if reason:
-                out[m["name"]] = reason
-    for m in metric_rows:
-        if m["kind"] == "derived":
-            reason = _broken_reason(m, columns) or _broken_components(
-                m, by_name, out, columns
-            )
-            if reason:
-                out[m["name"]] = reason
+        reason = (
+            OLD_FORMAT
+            if m.get("dimensions") is None
+            else _broken_reason(m, columns, by_name)
+        )
+        if reason:
+            out[m["name"]] = reason
     return out
 
 
-def _broken_components(
-    m: dict, by_name: dict, broken: dict, columns: dict
-) -> str | None:
-    problems = []
+def _broken_reason(m: dict, columns: dict, formulas: dict) -> str | None:
+    """테이블·조인·디멘젼·고정 필터·허용 계산식의 컬럼이 모두 살아 있어야 한다.
 
-    def check(name):
-        comp = by_name.get(name)
-        if comp is None:
-            problems.append(f"구성 지표 {name}이(가) 없습니다")
-        elif comp["kind"] != "aggregate":
-            problems.append(f"구성 지표 {name}은(는) 집계형이 아닙니다")
-        elif len(comp.get("measures") or []) > 1 or any(
-            measure_nested(ms.get("expr")) for ms in comp.get("measures") or []
-        ):
-            problems.append(
-                f"구성 지표 {name}은(는) 측정값이 여럿이거나 집계 안의 집계라 수식에 쓸 수 없습니다"
-            )
-        elif name in broken:
-            problems.append(f"구성 지표 {name}이(가) 깨졌습니다 ({broken[name]})")
-        else:
-            try:
-                scope, _ = build_scope(m["table_name"], m.get("joins") or [], columns)
-            except ValueError:
-                return "x"
-            if comp["table_name"] not in scope:
-                problems.append(
-                    f"구성 지표 {name}의 테이블 {comp['table_name']}이(가) 이 지표의 범위에 없습니다"
-                )
-        return "x"
-
-    try:
-        compile_formula(m["expression"], check)
-    except ValueError as e:
-        return str(e)
-    return "; ".join(problems) or None
-
-
-def _broken_reason(m: dict, columns: dict) -> str | None:
-    """동기화로 테이블·컬럼이 사라진 지표를 가려낸다.
-
-    집계형은 agg_field 하나만 보면 되지만, 조회형은 컬럼 목록 전부가
-    살아 있어야 한다. 고정 필터 컬럼은 어느 쪽이든 확인한다 — 필터가
-    깨지면 지표가 보장하려던 조건이 조용히 빠진다. 조인 지표는 조인한
-    테이블과 ON 컬럼까지 살아 있어야 한다.
+    고정 필터가 깨지면 지표가 보장하려던 조건이 조용히 빠진다.
     """
     if m["table_name"] not in columns:
         return f"테이블 {m['table_name']}이(가) 없습니다"
@@ -294,34 +246,20 @@ def _broken_reason(m: dict, columns: dict) -> str | None:
                 resolve_ref(str(ref), scope, base)
             except ValueError:
                 out.append(str(ref))
-        return out
+        return list(dict.fromkeys(out))
 
-    if m.get("measures") and m["kind"] != "derived":
-        gone = missing(
-            c for ms in m["measures"] for c in measure_columns(ms.get("expr"))
-        )
+    gone = missing(by_column(d) for d in m.get("dimensions") or [])
+    if gone:
+        return f"디멘젼 컬럼이 없습니다: {', '.join(gone)}"
+    for name in m.get("formulas") or []:
+        try:
+            expr = expand_formula({"formula": name}, formulas)
+        except ValueError as e:
+            return str(e)
+        gone = missing(measure_columns(locate_columns(expr, scope, base)))
         if gone:
-            return f"측정값 컬럼이 없습니다: {', '.join(dict.fromkeys(gone))}"
-    elif m["kind"] == "projection":
-        if not (m["select_columns"] or []):
-            return "조회 컬럼이 비어 있습니다"
-        missing_columns = missing(m["select_columns"])
-        if missing_columns:
-            return f"조회 컬럼이 없습니다: {', '.join(missing_columns)}"
-    elif (
-        m["kind"] == "aggregate" and m["agg_field"] != "*" and missing([m["agg_field"]])
-    ):
-        return f"집계 컬럼 {m['agg_field']}이(가) 없습니다"
-    if m["kind"] != "derived" and m.get("series"):
-        series = m["series"]
-        gone = missing(
-            series_list(series.get("partition_by"))
-            + series_list(series.get("order_by"))
-        )
-        if gone:
-            return f"구분·순서 컬럼이 없습니다: {', '.join(gone)}"
-
-    missing_filters = missing(f.get("field") for f in (m["fixed_filters"] or []))
-    if missing_filters:
-        return f"고정 필터 컬럼이 없습니다: {', '.join(missing_filters)}"
+            return f"계산식 {name} 의 컬럼이 이 지표의 테이블에 없습니다: {', '.join(gone)}"
+    gone = missing(f.get("field") for f in (m["fixed_filters"] or []))
+    if gone:
+        return f"고정 필터 컬럼이 없습니다: {', '.join(gone)}"
     return None

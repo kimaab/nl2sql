@@ -1,6 +1,6 @@
-"""질문에 쓸 테이블과 지표를 고른다.
+"""질문에 쓸 지표를 고른다.
 
-TO-BE (llm): 테이블 추론(LLM) → 지표 후보 조회(테이블에 연결된 지표, 검색 아님) → 지표 선택(LLM).
+TO-BE (llm): 시스템의 지표 목록에서 LLM 이 지표 하나를 고른다. 지표가 테이블을 정한다.
 기준선 (tfidf): 테이블·지표 전체를 TF-IDF 로 검색해 상위 N개 — RAG 식 '한 번에 검색' 과 같은 방식. 비교용으로 남긴다.
 
 두 방식 모두 계약서(dict)만 보고 돈다 — DB 없이 평가셋으로 비교할 수 있게.
@@ -14,12 +14,11 @@ from dataclasses import asdict, dataclass, field
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from compiler import MENTION_PREFIX, _squash, mentioned_formulas
 from pruner import Pruner
 
 log = logging.getLogger("nl2sql.selector")
 
-MAX_TABLES = 5
-MAX_METRICS = 2
 
 
 @dataclass
@@ -188,184 +187,169 @@ def _match(names, allowed: list) -> list:
     return out
 
 
-# ── TO-BE: LLM 선택 ───────────────────────────────────────────────────────
+# ── TO-BE: LLM 지표 선택 ──────────────────────────────────────────────────
+# 지표 = 테이블(조인) + 디멘젼 + 허용 계산식. 질문 → 지표 하나 → 조회. 테이블을 따로 고르지 않는다.
 
-TABLE_SYSTEM = """당신은 업무 시스템 '{name}' 의 테이블 목록에서, 사용자 질문에 답하는 데 필요한 테이블을 고르는 역할입니다.
+METRIC_SYSTEM = """당신은 업무 시스템 '{name}' 의 업무 지표 목록에서, 사용자 질문에 답할 지표 하나를 고르는 역할입니다.
 [업무 영역]
 {domain}
 
 [규칙]
-- 아래 [테이블 목록] 에 있는 이름만 씁니다.
-- 놓치지 않는 것이 우선입니다. 필요할 수 있는 테이블은 넣으십시오 (최대 {max_tables}개).
-- 테이블 뒤의 [지표: …] 는 그 테이블로 계산하는 업무 지표와 같은 말입니다. 질문이 묻는 값이 어떤 지표와 맞으면 그 테이블을 고르십시오.
-- 질문의 기간·정렬·개수 같은 조건은 테이블을 고르는 데 쓰지 않습니다.
-- 맞는 테이블이 없으면 빈 목록을 돌려줍니다.
-- 설명 없이 JSON 객체 하나로만 답합니다:
-  {{"tables": [{{"name": "테이블명", "reason": "고른 이유 한 줄"}}]}}"""
-
-METRIC_SYSTEM = """당신은 사용자 질문이 묻는 '무엇'에 맞는 업무 지표를 고르는 역할입니다.
-[규칙]
-- 아래 [후보 지표] 에 있는 이름만 씁니다. 최대 {max_metrics}개.
-- 지표는 '무엇을 세는가' 로 고릅니다. 정렬(가장 큰, 상위 N)·기간·개수·필터 조건은 다음 단계에서 정하니 무시하십시오.
-- 맞는 지표가 없으면 빈 목록을 돌려줍니다 — 그러면 테이블을 직접 조회합니다.
+- 아래 [지표 목록] 의 '지표명:' 뒤에 적힌 이름 하나를 그대로 적습니다 (설명을 적지 마십시오).
+- 지표는 테이블과 계산식의 묶음입니다. 질문이 묻는 값이 그 지표의 테이블·계산식으로 계산되는지로 고르십시오.
+  정렬(가장 큰, 상위 N)·기간·개수·필터 조건은 다음 단계에서 정하니 무시하십시오.
+- 질문에 '{prefix} <이름>' 이 있으면 그 계산식을 허용하는 지표만 고를 수 있습니다.
+- 맞는 지표가 없으면 metric 을 null 로 돌려줍니다.
 - 두 지표 중 어느 쪽인지 질문만으로 정할 수 없으면 ambiguous 를 true 로 하고, options 에 후보를, message 에 사용자에게 물을 한 문장을 적습니다.
 - 설명 없이 JSON 객체 하나로만 답합니다:
-  {{"metrics": ["지표명"], "reason": "고른 이유", "ambiguous": false, "options": [], "message": ""}}"""
+  {{"metric": "지표명", "reason": "고른 이유", "ambiguous": false, "options": [], "message": ""}}"""
 
 
-def table_line(t: dict, metrics: list | None = None) -> str:
-    """테이블 추론에 보내는 한 줄. 용도 → 코멘트 순으로 쓰고, 그 테이블에 연결된 지표를 덧붙인다.
-
-    '차량 로그' 같은 코멘트만으로는 가동시간이 어느 테이블에 있는지 알 수 없다 — 지표 이름·같은 말이
-    질문의 말과 테이블을 잇는다.
-    """
-    text = t.get("purpose") or t.get("description") or ""
-    text = " ".join(str(text).split())
-    line = f"- {t['name']}: {text}" if text else f"- {t['name']}"
-    words: list = []
-    for m in metrics or []:
-        for w in [m["name"], *(m.get("synonyms") or [])]:
-            if w and w not in words:
-                words.append(w)
-    return f"{line} [지표: {', '.join(words)}]" if words else line
-
-
-def metrics_by_table(contract: dict) -> dict:
-    """{테이블명(소문자): [지표]} — 지표가 쓰는 테이블 (metric_table) 기준"""
-    out: dict = {}
-    for m in contract.get("metrics", []):
-        for name in m.get("tables", [m["table"]]):
-            out.setdefault(name.lower(), []).append(m)
-    return out
-
-
-def metric_block(m: dict) -> str:
+def metric_block(m: dict, formulas: dict | None = None) -> str:
+    """지표 선택에 보내는 지표 하나: 설명 · 같은 말 · 테이블 · 계산식"""
     lines = [
-        f"- {m['name']}: {' '.join(str(m.get('description') or '').split()) or '(설명 없음)'}"
+        f"- 지표명: {m['name']}",
+        f"  설명: {' '.join(str(m.get('description') or '').split()) or '(설명 없음)'}",
     ]
     if m.get("synonyms"):
         lines.append(f"  같은 말: {', '.join(m['synonyms'])}")
+    lines.append(f"  테이블: {', '.join(m.get('tables') or [m['table']])}")
+    if m.get("formulas"):
+        described = []
+        for name in m["formulas"]:
+            note = ((formulas or {}).get(name) or {}).get("description")
+            described.append(f"{name}({' '.join(str(note).split())})" if note else name)
+        lines.append(f"  계산식: {', '.join(described)}")
     return "\n".join(lines)
 
 
-def infer_tables(model, contract: dict, question: str) -> tuple[list, list, Step]:
-    """→ (고른 테이블, [이유], Step)"""
-    names = [t["name"] for t in contract["tables"]]
-    step = Step("table", candidates=names, model=model_name(model))
-    system = TABLE_SYSTEM.format(
+def _resolve_metric(value, candidates: list):
+    """모델이 적은 지표를 실제 지표명으로. 띄어쓰기·대소문자를 무시하고, 이름 대신 설명을 적었으면 설명이 같은 지표로."""
+    key = _squash(str(value or "")).lower()
+    if not key:
+        return None
+    for m in candidates:
+        if _squash(m["name"]).lower() == key:
+            return m["name"]
+    by_desc = [m["name"] for m in candidates if _squash(str(m.get("description") or "")).lower() == key]
+    return by_desc[0] if len(by_desc) == 1 else None
+
+
+def _allows(metric: dict, names: list) -> bool:
+    have = {f.lower() for f in metric.get("formulas") or []}
+    return all(n.lower() in have for n in names)
+
+
+def select_metric(model, contract: dict, question: str) -> tuple[list, Step, str | None]:
+    """→ ([고른 지표 하나] 또는 [], Step, 되물을 말).
+
+    질문이 '계산된 X' 를 묻는데 고른 지표가 X 를 허용하지 않으면, X 를 허용하는 지표들 가운데서 다시 고르게 한다.
+    """
+    metrics = contract["metrics"]
+    names = [m["name"] for m in metrics]
+    step = Step("metric", candidates=names, model=model_name(model))
+    if not metrics:
+        step.reason = "등록된 지표가 없음"
+        return [], step, "이 시스템에는 아직 등록된 지표가 없습니다. 지표를 먼저 등록하십시오."
+    formulas = {f["name"]: f for f in contract.get("formulas", [])}
+    mentioned = mentioned_formulas(question, formulas.values())
+    system = METRIC_SYSTEM.format(
         name=contract.get("name", ""),
         domain=contract.get("domain") or "(설명 없음)",
-        max_tables=MAX_TABLES,
-    )
-    linked = metrics_by_table(contract)
-    user = (
-        "[테이블 목록]\n"
-        + "\n".join(
-            table_line(t, linked.get(t["name"].lower())) for t in contract["tables"]
-        )
-        + f"\n\n[질문]\n{question}"
+        prefix=MENTION_PREFIX,
     )
 
     def validate(p):
-        if not isinstance(p.get("tables"), list):
-            raise ValueError('"tables" 목록이 필요합니다')
-
-    parsed = ask_json(model, system, user, step, validate)
-    picked, reasons = [], []
-    for item in parsed["tables"]:
-        name = item.get("name") if isinstance(item, dict) else item
-        real = _match([name], names)
-        if real and real[0] not in picked:
-            picked.append(real[0])
-            reasons.append(
-                f"{real[0]}: {(item.get('reason') if isinstance(item, dict) else '') or ''}".strip(
-                    ": "
-                )
+        if "metric" not in p:
+            raise ValueError('"metric" 이 필요합니다 (맞는 지표가 없으면 null)')
+        if p["metric"] and not p.get("ambiguous") and _resolve_metric(p["metric"], candidates) is None:
+            raise ValueError(
+                f"'{p['metric']}' 는 [지표 목록] 에 없는 지표명입니다. '지표명:' 뒤의 이름을 그대로 적으십시오"
             )
-    step.selected = picked[:MAX_TABLES]
-    step.reason = " / ".join(reasons[:MAX_TABLES])
-    log.info("%s 테이블 선택 결과: %s", LLM_LOG, step.selected)
-    return step.selected, reasons, step
 
-
-def metric_candidates(contract: dict, tables: list) -> list:
-    """고른 테이블에 연결된 지표 (metric_table). 검색이 아니라 조회다."""
-    wanted = {t.lower() for t in tables}
-    return [
-        m
-        for m in contract["metrics"]
-        if wanted & {x.lower() for x in m.get("tables", [m["table"]])}
-    ]
-
-
-def select_metrics(
-    model, question: str, candidates: list
-) -> tuple[list, Step, str | None]:
-    """→ (고른 지표, Step, 되물을 말)"""
-    names = [m["name"] for m in candidates]
-    step = Step("metric", candidates=names, model=model_name(model))
-    if not candidates:
-        step.reason = "고른 테이블에 연결된 지표가 없음 — 테이블을 직접 조회"
-        log.info(
-            "%s 지표 선택 생략: 후보 없음 — 테이블 직접 조회 question=%r",
-            LLM_LOG,
-            question,
+    candidates = metrics
+    note = ""
+    if mentioned and not any(_allows(m, mentioned) for m in metrics):
+        candidates = []
+    for _ in range(2 if candidates else 0):
+        user = (
+            "[지표 목록]\n"
+            + "\n".join(metric_block(m, formulas) for m in candidates)
+            + note
+            + f"\n\n[질문]\n{question}"
         )
-        return [], step, None
-    system = METRIC_SYSTEM.format(max_metrics=MAX_METRICS)
-    user = (
-        "[후보 지표]\n"
-        + "\n".join(metric_block(m) for m in candidates)
-        + f"\n\n[질문]\n{question}"
-    )
-
-    def validate(p):
-        if not isinstance(p.get("metrics"), list):
-            raise ValueError('"metrics" 목록이 필요합니다')
-
-    parsed = ask_json(model, system, user, step, validate)
-    step.reason = str(parsed.get("reason") or "")
-    if parsed.get("ambiguous"):
-        options = _match(parsed.get("options"), names)
-        if len(options) >= 2:
+        parsed = ask_json(model, system, user, step, validate)
+        step.reason = str(parsed.get("reason") or "")
+        allowed = [m["name"] for m in candidates]
+        if parsed.get("ambiguous"):
+            options = _match(parsed.get("options"), allowed)
+            if len(options) >= 2:
+                step.selected = []
+                step.reason = step.reason or "질문만으로 지표를 정할 수 없음"
+                message = str(parsed.get("message") or "어느 지표를 말씀하시나요?").strip()
+                log.info("%s 지표 선택 결과: 되묻기 options=%s", LLM_LOG, options)
+                return [], step, f"{message} (후보: {', '.join(options)})"
+        resolved = _resolve_metric(parsed.get("metric"), candidates)
+        picked = [resolved] if resolved else []
+        if not picked:
             step.selected = []
-            step.reason = step.reason or "질문만으로 지표를 정할 수 없음"
-            message = str(parsed.get("message") or "어느 지표를 말씀하시나요?").strip()
-            log.info("%s 지표 선택 결과: 되묻기 options=%s", LLM_LOG, options)
-            return [], step, f"{message} (후보: {', '.join(options)})"
-    step.selected = _match(parsed["metrics"], names)[:MAX_METRICS]
-    log.info("%s 지표 선택 결과: %s", LLM_LOG, step.selected)
-    return step.selected, step, None
+            step.reason = step.reason or "맞는 지표가 없음"
+            domain = contract.get("domain") or contract.get("name", "")
+            return [], step, (
+                f"질문에 맞는 지표를 찾지 못했습니다. 이 시스템은 {domain} 에 대한 것입니다. "
+                "무엇을 조회하려는지 조금 더 구체적으로 적어 주십시오."
+            )
+        chosen = next(m for m in candidates if m["name"] == picked[0])
+        if _allows(chosen, mentioned):
+            step.selected = picked
+            log.info("%s 지표 선택 결과: %s", LLM_LOG, picked)
+            return picked, step, None
+        # 계산식을 벗어난 지표 — 그 계산식을 허용하는 지표들 가운데서 다시 판단을 요청한다
+        candidates = [m for m in metrics if _allows(m, mentioned)]
+        log.info(
+            "%s 지표 %s 는 계산식 %s 를 허용하지 않음 — 다시 고름 (후보 %s)",
+            LLM_LOG,
+            picked[0],
+            mentioned,
+            [m["name"] for m in candidates],
+        )
+        if not candidates:
+            break
+        note = (
+            f"\n\n[다시 고르기]\n앞서 고른 '{picked[0]}' 는 질문의 계산식 "
+            f"{', '.join(mentioned)} 을(를) 쓸 수 없습니다. 위 목록은 그 계산식을 쓸 수 있는 지표입니다."
+        )
+    step.selected = []
+    wanted = ", ".join(f"'{MENTION_PREFIX} {n}'" for n in mentioned)
+    return [], step, f"{wanted} 을(를) 계산할 수 있는 지표가 없습니다. 지표에 그 계산식을 허용해 주십시오."
+
+
+def _pruned(contract: dict, metric_names: list) -> dict:
+    """프롬프트에 실을 것: 고른 지표, 그 지표의 테이블, 허용 계산식"""
+    by_table = {t["name"]: t for t in contract["tables"]}
+    by_metric = {m["name"]: m for m in contract["metrics"]}
+    metrics = [by_metric[n] for n in metric_names if n in by_metric]
+    names = [n for m in metrics for n in m.get("tables", [m["table"]]) if n in by_table]
+    allowed = {f.lower() for m in metrics for f in m.get("formulas") or []}
+    return {
+        "tables": [prompt_table(by_table[n]) for n in dict.fromkeys(names)],
+        "metrics": metrics,
+        "relations": [],
+        "formulas": [f for f in contract.get("formulas", []) if f["name"].lower() in allowed],
+    }
 
 
 def llm_select(model, contract: dict, question: str) -> Selection:
-    tables, _, table_step = infer_tables(model, contract, question)
-    if not tables:
-        domain = contract.get("domain") or contract.get("name", "")
-        return Selection(
-            [],
-            [],
-            {"tables": [], "metrics": [], "relations": []},
-            [table_step],
-            clarification=f"질문에 맞는 테이블을 찾지 못했습니다. 이 시스템은 {domain} 에 대한 것입니다. "
-            "무엇을 조회하려는지 조금 더 구체적으로 적어 주십시오.",
-        )
-    candidates = metric_candidates(contract, tables)
-    metrics, metric_step, clarification = select_metrics(model, question, candidates)
+    metrics, step, clarification = select_metric(model, contract, question)
+    pruned = _pruned(contract, metrics)
+    tables = [t["name"] for t in pruned["tables"]]
     log.info(
-        "선택: 테이블=%s 지표=%s (후보 %d개)%s",
-        tables,
+        "선택: 지표=%s 테이블=%s%s",
         metrics,
-        len(candidates),
+        tables,
         f" 되묻기={clarification}" if clarification else "",
     )
-    return Selection(
-        tables,
-        metrics,
-        _pruned(contract, tables, metrics),
-        [table_step, metric_step],
-        clarification=clarification,
-    )
+    return Selection(tables, metrics, pruned, [step], clarification=clarification)
 
 
 # ── 기준선: TF-IDF (RAG 식 한 번에 검색) ──────────────────────────────────

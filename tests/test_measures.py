@@ -357,48 +357,6 @@ def test_measure_text_and_columns():
     ]
 
 
-def test_input_names_measures_and_drops_unused_series():
-    from models import MetricInput
-
-    data = MetricInput(
-        name="거래액",
-        table_name="t",
-        kind="aggregate",
-        measures=[{"expr": fn("SUM", AMT)}],
-        series={"partition_by": "a", "order_by": "b"},
-    )
-    assert (
-        data.measures[0].name == "거래액"
-        and data.series is None
-        and data.agg_function is None
-    )
-    rows = MetricInput(
-        name="목록",
-        table_name="t",
-        kind="projection",
-        measures=[
-            {"expr": {"col": "t.apartment_name"}},
-            {"name": "이전", "expr": fn("PREV", AMT)},
-        ],
-        series={"partition_by": ["a", "b"], "order_by": ["c"]},
-    )
-    assert [m.name for m in rows.measures] == ["apartment_name", "이전"]
-    assert rows.series.partition_by == ["a", "b"] and rows.series.order_by == "c"
-    with pytest.raises(ValueError, match="구분 컬럼과 순서 컬럼"):
-        MetricInput(
-            name="x",
-            table_name="t",
-            kind="projection",
-            measures=[{"expr": fn("PREV", AMT)}],
-        )
-    with pytest.raises(ValueError, match="각각 이름"):
-        MetricInput(
-            name="x",
-            table_name="t",
-            measures=[{"expr": fn("SUM", AMT)}, {"expr": fn("MAX", AMT)}],
-        )
-
-
 def test_by_on_expression_computes_whole_expression_inside():
     """SUM(ABS(MAX(x) - MIN(x)) BY 묶음) — 식 전체가 안쪽 질의의 컬럼 하나가 된다"""
     span = fn("ABS", fn("SUB", fn("MAX", AMT), fn("MIN", AMT)), by=["apartment_name"])

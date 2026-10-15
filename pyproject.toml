@@ -23,6 +23,7 @@ dependencies = [
     "cryptography>=42",
     "requests>=2.31.0",
     "defusedxml>=0.7.1",
+    "sqlglot>=30.22.0",
 ]
 
 [tool.setuptools.package-data]

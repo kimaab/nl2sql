@@ -24,6 +24,10 @@ from models import (
     AskStep,
     CompileRequest,
     CompileResponse,
+    Formula,
+    FormulaInput,
+    FormulaParseRequest,
+    FormulaParseResponse,
     HistoryEntry,
     HistoryPatch,
     Metric,
@@ -59,6 +63,13 @@ from metrics import (
     list_metrics,
     preview_metric,
     update_metric,
+)
+from formulas import (
+    create_formula,
+    delete_formula,
+    list_formulas,
+    parse_sql,
+    update_formula,
 )
 from relations import create_relation, delete_relation, list_relations
 from history import (
@@ -206,6 +217,39 @@ def post_relation(system_id: UUID, req: RelationInput):
 )
 def delete_relation_detail(system_id: UUID, relation_id: UUID):
     delete_relation(system_id, relation_id)
+
+
+# ── 계산식 ──────────────────────────────────────────────────────────────
+@app.get("/api/systems/{system_id}/formulas", response_model=list[Formula])
+def get_formulas(system_id: UUID):
+    get_system(system_id)
+    return list_formulas(system_id)
+
+
+@app.post("/api/systems/{system_id}/formulas", response_model=Formula)
+def post_formula(system_id: UUID, req: FormulaInput):
+    get_system(system_id)
+    return create_formula(system_id, req)
+
+
+# SQL 을 식 트리로 — 등록 화면의 'SQL 로 입력'
+@app.post("/api/systems/{system_id}/formulas/parse", response_model=FormulaParseResponse)
+def post_formula_parse(system_id: UUID, req: FormulaParseRequest):
+    return parse_sql(system_id, req.sql)
+
+
+@app.put("/api/systems/{system_id}/formulas/{formula_id}", response_model=Formula)
+def put_formula(system_id: UUID, formula_id: UUID, req: FormulaInput):
+    get_system(system_id)
+    return update_formula(system_id, formula_id, req)
+
+
+@app.delete(
+    "/api/systems/{system_id}/formulas/{formula_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_formula_detail(system_id: UUID, formula_id: UUID):
+    delete_formula(system_id, formula_id)
 
 
 # ── 지표 ────────────────────────────────────────────────────────────────

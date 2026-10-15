@@ -634,6 +634,8 @@ def measure_text(node) -> str:
     """사람·LLM 이 읽는 식. 예: ROUND(AVG(deal_amount_manwon), 0)"""
     if not isinstance(node, dict):
         return "?"
+    if "formula" in node:
+        return f"[{node['formula']}]"
     if "col" in node:
         return str(node["col"]) or "?"
     if "num" in node:
@@ -661,6 +663,103 @@ def measure_text(node) -> str:
     return f"{fn}({inner}{by})"
 
 
+# ---------------------------------------------------------------- 시스템 계산식
+# 계산식은 시스템에 한 번 등록하고 지표가 허용한다. 식 트리 안에서 다른 계산식은 {"formula": 이름} 이다.
+# 질문에 '계산된 <이름>' 이 나오면 그 계산식을 쓴다 — 이름만 나오면 원래 컬럼 그대로다.
+MENTION_PREFIX = "계산된"
+FORMULA_MODES = ("forced", "organic")
+MAX_FORMULA_DEPTH = 8
+
+
+def _squash(text) -> str:
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def mentioned_formulas(question: str, formulas) -> list[str]:
+    """질문에 '계산된 <이름>' 으로 나온 계산식 이름. 띄어쓰기는 보지 않는다.
+
+    '계산된 무인 가동시간' 은 '무인 가동' 이라는 계산식이 따로 있어도 긴 쪽 하나로 본다.
+    """
+    text = _squash(question)
+    hits = [f["name"] for f in formulas if _squash(MENTION_PREFIX + f["name"]) in text]
+    return [
+        n
+        for n in hits
+        if not any(o != n and _squash(n) in _squash(o) for o in hits)
+    ]
+
+
+def formula_refs(node) -> list[str]:
+    """식 트리가 직접 가리키는 계산식 이름 (안쪽 계산식이 가리키는 것은 빼고)"""
+    if not isinstance(node, dict):
+        return []
+    if "formula" in node:
+        return [str(node["formula"])]
+    out = []
+    for child in _measure_children(node):
+        out += [n for n in formula_refs(child) if n not in out]
+    return out
+
+
+def expand_formula(node, formulas: dict, trail: tuple = ()):
+    """식 트리의 {"formula": 이름} 을 그 계산식의 식으로 펼친다. 돌고 도는 참조는 거부한다."""
+    if not isinstance(node, dict):
+        return node
+    if "formula" in node:
+        name = _find(node["formula"], formulas)
+        if name is None:
+            raise ValueError(
+                f"등록되지 않은 계산식입니다 -> {node['formula']!r} (사용 가능: {', '.join(formulas) or '없음'})"
+            )
+        if name in trail:
+            raise ValueError(f"계산식이 서로를 참조합니다 -> {' → '.join(trail + (name,))}")
+        if len(trail) >= MAX_FORMULA_DEPTH:
+            raise ValueError(f"계산식 참조가 너무 깊습니다 -> {' → '.join(trail + (name,))}")
+        expanded = expand_formula(formulas[name]["expr"], formulas, trail + (name,))
+        if node.get("by") and isinstance(expanded, dict) and "fn" in expanded:
+            expanded = {**expanded, "by": list(node["by"])}
+        return expanded
+    if "fn" in node:
+        return {
+            **node,
+            "args": [expand_formula(c, formulas, trail) for c in _measure_children(node)],
+        }
+    return node
+
+
+def locate_columns(node, scope: dict, base: str):
+    """계산식은 테이블을 적지 않는다 — 기본 테이블에 없는 컬럼은 그 컬럼을 가진 조인 테이블을 붙인다.
+
+    둘 이상의 조인 테이블에 있으면 그대로 둔다 (기본 테이블로 해석돼 '없는 컬럼' 오류가 난다).
+    """
+    if not isinstance(node, dict):
+        return node
+    if "col" in node:
+        ref = str(node["col"])
+        if "." in ref or any(c.lower() == ref.lower() for c in scope.get(base, [])):
+            return node
+        owners = [t for t, cols in scope.items() if any(c.lower() == ref.lower() for c in cols)]
+        return {**node, "col": f"{owners[0]}.{ref}"} if len(owners) == 1 else node
+    out = dict(node)
+    if "args" in node:
+        out["args"] = [locate_columns(c, scope, base) for c in _measure_children(node)]
+    if node.get("by"):
+        out["by"] = [
+            (
+                {**b, "field": locate_columns({"col": b["field"]}, scope, base)["col"]}
+                if isinstance(b, dict)
+                else locate_columns({"col": b}, scope, base)["col"]
+            )
+            for b in node["by"]
+        ]
+    return out
+
+
+def is_formula_metric(metric: dict) -> bool:
+    """새 형식 지표 — 테이블·디멘젼·허용 계산식만 정하고 조회 내용은 질문이 정한다."""
+    return "dimensions" in metric
+
+
 def series_list(value) -> list[str]:
     """series 의 구분·순서는 컬럼 하나(예전 지표)나 목록이다."""
     if value is None:
@@ -685,6 +784,7 @@ class Compiler:
         "limit",
         "distinct",
         "compare",
+        "latest",
     }
     UNSUPPORTED = {
         "offset": "건너뛰기(OFFSET)",
@@ -721,6 +821,7 @@ class Compiler:
         }
         self.relations = contract.get("relations", [])
         self.metrics = {m["name"]: _with_fixed_by(m) for m in contract.get("metrics", [])}
+        self.formulas = {f["name"]: f for f in contract.get("formulas", [])}
         self.driver = contract["driver"]
         # UTC 로 저장된 시각 컬럼의 현지 시차(시간). 날짜 묶음·표시는 컬럼에 더하고,
         # 필터 값은 반대로 UTC 로 바꿔 비교한다 — 컬럼을 감싸지 않아야 인덱스를 탄다.
@@ -735,12 +836,18 @@ class Compiler:
 
     # ------------------------------------------------------------ 진입점
 
-    def compile(self, ast: dict) -> str:
-        """AST를 SQL로 컴파일"""
+    def compile(self, ast: dict, question: str | None = None) -> str:
+        """AST를 SQL로 컴파일. question 이 있으면 '계산된 <이름>' 계산식 규칙을 함께 본다."""
         ast = normalize_ast(ast)
         self._reject_unknown(ast)
 
         metrics = self._metrics(ast)
+        # 새 형식 지표: 질문이 정한 조회(columns·aggregations)와 계산식을 지표 정의로 바꿔 아래로 넘긴다
+        if any(is_formula_metric(m) for m in metrics):
+            if len(metrics) > 1:
+                raise ValueError("지표는 하나만 씁니다 — metric 에 지표 이름 하나를 적으십시오")
+            metrics = [self._formula_metric(metrics[0], ast, question)]
+            ast = {k: v for k, v in ast.items() if k not in ("columns", "aggregations")}
         # 같은 날짜 컬럼을 두 단위로 묶으면 (월과 일) 결과가 조용히 잘게 쪼개진다
         _check_grains(ast.get("group_by") or [])
         # 지표가 정한 '결과를 나누는 기준' 을 질문의 묶음과 맞춘다 (기본 단위·합산)
@@ -802,6 +909,8 @@ class Compiler:
         else:
             row_columns, aggregates = self._selection(ast, metric, model_filters, ctx)
         row_mode = row_columns is not None
+        if ast.get("latest") is not None:
+            return self._compile_latest(ast, metric, row_columns, filters, joins, ctx)
 
         group_cols, group_items = [], []
         for col in ast.get("group_by") or []:
@@ -913,6 +1022,82 @@ class Compiler:
             )
             source += f" {JOIN_TYPES[kind]} {self._identifier(joined)} ON {on}"
         return source, where
+
+    def _compile_latest(
+        self, ast: dict, metric: dict | None, row_columns, filters: list, joins: list, ctx: dict
+    ) -> str:
+        """단위마다 마지막(처음) N건. 묶음은 질문의 group_by, 없으면 지표의 디멘젼이다.
+
+        GROUP BY 로는 한 행의 모든 컬럼을 꺼낼 수 없어 순위를 매기고 바깥에서 거른다:
+        SELECT 컬럼 FROM (SELECT 컬럼, ROW_NUMBER() OVER (PARTITION BY 단위 ORDER BY 순서 DESC) AS _rn
+        FROM t WHERE …) latest WHERE _rn <= N
+        """
+        spec = ast["latest"]
+        if row_columns is None or metric is None or "latest_by" not in metric:
+            raise ValueError(
+                "latest 는 지표의 행 목록(columns)에만 씁니다 — 집계가 아니라 행을 고를 때입니다"
+            )
+        if isinstance(spec, str):
+            spec = {"order_by": spec}
+        if not isinstance(spec, dict) or not spec.get("order_by"):
+            raise ValueError(
+                'latest 는 {"order_by": "순서 컬럼", "direction": "desc", "count": 1} 입니다 -> '
+                f"{ast['latest']!r}"
+            )
+        for key in ("compare", "having", "distinct"):
+            if ast.get(key):
+                raise ValueError(f"latest 와 {key} 는 함께 쓸 수 없습니다")
+        direction = str(spec.get("direction") or "desc").lower()
+        if direction not in ("asc", "desc"):
+            raise ValueError(f"latest 의 direction 은 asc 나 desc 입니다 -> {direction!r}")
+        count = spec.get("count", 1)
+        if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= MAX_LIMIT:
+            raise ValueError(f"latest 의 count 는 1~{MAX_LIMIT} 정수입니다 -> {count!r}")
+        units = list(ast.get("group_by") or metric["latest_by"])
+        if not units:
+            raise ValueError(
+                f"마지막 건을 고를 단위가 없습니다 — group_by 에 단위(예: 장비)를 적으십시오 "
+                f"(지표 {metric['name']!r} 에 디멘젼이 없습니다)"
+            )
+        _check_grains(units)
+        parts = [self._group_item(u, ctx)["expr"] for u in units]
+        owner, column = self._ref(str(spec["order_by"]), ctx["scope"], ctx["base"])
+        order = self._order_term(self._column_sql(owner, column, ctx["qualify"]), direction)
+
+        source, where = self._source(filters, joins, ctx)
+        rank = self._identifier("_rn")
+        inner = (
+            f"SELECT {', '.join(c['sql'] for c in row_columns)}, "
+            f"ROW_NUMBER() OVER (PARTITION BY {', '.join(parts)} ORDER BY {order}) AS {rank} {source}"
+        )
+        if where:
+            inner += " WHERE " + " AND ".join(where)
+        names = {c["alias"].lower(): c["alias"] for c in row_columns}
+        clauses = [
+            f"SELECT {', '.join(self._alias(n) for n in names.values())}",
+            f"FROM ({inner}) {self._identifier('latest')}",
+            f"WHERE {rank} <= {count}",
+        ]
+        terms = []
+        for item in ast.get("order_by") or []:
+            field = str(item.get("field", "")) if isinstance(item, dict) else ""
+            found = names.get(field.lower()) or names.get(field.split(".")[-1].lower())
+            if found is None:
+                raise ValueError(
+                    f"latest 의 결과는 결과 컬럼 이름으로만 정렬합니다 -> {field!r} (사용 가능: {', '.join(names.values())})"
+                )
+            way = str(item.get("direction") or "asc").lower()
+            if way not in ("asc", "desc"):
+                raise ValueError(f"direction 은 asc 나 desc 입니다 -> {way!r}")
+            terms.append(self._order_term(self._alias(found), way))
+        if terms:
+            clauses.append("ORDER BY " + ", ".join(terms))
+        limit = self._limit(ast.get("limit"))
+        if limit is not None:
+            clauses.append(
+                f"FETCH FIRST {limit} ROWS ONLY" if self.driver == "oracle" else f"LIMIT {limit}"
+            )
+        return " ".join(clauses) + ";"
 
     def _compile_nested(
         self, ast: dict, metric: dict, filters: list, joins: list, ctx: dict
@@ -1331,6 +1516,190 @@ class Compiler:
         )
 
     # ------------------------------------------------------------ 검증 단계
+
+    def _formula_metric(self, metric: dict, ast: dict, question: str | None) -> dict:
+        """새 형식 지표 + 질문의 조회 → 측정값 지표 (아래 컴파일 경로가 그대로 쓴다).
+
+        aggregations 항목: {"field": 컬럼|*, "function": SUM} · {"formula": 계산식, "function"?: SUM} ·
+        {"expr": 식 트리}. columns 항목: 컬럼 · {"formula": 행 단위 계산식}.
+        집계 계산식은 지표의 디멘젼 단위로 계산된다. function 없이 쓰면 질문이 묶지 않은 디멘젼은
+        계산식의 rollup(기본 SUM)으로 합치고 (group_by 가 없으면 디멘젼별 그대로),
+        function 으로 감싸면 디멘젼별 값을 그 함수로 질문의 묶음까지 다시 집계한다.
+        """
+        name = metric["name"]
+        base = _find(metric["table"], self.allowed_tables)
+        if base is None:
+            raise ValueError(f"지표 {name!r} 의 테이블이 없습니다 -> {metric['table']!r}")
+        scope, _ = build_scope(base, metric.get("joins") or [], self.allowed_tables)
+        allowed = {f.lower() for f in metric.get("formulas") or []}
+        dims = list(metric.get("dimensions") or [])
+        columns, aggregations = ast.get("columns"), ast.get("aggregations")
+        if columns and aggregations:
+            raise ValueError("columns(목록 조회)와 aggregations(집계)는 함께 쓸 수 없습니다")
+        if not columns and not aggregations:
+            raise ValueError(
+                f"지표 {name!r} 로 무엇을 볼지 적으십시오 — 행 목록은 columns, 집계는 aggregations"
+            )
+        used: list = []
+
+        def formula(ref) -> dict:
+            found = _find(ref, self.formulas)
+            if found is None or found.lower() not in allowed:
+                raise ValueError(
+                    f"지표 {name!r} 가 쓸 수 있는 계산식이 아닙니다 -> {ref!r} "
+                    f"(사용 가능: {', '.join(metric.get('formulas') or []) or '없음'})"
+                )
+            if found not in used:
+                used.append(found)
+            return self.formulas[found]
+
+        def expand(node):
+            for ref in formula_refs(node):
+                formula(ref)
+            return expand_formula(node, self.formulas)
+
+        asked = {_group_parts(g)[0] for g in ast.get("group_by") or []}
+        # 질문이 묶었지만 빠뜨린 디멘젼 — 그 디멘젼은 계산한 뒤 합친다 (일×장비 → 일별 합계)
+        dropped = bool(asked) and any(_group_parts(d)[0] not in asked for d in dims)
+
+        def at_dims(expr):
+            """집계 계산식은 디멘젼 단위로. 계산식이 스스로 단위를 정했으면 그대로."""
+            if measure_has_aggregate(expr) and dims and not expr.get("by"):
+                return {**expr, "by": list(dims)}
+            return expr
+
+        measures, rollups = [], []
+        if columns:
+            for item in columns:
+                if isinstance(item, dict) and "formula" in item:
+                    f = formula(item["formula"])
+                    expr = expand({"formula": f["name"]})
+                    if measure_has_aggregate(expr):
+                        raise ValueError(
+                            f"계산식 {f['name']!r} 는 집계 계산식이라 columns 에 쓸 수 없습니다 — aggregations 에 "
+                            f'{{"formula": "{f["name"]}"}} 로 쓰십시오'
+                        )
+                    measures.append({"name": item.get("alias") or f["name"], "expr": expr})
+                elif item == "*":
+                    # 모든 컬럼 — 기본 테이블은 이름 그대로, 조인 테이블은 이름이 겹칠 때만 '테이블.컬럼'
+                    taken = {m["name"].lower() for m in measures}
+                    for table, cols in scope.items():
+                        for col in cols:
+                            ref = col if table == base else f"{table}.{col}"
+                            label = col if col.lower() not in taken else f"{table}.{col}"
+                            taken.add(label.lower())
+                            measures.append({"name": label, "expr": {"col": ref}})
+                elif isinstance(item, str):
+                    measures.append({"name": item.split(".")[-1], "expr": {"col": item}})
+                else:
+                    raise ValueError(
+                        f'columns 항목은 컬럼 이름이나 {{"formula": "계산식"}} 입니다 -> {item!r}'
+                    )
+        else:
+            for item in aggregations:
+                if not isinstance(item, dict):
+                    raise ValueError(f"aggregations의 항목은 객체여야 합니다 -> {item!r}")
+                function = str(item.get("function") or "").upper()
+                if function and function not in MEASURE_AGGREGATES:
+                    raise ValueError(
+                        f"허용되지 않은 집계 함수입니다 -> {function!r} (사용 가능: {', '.join(MEASURE_AGGREGATES)})"
+                    )
+                rollup = None
+                if "expr" in item:
+                    expr = at_dims(expand(item["expr"]))
+                    alias = item.get("alias") or "값"
+                elif "formula" in item:
+                    f = formula(item["formula"])
+                    rollup = f.get("rollup")
+                    expr = expand({"formula": f["name"]})
+                    alias = item.get("alias") or f["name"]
+                    if measure_has_aggregate(expr):
+                        expr = at_dims(expr)
+                        if function:
+                            if not expr.get("by"):
+                                raise ValueError(
+                                    f"지표 {name!r} 에 디멘젼이 없어 집계 계산식 {f['name']!r} 를 다시 집계할 수 없습니다 "
+                                    f"— function 없이 {{\"formula\": \"{f['name']}\"}} 로 쓰십시오"
+                                )
+                            expr = {"fn": function, "args": [expr]}
+                        elif dropped and expr.get("by"):
+                            how = str(rollup or "SUM").upper()
+                            if how == "NONE":
+                                # 합칠 수 없는 계산식 — 질문의 묶음으로 다시 계산한다
+                                expr = {k: v for k, v in expr.items() if k != "by"}
+                            else:
+                                expr = {"fn": how, "args": [expr]}
+                    elif function:
+                        expr = {"fn": function, "args": [expr]}
+                    else:
+                        raise ValueError(
+                            f"계산식 {f['name']!r} 는 행 단위 값이라 집계 함수가 필요합니다 -> "
+                            f'{{"formula": "{f["name"]}", "function": "SUM"}}'
+                        )
+                elif "field" in item:
+                    if not function:
+                        raise ValueError(f"aggregations 항목에 function 이 없습니다 -> {item!r}")
+                    field = item["field"]
+                    if field == "*":
+                        if function != "COUNT":
+                            raise ValueError(f"* 는 COUNT 에만 쓸 수 있습니다 -> {function}(*)")
+                        expr = {"fn": "COUNT", "args": []}
+                    else:
+                        expr = {"fn": function, "args": [{"col": str(field)}]}
+                    alias = item.get("alias") or f"{function.lower()}_{field}"
+                else:
+                    raise ValueError(
+                        f"aggregations 항목에 field·formula 가 없습니다 -> 받은 키: {sorted(item)} "
+                        '(모양: {"field": "컬럼명 또는 *", "function": "COUNT"} 또는 {"formula": "계산식"})'
+                    )
+                measures.append({"name": str(alias), "expr": expr, "rollup": rollup})
+                rollups.append(rollup)
+        seen = set()
+        for ms in measures:
+            ms["expr"] = locate_columns(ms["expr"], scope, base)
+            if ms["name"].lower() in seen:
+                raise ValueError(f"결과 이름이 겹칩니다 -> {ms['name']!r} (alias 로 이름을 나누십시오)")
+            seen.add(ms["name"].lower())
+
+        if question is not None:
+            mentioned = mentioned_formulas(question, self.formulas.values())
+            for f in mentioned:
+                if f.lower() not in allowed:
+                    raise ValueError(
+                        f"질문이 '{MENTION_PREFIX} {f}' 를 물었지만 지표 {name!r} 는 이 계산식을 쓰지 않습니다"
+                    )
+                if f not in used:
+                    raise ValueError(
+                        f"질문이 '{MENTION_PREFIX} {f}' 를 물었습니다 — 컬럼 대신 "
+                        f'{{"formula": "{f}"}} 로 쓰십시오'
+                    )
+            for f in used:
+                if self.formulas[f].get("mode") == "forced" and f not in mentioned:
+                    raise ValueError(
+                        f"계산식 {f!r} 는 질문에 '{MENTION_PREFIX} {f}' 가 있을 때만 씁니다 — 컬럼을 그대로 쓰십시오"
+                    )
+
+        out = {
+            "name": name,
+            "kind": "projection" if columns else "aggregate",
+            "table": metric["table"],
+            "joins": metric.get("joins") or [],
+            "fixed_filters": metric.get("fixed_filters") or [],
+            "measures": measures,
+            # 행 목록의 '단위마다 마지막 N건' (latest) 이 질문의 묶음이 없을 때 쓰는 단위
+            "latest_by": dims,
+        }
+        used_fns = set().union(*(measure_functions(ms["expr"]) for ms in measures))
+        if used_fns & (set(MEASURE_ROW_SERIES) | set(SERIES_FUNCTIONS)):
+            out["series"] = {
+                "partition_by": [by_column(d) for d in dims if not isinstance(d, dict)],
+                "order_by": [by_column(d) for d in dims if isinstance(d, dict)],
+            }
+            if not out["series"]["order_by"]:
+                raise ValueError(
+                    f"직전 행 비교에는 순서가 필요합니다 — 지표 {name!r} 의 디멘젼에 날짜 컬럼이 없습니다"
+                )
+        return _with_fixed_by(out)
 
     def _reject_unknown(self, ast: dict) -> None:
         unknown = set(ast) - self.KEYS

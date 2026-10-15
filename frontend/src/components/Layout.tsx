@@ -24,6 +24,7 @@ const GROUPS: { label: string; links: { to: string; text: string; end?: boolean 
     links: [
       { to: "/metrics", text: "목록", end: true },
       { to: "/metrics/new", text: "등록" },
+      { to: "/formulas", text: "계산식" },
     ],
   },
 ];

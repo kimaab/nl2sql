@@ -163,6 +163,7 @@ def test_same_column_with_two_grains_is_rejected():
 
 
 def test_prompt_tells_default_and_allowed_grains():
-    note = _prompt_metric(PER_VEHICLE)["묶음"]
-    assert "collect_datetime(day), vehicle_id" in note
-    assert "day·week·month·quarter·year" in note
+    metric = {"name": "장비 가동", "table": "bms_log", "dimensions": [DAY, "vehicle_id"], "formulas": []}
+    note = _prompt_metric(metric)["묶음"]
+    assert "collect_datetime(day), vehicle_id 단위로 계산됩니다" in note
+    assert "hour·day·week·month·quarter·year" in note

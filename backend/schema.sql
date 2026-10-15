@@ -122,6 +122,34 @@ CREATE TABLE IF NOT EXISTS metric_table (
 );
 CREATE INDEX IF NOT EXISTS idx_metric_table_table ON metric_table (table_id);
 
+-- 지표 = 테이블(조인) + 디멘젼 + 허용 계산식. 무엇을 조회할지는 LLM 이 정한다.
+-- 디멘젼은 집계 계산식이 뜻을 갖는 단위다 (예: 장비 × 일). 질문 단위가 더 크면 이 단위로 계산한 뒤 합친다.
+-- kind·agg_*·select_columns·expression·series·measures 는 예전 형식이다 — 쓰지 않는다.
+ALTER TABLE metric ADD COLUMN IF NOT EXISTS dimensions JSONB;
+
+-- 시스템 계산식. 테이블에 매이지 않고 컬럼 이름으로 쓰인다. 질문에 '계산된 <이름>' 이 나오면 쓴다.
+CREATE TABLE IF NOT EXISTS formula (
+    id          UUID PRIMARY KEY,
+    system_id   UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
+    name        TEXT        NOT NULL,
+    description TEXT        NOT NULL DEFAULT '',
+    column_name TEXT,                                 -- 이 계산식이 대신하는 컬럼 (없으면 새 값)
+    mode        TEXT        NOT NULL DEFAULT 'organic', -- forced: 질문에 이름이 나올 때만 | organic: LLM 판단으로도
+    expr        JSONB       NOT NULL,                 -- 식 트리. 다른 계산식은 {"formula": 이름}
+    source_sql  TEXT,                                 -- SQL 로 등록했으면 그 원문
+    rollup      TEXT,                                 -- 더 큰 기간으로 합칠 때 SUM·AVG·MIN·MAX·NONE (비우면 SUM)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (system_id, name)
+);
+
+-- 지표가 허용하는 계산식. 질문이 다른 계산식을 물으면 지표를 다시 고른다.
+CREATE TABLE IF NOT EXISTS metric_formula (
+    metric_id  UUID NOT NULL REFERENCES metric (id) ON DELETE CASCADE,
+    formula_id UUID NOT NULL REFERENCES formula (id) ON DELETE CASCADE,
+    PRIMARY KEY (metric_id, formula_id)
+);
+
 -- 쓰지 않음: 지표 예시 질문 기능 제거. 기존 데이터 보존용으로만 남긴다.
 CREATE TABLE IF NOT EXISTS metric_example (
     id          BIGSERIAL PRIMARY KEY,

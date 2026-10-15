@@ -1,4 +1,4 @@
-import type { ByItem, Measure, MeasureNode, MetricInput } from "../api";
+import type { ByItem, Measure, MeasureNode } from "../api";
 
 /** 측정값 식에 쓸 수 있는 함수. 백엔드 compiler 의 MEASURE_* 와 같다. */
 export type FnGroup = "집계" | "계산" | "함수" | "직전 행";
@@ -56,6 +56,7 @@ const AGGREGATES = ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "DELT
 
 export const isCol = (n: MeasureNode): n is { col: string } => "col" in n;
 export const isNum = (n: MeasureNode): n is { num: number } => "num" in n;
+export const isFormula = (n: MeasureNode): n is { formula: string } => "formula" in n;
 export const isFn = (n: MeasureNode): n is { fn: string; args: MeasureNode[]; by?: ByItem[] } => "fn" in n;
 export const isAggregate = (fn: string) => AGGREGATES.includes(fn);
 /** 컬럼 하나만 받는 함수 (직전 행 값·시계열 집계) */
@@ -72,6 +73,7 @@ export const byKey = (b: ByItem): string => (typeof b === "string" ? b : `${b.fi
 /** 사람이 읽는 식. 백엔드 measure_text 와 같은 모양이다. */
 export function exprText(n: MeasureNode | undefined): string {
   if (!n) return "?";
+  if (isFormula(n)) return `[${n.formula || "?"}]`;
   if (isCol(n)) return n.col || "?";
   if (isNum(n)) return String(n.num);
   const args = n.args ?? [];
@@ -105,6 +107,7 @@ export function usesSeries(measures: Measure[]): Set<string> {
 
 /** 빈 칸 없이 다 채웠는가 */
 export function exprComplete(n: MeasureNode): boolean {
+  if (isFormula(n)) return Boolean(n.formula);
   if (isCol(n)) return Boolean(n.col);
   if (isNum(n)) return Number.isFinite(n.num);
   const spec = FN[n.fn];
@@ -115,7 +118,7 @@ export function exprComplete(n: MeasureNode): boolean {
 /** 컬럼 참조를 모두 바꾼다 (조인이 생기거나 사라질 때). null 을 돌려주면 그 컬럼은 빈 칸이 된다. */
 export function mapColumns(n: MeasureNode, fix: (ref: string) => string | null): MeasureNode {
   if (isCol(n)) return { col: fix(n.col) ?? "" };
-  if (isNum(n)) return n;
+  if (!isFn(n)) return n;
   return {
     ...n,
     args: n.args.map((a) => mapColumns(a, fix)),
@@ -152,16 +155,16 @@ export function measureLabel(m: Measure, metricName: string, count: number): str
   return count === 1 ? metricName || "(지표 이름)" : "(이름 필요)";
 }
 
-/** 예전 정의(agg_field·select_columns)를 측정값으로. 수정 화면은 측정값으로만 다룬다. */
-export function legacyMeasures(m: MetricInput): Measure[] {
-  if (m.measures?.length) return m.measures;
-  if (m.kind === "aggregate" && m.agg_function) {
-    const args: MeasureNode[] = m.agg_field && m.agg_field !== "*" ? [{ col: m.agg_field }] : [];
-    return [{ name: "", expr: { fn: m.agg_function, args } }];
-  }
-  if (m.kind === "projection") return m.select_columns.map((c) => ({ name: "", expr: { col: c } }));
-  return [];
-}
-
 export const toList = (v: string | string[] | null | undefined): string[] =>
   v == null ? [] : (Array.isArray(v) ? v : [v]).filter(Boolean);
+
+/** 식에 집계 함수가 있는가 (계산식 참조는 모른다 — 서버가 펼쳐서 판정한다) */
+export function hasAggregate(n: MeasureNode): boolean {
+  return isFn(n) && (isAggregate(n.fn) || n.args.some(hasAggregate));
+}
+
+/** 식이 가리키는 다른 계산식 이름 */
+export function formulaRefs(n: MeasureNode): string[] {
+  if (isFormula(n)) return [n.formula];
+  return isFn(n) ? [...new Set(n.args.flatMap(formulaRefs))] : [];
+}

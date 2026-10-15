@@ -50,35 +50,35 @@ export interface SeriesSpec {
   max_step?: number | null;
 }
 
-/** 측정값 식 트리. 함수를 겹쳐 출력 컬럼 하나를 만든다 (백엔드 compiler 의 측정값 식). */
+/** 식 트리. 함수를 겹쳐 값 하나를 만든다 (백엔드 compiler 의 측정값 식). 다른 계산식은 {formula: 이름}. */
 /** 묶을 기준 하나. 컬럼 이름이나 날짜 컬럼 + 단위 ({"field": "collect_datetime", "grain": "day"}) */
 export type ByItem = string | { field: string; grain: string };
 
 export type MeasureNode =
   | { col: string }
   | { num: number }
+  | { formula: string }
   | { fn: string; args: MeasureNode[]; by?: ByItem[] };
 
 export interface Measure {
   name: string;
   expr: MeasureNode;
   /** 기본 기간 단위(일)보다 큰 단위(월)로 물을 때 합치는 방법. NONE = 질문 단위로 다시 계산. 비우면 SUM */
-  rollup?: "SUM" | "AVG" | "MIN" | "MAX" | "NONE" | null;
+  rollup?: Rollup | null;
 }
 
+export type Rollup = "SUM" | "AVG" | "MIN" | "MAX" | "NONE";
+
+/** 지표 = 테이블(조인) + 디멘젼 + 허용 계산식. 무엇을 조회할지는 질문마다 LLM 이 정한다. */
 export interface MetricInput {
   name: string;
   description: string;
-  kind: MetricKind;
   table_name: string;
   joins: MetricJoin[];
-  agg_field: string | null;
-  agg_function: string | null;
-  select_columns: string[];
-  expression: string | null;
-  series: SeriesSpec | null;
-  /** 집계형·조회형의 출력 컬럼. 있으면 agg_field·agg_function·select_columns 대신 쓴다. */
-  measures: Measure[];
+  /** 집계 계산식이 뜻을 갖는 단위 (예: 장비 × 일) */
+  dimensions: ByItem[];
+  /** 이 지표가 허용하는 시스템 계산식 이름 */
+  formulas: string[];
   fixed_filters: Record<string, any>[];
   synonyms: string[];
 }
@@ -89,6 +89,50 @@ export interface Metric extends MetricInput {
   broken_reason: string | null;
   version: number;
   updated_at: string | null;
+}
+
+/** forced: 질문에 '계산된 <이름>' 이 있을 때만 쓴다. organic: LLM 이 맞다고 보면 이름 없이도 쓴다. */
+export type FormulaMode = "forced" | "organic";
+
+export interface FormulaInput {
+  name: string;
+  description: string;
+  column_name: string | null;
+  mode: FormulaMode;
+  expr: MeasureNode | null;
+  source_sql: string | null;
+  rollup: Rollup | null;
+}
+
+export interface Formula {
+  id: string;
+  name: string;
+  description: string;
+  column_name: string | null;
+  mode: FormulaMode;
+  expr: MeasureNode;
+  text: string;
+  level: "row" | "aggregate";
+  source_sql: string | null;
+  rollup: Rollup | null;
+  refs: string[];
+  used_by: string[];
+  updated_at: string | null;
+}
+
+export interface ParsedFormula {
+  name: string | null;
+  expr: MeasureNode;
+  text: string;
+  level: "row" | "aggregate";
+}
+
+/** SQL 을 푼 결과. 디멘젼·테이블은 지표 등록에 쓸 후보, outer 는 질문이 정할 바깥 집계 참고 */
+export interface FormulaParse {
+  formulas: ParsedFormula[];
+  dimensions: ByItem[];
+  table: string | null;
+  outer: string[];
 }
 
 export interface MetricHistoryEntry {
@@ -282,7 +326,17 @@ export const deleteMetric = (sysId: string, id: string) =>
 export const metricHistory = (sysId: string, id: string) =>
   request<MetricHistoryEntry[]>(`/systems/${sysId}/metrics/${id}/history`);
 
-// 보강 · 검수 · 평가
+// 계산식
+export const listFormulas = (sysId: string) => request<Formula[]>(`/systems/${sysId}/formulas`);
+export const createFormula = (sysId: string, input: FormulaInput) =>
+  request<Formula>(`/systems/${sysId}/formulas`, { method: "POST", body: input });
+export const updateFormula = (sysId: string, id: string, input: FormulaInput) =>
+  request<Formula>(`/systems/${sysId}/formulas/${id}`, { method: "PUT", body: input });
+export const deleteFormula = (sysId: string, id: string) =>
+  request<void>(`/systems/${sysId}/formulas/${id}`, { method: "DELETE" });
+/** SQL(식 하나나 SELECT 전체)을 식 트리로 푼다 */
+export const parseFormulaSql = (sysId: string, sql: string) =>
+  request<FormulaParse>(`/systems/${sysId}/formulas/parse`, { method: "POST", body: { sql } });
 
 // 질문
 export const ask = (systemId: string, question: string) =>

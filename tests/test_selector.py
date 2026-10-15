@@ -1,14 +1,14 @@
-"""TO-BE 선택 흐름: 테이블 추론(LLM) → 지표 후보 조회(테이블 연결) → 지표 선택(LLM) → 조회 명세."""
+"""TO-BE 선택 흐름: 지표 선택(LLM) → 조회 명세 (지표가 테이블·계산식을 정한다)."""
 
 import json
 
 from langchain_core.messages import AIMessage
 
-from ask import run_question
-from compiler import Compiler
+from ask import run_question, system_prompt
 from contract import metric_tables
 from evaluate import judge
-from selector import llm_select, metric_candidates, parse_json
+from selector import llm_select, parse_json
+from test_formulas import FORMULAS, METRIC
 
 
 class FakeLLM:
@@ -47,144 +47,162 @@ class FakeLLM:
         return Bound()
 
 
-def tables_reply(*names):
-    return {"tables": [{"name": n, "reason": "질문과 관련"} for n in names]}
+STATE = {
+    "name": "장비 상태",
+    "description": "장비 상태 기록 (경고·충전)",
+    "table": "bms_condition",
+    "dimensions": [],
+    "fixed_filters": [],
+    "formulas": [],
+    "tables": ["bms_condition"],
+}
+
+CONTRACT = {
+    "name": "BARONESS",
+    "domain": "무인 장비 운행",
+    "driver": "postgresql",
+    "relations": [],
+    "formulas": FORMULAS,
+    "metrics": [{**METRIC, "tables": ["bms_log"], "synonyms": ["가동"]}, STATE],
+    "tables": [
+        {
+            "name": "bms_log",
+            "description": "장비 누적 기록",
+            "columns": [
+                {"name": "collect_datetime", "type": "timestamp", "utc_offset": 9},
+                {"name": "vehicle_id", "type": "varchar(20)"},
+                {"name": "uman_time", "type": "numeric", "description": "무인 가동시간 누적"},
+                {"name": "man_time", "type": "numeric"},
+                {"name": "volt_max", "type": "numeric"},
+                {"name": "volt_min", "type": "numeric"},
+            ],
+        },
+        {
+            "name": "bms_condition",
+            "description": "장비 상태",
+            "columns": [
+                {"name": "collect_datetime", "type": "timestamp"},
+                {"name": "vehicle_id", "type": "varchar(20)"},
+                {"name": "alarm_code", "type": "varchar(10)"},
+            ],
+        },
+    ],
+}
+
+Q1 = "최근 5일 일별 계산된 무인 가동시간"
 
 
-def test_full_pipeline_picks_tables_then_metric_then_compiles(contract):
-    model = FakeLLM(
-        [
-            tables_reply("tb_order"),
-            {"metrics": ["매출"], "reason": "매출 = 취소 뺀 주문 금액"},
-        ],
-        [("compile_sql", {"ast": json.dumps({"metric": "매출"})})],
-    )
-    out = run_question(contract, "장사 얼마나 됐어", model)
-    assert out["tables"] == ["TB_ORDER"] and out["metrics"] == ["매출"]
-    assert out["sql"].startswith("SELECT SUM(") and out["attempts"] == 1
-    assert [s["stage"] for s in out["steps"]] == ["table", "metric", "sql"]
-    assert (
-        out["total_tokens"] == 220
-    )  # 선택 두 번의 토큰 (가짜 모델의 도구 호출에는 사용량이 없다)
-    # 지표 선택에는 고른 테이블에 연결된 지표만, 이름·설명만 간다 (정의·컬럼은 안 간다)
-    metric_prompt = model.prompts[1][1].content
-    assert "주문수" in metric_prompt and "TOTAL_AMT" not in metric_prompt
-    assert out["steps"][1]["candidates"] == [
-        m["name"] for m in metric_candidates(contract, ["TB_ORDER"])
-    ]
-
-
-def test_ast_that_ignores_chosen_metric_is_sent_back_once(contract):
-    """지표를 고른 뒤 원본 컬럼을 직접 집계하면 오류 없이 틀린 답이 나온다 — 첫 시도는 되돌려 보낸다."""
-    raw = {
-        "target_table": "TB_ORDER",
-        "aggregations": [{"field": "TOTAL_AMT", "function": "SUM"}],
+def test_pipeline_picks_metric_then_compiles_with_formula():
+    ast = {
+        "metric": "장비 가동",
+        "aggregations": [{"formula": "무인 가동시간", "function": "SUM"}],
+        "group_by": [{"field": "collect_datetime", "grain": "day"}],
     }
     model = FakeLLM(
-        [tables_reply("TB_ORDER"), {"metrics": ["매출"]}],
-        [
-            ("compile_sql", {"ast": json.dumps(raw)}),
-            ("compile_sql", {"ast": json.dumps({"metric": "매출"})}),
-        ],
+        [{"metric": "장비 가동", "reason": "가동시간 계산식"}],
+        [("compile_sql", {"ast": json.dumps(ast, ensure_ascii=False)})],
     )
-    out = run_question(contract, "매출 얼마야", model)
-    assert out["attempts"] == 2 and out["ast"] == {"metric": "매출"}
-    # 지표 정의(고정 필터 포함)대로 전개된 SQL
-    assert out["sql"] == Compiler(contract).compile({"metric": "매출"})
+    out = run_question(CONTRACT, Q1, model)
+    assert out["metrics"] == ["장비 가동"] and out["tables"] == ["bms_log"]
+    assert 'SUM("_m1") AS "무인 가동시간"' in out["sql"] and out["attempts"] == 1
+    assert [s["stage"] for s in out["steps"]] == ["metric", "sql"]
+    # 지표 선택에는 지표마다 설명·같은 말·테이블·계산식이 간다 (컬럼은 안 간다)
+    prompt = model.prompts[0][1].content
+    assert "계산식: 무인 가동시간" in prompt and "같은 말: 가동" in prompt
+    assert "테이블: bms_condition" in prompt and "uman_time" not in prompt
 
 
-def test_model_may_insist_on_raw_query_after_one_warning(contract):
-    raw = {"target_table": "TB_ORDER", "columns": ["ORDER_ID"]}
-    model = FakeLLM(
-        [tables_reply("TB_ORDER"), {"metrics": ["주문수"]}],
-        [
-            ("compile_sql", {"ast": json.dumps(raw)}),
-            ("compile_sql", {"ast": json.dumps(raw)}),
-        ],
-    )
-    out = run_question(contract, "주문 번호 목록", model)
-    assert out["attempts"] == 2 and out["sql"] == 'SELECT "ORDER_ID" FROM "TB_ORDER";'
+def test_metric_without_mentioned_formula_is_judged_again():
+    model = FakeLLM([{"metric": "장비 상태"}, {"metric": "장비 가동"}])
+    sel = llm_select(model, CONTRACT, Q1)
+    assert sel.metrics == ["장비 가동"] and sel.clarification is None
+    again = model.prompts[1][1].content
+    assert "[다시 고르기]" in again and "지표명: 장비 상태" not in again
+    # 고른 지표의 테이블과 허용 계산식만 싣는다
+    assert [t["name"] for t in sel.pruned["tables"]] == ["bms_log"]
+    assert {f["name"] for f in sel.pruned["formulas"]} == set(METRIC["formulas"])
 
 
-def test_table_names_are_matched_and_unknown_ones_dropped(contract):
-    model = FakeLLM(
-        [
-            {"tables": [{"name": "TB_MEMBER"}, {"name": "없는테이블"}, "tb_member"]},
-            {"metrics": []},
-        ]
-    )
-    sel = llm_select(model, contract, "VIP 회원 목록")
-    assert sel.tables == ["TB_MEMBER"] and sel.metrics == []
-    # 지표가 없으면 테이블을 직접 조회하도록 테이블만 싣는다
-    assert [t["name"] for t in sel.pruned["tables"]] == ["TB_MEMBER"] and sel.pruned[
-        "metrics"
-    ] == []
+def test_no_metric_allows_the_formula_asks_back_without_llm():
+    contract = {**CONTRACT, "metrics": [STATE]}
+    model = FakeLLM([])
+    sel = llm_select(model, contract, Q1)
+    assert sel.metrics == [] and "계산할 수 있는 지표가 없습니다" in sel.clarification
+    assert model.prompts == []
 
 
-def test_no_table_means_clarification(contract):
-    sel = llm_select(FakeLLM([{"tables": []}]), contract, "오늘 날씨 어때")
-    assert sel.clarification and "테이블을 찾지 못했습니다" in sel.clarification
-    out = run_question(contract, "오늘 날씨 어때", FakeLLM([{"tables": []}]))
-    assert (
-        out["clarification"]
-        and out["sql"] is None
-        and [s["stage"] for s in out["steps"]] == ["table"]
-    )
+def test_no_metric_means_clarification():
+    out = run_question(CONTRACT, "오늘 날씨 어때", FakeLLM([{"metric": None}]))
+    assert out["clarification"] and "지표를 찾지 못했습니다" in out["clarification"]
+    assert out["sql"] is None and [s["stage"] for s in out["steps"]] == ["metric"]
 
 
-def test_ambiguous_metric_asks_back_with_options(contract):
+def test_ambiguous_metric_asks_back_with_options():
     model = FakeLLM(
         [
-            tables_reply("TB_ORDER"),
             {
-                "metrics": [],
+                "metric": None,
                 "ambiguous": True,
-                "options": ["주문수", "취소주문수"],
-                "message": "전체 주문 수인가요, 취소된 주문 수인가요?",
-            },
+                "options": ["장비 가동", "장비 상태"],
+                "message": "가동 기록인가요, 상태 기록인가요?",
+            }
         ]
     )
-    out = run_question(contract, "주문 건수", model)
-    assert out["sql"] is None and "후보: 주문수, 취소주문수" in out["clarification"]
+    out = run_question(CONTRACT, "장비 기록", model)
+    assert out["sql"] is None and "후보: 장비 가동, 장비 상태" in out["clarification"]
 
 
-def test_bad_json_is_retried_once(contract):
-    model = FakeLLM(
-        [
-            "표를 고르면 TB_ORDER 입니다",
-            tables_reply("TB_ORDER"),
-            {"metrics": ["주문수"]},
-        ]
-    )
-    sel = llm_select(model, contract, "주문 수")
-    assert (
-        sel.metrics == ["주문수"]
-        and "형식이 틀렸습니다" in model.prompts[1][-1].content
-    )
+def test_bad_json_is_retried_once():
+    model = FakeLLM(["지표는 장비 가동 입니다", {"metric": "장비 가동"}])
+    sel = llm_select(model, CONTRACT, "가동 기록")
+    assert sel.metrics == ["장비 가동"] and "형식이 틀렸습니다" in model.prompts[1][-1].content
     assert sel.steps[0].prompt_tokens == 200  # 두 번 물은 토큰이 다 잡힌다
 
 
+def test_ast_that_ignores_chosen_metric_is_sent_back_once():
+    raw = {"target_table": "bms_log", "aggregations": [{"field": "uman_time", "function": "MAX"}]}
+    fixed = {"metric": "장비 가동", "aggregations": [{"field": "uman_time", "function": "MAX"}]}
+    model = FakeLLM(
+        [{"metric": "장비 가동"}],
+        [("compile_sql", {"ast": json.dumps(raw)}), ("compile_sql", {"ast": json.dumps(fixed, ensure_ascii=False)})],
+    )
+    out = run_question(CONTRACT, "무인 가동시간 최댓값", model)
+    assert out["attempts"] == 2 and out["ast"] == fixed
+    assert out["sql"] == 'SELECT MAX("uman_time") AS "max_uman_time" FROM "bms_log";'
+
+
+def test_forced_formula_without_mention_is_sent_back():
+    """'계산된' 없이 물으면 컬럼 그대로 — 강제 계산식을 쓰면 되돌려 보낸다"""
+    wrong = {"metric": "장비 가동", "aggregations": [{"formula": "무인 가동시간"}]}
+    right = {"metric": "장비 가동", "aggregations": [{"field": "uman_time", "function": "MAX"}]}
+    model = FakeLLM(
+        [{"metric": "장비 가동"}],
+        [
+            ("compile_sql", {"ast": json.dumps(wrong, ensure_ascii=False)}),
+            ("compile_sql", {"ast": json.dumps(right, ensure_ascii=False)}),
+        ],
+    )
+    out = run_question(CONTRACT, "무인 가동시간 최댓값", model)
+    assert out["attempts"] == 2 and out["ast"] == right
+
+
+def test_sql_prompt_lists_allowed_formulas_and_rules():
+    sel = llm_select(FakeLLM([{"metric": "장비 가동"}]), CONTRACT, Q1)
+    prompt = system_prompt(CONTRACT, sel.pruned, chosen_metrics=sel.metrics)
+    assert "[계산식]" in prompt and "'계산된 <이름>'" in prompt
+    assert '"식": "ABS(MAX(uman_time) - MIN(uman_time))"' in prompt
+    assert '"식": "[무인 가동시간] / ([무인 가동시간] + [유인 가동시간])"' in prompt
+    assert "collect_datetime(day), vehicle_id 단위로 계산됩니다" in prompt
+
+
 def test_parse_json_accepts_fences_and_chatter():
-    assert parse_json('네.\n```json\n{"tables": []}\n```') == {"tables": []}
-    assert parse_json('답: {"metrics": ["a"]} 입니다') == {"metrics": ["a"]}
+    assert parse_json('네.\n```json\n{"metric": null}\n```') == {"metric": None}
+    assert parse_json('답: {"metric": "a"} 입니다') == {"metric": "a"}
 
 
 def test_metric_tables_from_definition():
-    by_name = {
-        "주문수": {"table_name": "TB_ORDER"},
-        "환불": {"table_name": "TB_REFUND"},
-    }
-    m = {
-        "table_name": "TB_ORDER",
-        "kind": "derived",
-        "expression": "[환불] / [주문수]",
-        "joins": [{"table": "TB_MEMBER"}],
-    }
-    assert metric_tables(m, by_name) == [
-        ("TB_ORDER", "base"),
-        ("TB_MEMBER", "join"),
-        ("TB_REFUND", "join"),
-    ]
+    m = {"table_name": "TB_ORDER", "joins": [{"table": "TB_MEMBER"}, {"table": "tb_order"}]}
+    assert metric_tables(m) == [("TB_ORDER", "base"), ("TB_MEMBER", "join")]
 
 
 def test_judge_per_stage():
@@ -213,21 +231,14 @@ def test_judge_per_stage():
     }  # '지표 없음' 이 정답이면 안 고른 게 맞다
 
 
-def test_table_prompt_lists_linked_metrics_and_synonyms(contract):
-    """코멘트만으로는 값이 어느 테이블에 있는지 모른다 — 테이블 줄에 연결된 지표 이름·같은 말을 싣는다."""
-    contract = {
-        **contract,
-        "metrics": [
-            {**m, "synonyms": ["장사 실적"]} if m["name"] == "매출" else m
-            for m in contract["metrics"]
-        ],
-    }
-    model = FakeLLM([tables_reply("tb_order"), {"metrics": ["매출"], "reason": ""}])
-    llm_select(model, contract, "매출 알려줘")
-    table_prompt = model.prompts[0][1].content
-    line = next(l for l in table_prompt.splitlines() if l.startswith("- TB_ORDER"))
-    assert "[지표: " in line and "매출" in line and "장사 실적" in line
-    linked = {t.lower() for m in contract["metrics"] for t in m.get("tables", [m["table"]])}
-    bare = [t["name"] for t in contract["tables"] if t["name"].lower() not in linked]
-    for name in bare:
-        assert "[지표:" not in next(l for l in table_prompt.splitlines() if l.startswith(f"- {name}"))
+def test_metric_named_by_description_or_spacing_is_resolved():
+    # 이름 대신 설명을 적거나 띄어쓰기가 달라도 그 지표로 본다
+    assert llm_select(FakeLLM([{"metric": "장비 상태 기록 (경고·충전)"}]), CONTRACT, "경고 기록").metrics == ["장비 상태"]
+    assert llm_select(FakeLLM([{"metric": "장비가동"}]), CONTRACT, "가동 기록").metrics == ["장비 가동"]
+
+
+def test_unknown_metric_name_is_asked_again_not_clarified():
+    model = FakeLLM([{"metric": "기간별 장비 가동"}, {"metric": "장비 가동"}])
+    sel = llm_select(model, CONTRACT, "가동 기록")
+    assert sel.metrics == ["장비 가동"] and sel.clarification is None
+    assert "에 없는 지표명입니다" in model.prompts[1][-1].content

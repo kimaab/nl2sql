@@ -7,8 +7,10 @@ from compiler import (
     FILTER_SOURCES,
     Compiler,
     build_scope,
-    compile_formula,
+    by_column,
+    expand_formula,
     is_numeric_type,
+    measure_has_aggregate,
     parse_temporal,
     resolve_ref,
     resolve_relative,
@@ -16,24 +18,29 @@ from compiler import (
 )
 from contract import (
     broken_reasons,
+    formula_entry,
     load_contract,
+    load_formula_rows,
     load_metric_rows,
     load_tables,
     metric_entry,
     metric_tables,
 )
-from models import ApiException, Metric, MetricHistoryEntry, MetricInput, MetricKind
+from models import ApiException, Metric, MetricHistoryEntry, MetricInput
 
 log = logging.getLogger("nl2sql.metrics")
+
+_SELECT = """
+    SELECT m.*, t.name AS table_name,
+           COALESCE((SELECT jsonb_agg(f.name ORDER BY f.name) FROM metric_formula mf
+                       JOIN formula f ON f.id = mf.formula_id WHERE mf.metric_id = m.id), '[]') AS formulas
+      FROM metric m JOIN meta_table t ON t.id = m.base_table_id
+"""
 
 
 def list_metrics(system_id: UUID) -> list[Metric]:
     rows = db.query(
-        """
-        SELECT m.*, t.name AS table_name FROM metric m JOIN meta_table t ON t.id = m.base_table_id
-         WHERE m.system_id = %s ORDER BY m.created_at DESC
-    """,
-        str(system_id),
+        _SELECT + " WHERE m.system_id = %s ORDER BY m.created_at DESC", str(system_id)
     )
     return [_row_to_metric(r) for r in rows]
 
@@ -44,10 +51,7 @@ def get_metric(system_id: UUID, metric_id: UUID) -> Metric:
 
 def _get_row(system_id: UUID, metric_id: UUID) -> dict:
     row = db.one(
-        """
-        SELECT m.*, t.name AS table_name FROM metric m JOIN meta_table t ON t.id = m.base_table_id
-         WHERE m.id = %s AND m.system_id = %s
-    """,
+        _SELECT + " WHERE m.id = %s AND m.system_id = %s",
         str(metric_id),
         str(system_id),
     )
@@ -59,9 +63,9 @@ def _get_row(system_id: UUID, metric_id: UUID) -> dict:
 def create_metric(
     system_id: UUID, data: MetricInput, actor: str | None = None
 ) -> Metric:
-    """지표 생성. 가리키는 테이블·컬럼이 저장된 스키마에 실제로 있는지 여기서 확인한다."""
+    """지표 생성. 가리키는 테이블·컬럼·계산식이 실제로 있는지 여기서 확인한다."""
     _guard_duplicate_name(system_id, data.name)
-    table_name = _validate(system_id, data)
+    table_name, formula_ids = _validate(system_id, data)
     tables = load_tables(system_id)
 
     metric_id = uuid4()
@@ -69,9 +73,9 @@ def create_metric(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO metric (id, system_id, name, description, kind, base_table_id, joins, agg_field,
-                                    agg_function, select_columns, expression, series, measures, fixed_filters, synonyms)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO metric (id, system_id, name, description, base_table_id, joins, dimensions,
+                                    fixed_filters, synonyms)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
                 (
                     str(metric_id),
@@ -79,9 +83,10 @@ def create_metric(
                     *_values(data, tables[table_name]["id"]),
                 ),
             )
+            _save_formulas(cur, metric_id, formula_ids)
             _record_history(cur, system_id, metric_id, 1, "create", actor)
     _after_save(system_id, metric_id)
-    log.info("metric created: %s (%s, kind=%s)", metric_id, data.name, data.kind.value)
+    log.info("metric created: %s (%s)", metric_id, data.name)
     return get_metric(system_id, metric_id)
 
 
@@ -91,14 +96,7 @@ def update_metric(
     """지표 수정. 버전을 올리고 이전 정의는 이력에 남는다."""
     current = _get_row(system_id, metric_id)
     _guard_duplicate_name(system_id, data.name, except_id=metric_id)
-    if (
-        current["name"].lower() != data.name.lower()
-        or data.kind is not MetricKind.AGGREGATE
-    ):
-        _guard_not_referenced(
-            system_id, current["name"], "이름을 바꾸거나 집계형이 아니게 바꿀"
-        )
-    table_name = _validate(system_id, data)
+    table_name, formula_ids = _validate(system_id, data)
     tables = load_tables(system_id)
 
     version = current["version"] + 1
@@ -106,9 +104,8 @@ def update_metric(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE metric SET name = %s, description = %s, kind = %s, base_table_id = %s, joins = %s,
-                       agg_field = %s, agg_function = %s, select_columns = %s, expression = %s, series = %s,
-                       measures = %s, fixed_filters = %s, synonyms = %s, version = %s, updated_at = now()
+                UPDATE metric SET name = %s, description = %s, base_table_id = %s, joins = %s, dimensions = %s,
+                       fixed_filters = %s, synonyms = %s, version = %s, updated_at = now()
                  WHERE id = %s AND system_id = %s
             """,
                 (
@@ -118,6 +115,7 @@ def update_metric(
                     str(system_id),
                 ),
             )
+            _save_formulas(cur, metric_id, formula_ids)
             _record_history(cur, system_id, metric_id, version, "update", actor)
     _after_save(system_id, metric_id)
     log.info("metric updated: %s (%s, v%d)", metric_id, data.name, version)
@@ -133,7 +131,6 @@ def delete_metric(system_id: UUID, metric_id: UUID, actor: str | None = None) ->
     )
     if row is None:
         return
-    _guard_not_referenced(system_id, row["name"], "지울")
     with db.connection() as conn:
         with conn.cursor() as cur:
             _record_history(cur, system_id, metric_id, row["version"], "delete", actor)
@@ -176,16 +173,14 @@ def _after_save(system_id: UUID, metric_id: UUID) -> None:
 
 def rebuild_metric_tables(system_id: UUID, metric_id: UUID) -> None:
     """정의에서 metric_table(origin=definition) 을 다시 만든다. 사람이 더한 manual 행은 남긴다."""
-    rows = load_metric_rows(system_id)
-    by_name = {r["name"].lower(): r for r in rows}
-    target = next((r for r in rows if str(r["id"]) == str(metric_id)), None)
+    target = next(
+        (r for r in load_metric_rows(system_id) if str(r["id"]) == str(metric_id)), None
+    )
     if target is None:
         return
     tables = load_tables(system_id)
     links = [
-        (tables[n]["id"], role)
-        for n, role in metric_tables(target, by_name)
-        if n in tables
+        (tables[n]["id"], role) for n, role in metric_tables(target) if n in tables
     ]
     with db.connection() as conn:
         with conn.cursor() as cur:
@@ -208,7 +203,8 @@ def refresh_statuses(system_id: UUID) -> list[dict]:
     retired 는 사람이 정한 것이라 건드리지 않는다. 깨진 지표 [{name, reason}] 를 돌려준다.
     """
     rows = [r for r in load_metric_rows(system_id) if r["status"] != "retired"]
-    broken = broken_reasons(rows, load_tables(system_id))
+    formulas = [formula_entry(f) for f in load_formula_rows(system_id)]
+    broken = broken_reasons(rows, load_tables(system_id), formulas)
     updates = []
     for r in rows:
         if r["name"] in broken:
@@ -234,11 +230,12 @@ def _record_history(
         """
         INSERT INTO metric_history (system_id, metric_id, version, action, actor, snapshot)
         SELECT m.system_id, m.id, %s, %s, %s,
-               jsonb_build_object('name', m.name, 'description', m.description, 'kind', m.kind,
-                                  'table_name', t.name, 'joins', m.joins, 'agg_field', m.agg_field,
-                                  'agg_function', m.agg_function, 'select_columns', m.select_columns,
-                                  'expression', m.expression, 'fixed_filters', m.fixed_filters,
-                                  'series', m.series, 'measures', m.measures, 'synonyms', m.synonyms)
+               jsonb_build_object('name', m.name, 'description', m.description, 'table_name', t.name,
+                                  'joins', m.joins, 'dimensions', m.dimensions, 'fixed_filters', m.fixed_filters,
+                                  'synonyms', m.synonyms,
+                                  'formulas', COALESCE((SELECT jsonb_agg(f.name ORDER BY f.name) FROM metric_formula mf
+                                                         JOIN formula f ON f.id = mf.formula_id
+                                                        WHERE mf.metric_id = m.id), '[]'))
           FROM metric m JOIN meta_table t ON t.id = m.base_table_id
          WHERE m.id = %s AND m.system_id = %s
     """,
@@ -250,17 +247,19 @@ def _values(data: MetricInput, base_table_id: str) -> tuple:
     return (
         data.name,
         data.description,
-        data.kind.value,
         base_table_id,
         json.dumps([j.model_dump() for j in data.joins]),
-        data.agg_field,
-        data.agg_function,
-        json.dumps(data.select_columns),
-        data.expression,
-        json.dumps(data.series.model_dump()) if data.series else None,
-        json.dumps([ms.model_dump() for ms in data.measures], ensure_ascii=False),
-        json.dumps(data.fixed_filters),
+        json.dumps(data.dimensions, ensure_ascii=False),
+        json.dumps(data.fixed_filters, ensure_ascii=False),
         json.dumps(data.synonyms, ensure_ascii=False),
+    )
+
+
+def _save_formulas(cur, metric_id: UUID, formula_ids: list[str]) -> None:
+    cur.execute("DELETE FROM metric_formula WHERE metric_id = %s", (str(metric_id),))
+    cur.executemany(
+        "INSERT INTO metric_formula (metric_id, formula_id) VALUES (%s, %s)",
+        [(str(metric_id), fid) for fid in formula_ids],
     )
 
 
@@ -277,28 +276,8 @@ def _guard_duplicate_name(
         raise ApiException(409, f"'{name}' 이름의 지표가 이미 있습니다")
 
 
-def _guard_not_referenced(system_id: UUID, name: str, what: str) -> None:
-    """파생 지표가 쓰는 지표를 지우거나 바꾸면 그 파생 지표가 조용히 깨진다."""
-    users = []
-    for r in db.query(
-        "SELECT name, expression FROM metric WHERE system_id = %s AND kind = 'derived'",
-        str(system_id),
-    ):
-        try:
-            _, refs = compile_formula(r["expression"], lambda n: "x")
-        except ValueError:
-            continue
-        if any(ref.lower() == name.lower() for ref in refs):
-            users.append(r["name"])
-    if users:
-        raise ApiException(
-            400,
-            f"파생 지표 {', '.join(users)}이(가) '{name}'을(를) 쓰고 있어 {what} 수 없습니다. 파생 지표를 먼저 고치십시오",
-        )
-
-
-def _validate(system_id: UUID, data: MetricInput) -> str:
-    """정의를 저장된 스키마와 대조한다. 정규화된 기본 테이블 이름을 돌려준다."""
+def _validate(system_id: UUID, data: MetricInput) -> tuple[str, list[str]]:
+    """정의를 저장된 스키마와 대조한다 → (정규화된 기본 테이블 이름, 허용 계산식 id 목록)."""
     tables = load_tables(system_id)
     if not tables:
         raise ApiException(400, "스키마가 비어 있습니다. 동기화를 먼저 실행하십시오")
@@ -331,20 +310,34 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
         except ValueError as error:
             raise ApiException(400, str(error)) from None
 
-    if data.measures:
-        pass  # 식 트리는 아래 _validate_measures 가 실제로 컴파일해 본다
-    elif data.kind is MetricKind.AGGREGATE:
-        if data.series is not None:
-            _validate_series(data, scope, base, types, driver)
-        elif data.agg_field != "*":
-            require(data.agg_field, "집계")
-        elif data.agg_function != "COUNT":
-            raise ApiException(400, "* 는 COUNT 에만 쓸 수 있습니다")
-    elif data.kind is MetricKind.PROJECTION:
-        for column in data.select_columns:
-            require(column, "조회")
-    else:
-        _validate_formula(system_id, data, scope)
+    for d in data.dimensions:
+        table, column = require(by_column(d), "디멘젼")
+        if isinstance(d, dict):
+            kind = temporal_kind(types.get((table, column), ""), driver)
+            if not kind:
+                raise ApiException(
+                    400, f"{table}.{column} 는 날짜 컬럼이 아니라 기간 단위로 묶을 수 없습니다"
+                )
+            if d["grain"] == "hour" and kind != "datetime":
+                raise ApiException(
+                    400, f"{table}.{column} 는 시각이 없는 날짜라 시간 단위로 묶을 수 없습니다"
+                )
+    grains = [d for d in data.dimensions if isinstance(d, dict)]
+    if len({by_column(d).lower() for d in grains}) != len(grains):
+        raise ApiException(400, "같은 날짜 컬럼을 두 단위로 묶을 수 없습니다")
+
+    rows = {f["name"].lower(): f for f in load_formula_rows(system_id)}
+    formulas = {f["name"]: formula_entry(f) for f in rows.values()}
+    formula_ids = []
+    for name in data.formulas:
+        row = rows.get(name.lower())
+        if row is None:
+            raise ApiException(400, f"등록되지 않은 계산식입니다: {name}")
+        try:
+            expand_formula({"formula": row["name"]}, formulas)
+        except ValueError as error:
+            raise ApiException(400, str(error)) from None
+        formula_ids.append(str(row["id"]))
 
     for filter_spec in data.fixed_filters:
         table, column = require(filter_spec.get("field"), "필터")
@@ -400,110 +393,27 @@ def _validate(system_id: UUID, data: MetricInput) -> str:
                 "(자정인 행만 걸립니다). greater_or_equal 과 less_or_equal 로 기간을 지정하십시오",
             )
 
-    if data.measures:
-        _validate_measures(system_id, data, base)
-    return base
-
-
-def _validate_series(
-    data: MetricInput, scope: dict, base: str, types: dict, driver: str
-) -> None:
-    """시계열 집계: 값·구분·순서 컬럼은 모두 기본 테이블에 있어야 한다 (LAG 서브쿼리가 기본 테이블만 감싼다)."""
-    only_base = {base: scope[base]}
-    labels = (
-        ("집계", data.agg_field),
-        ("구분", data.series.partition_by),
-        ("순서", data.series.order_by),
-    )
-    resolved = {}
-    for what, ref in labels:
-        if ref == "*":
-            raise ApiException(400, f"{data.agg_function} 는 * 대신 컬럼이 필요합니다")
-        try:
-            resolved[what] = resolve_ref(
-                str(ref or ""),
-                only_base,
-                base,
-                f"{what} 컬럼을 기본 테이블 {base} 에서 찾을 수 없습니다",
-            )
-        except ValueError as error:
-            raise ApiException(400, str(error)) from None
-    value_type = types.get(resolved["집계"], "")
-    if data.agg_function == "DELTA_SUM" and not is_numeric_type(value_type):
-        raise ApiException(
-            400,
-            f"DELTA_SUM 은 숫자 컬럼에만 씁니다 -> {base}.{resolved['집계'][1]} ({value_type})",
-        )
-    if data.agg_function == "CHANGE_COUNT" and is_numeric_type(value_type):
-        try:
-            float(data.series.baseline)
-        except ValueError:
-            raise ApiException(
-                400, f"정상값은 숫자여야 합니다 -> {data.series.baseline!r}"
-            ) from None
-    if not temporal_kind(
-        types.get(resolved["순서"], ""), driver
-    ) and not is_numeric_type(types.get(resolved["순서"], "")):
-        raise ApiException(
-            400,
-            f"순서 컬럼은 날짜·시각이나 숫자 컬럼이어야 합니다 -> {base}.{resolved['순서'][1]}",
-        )
-
-
-def _validate_formula(system_id: UUID, data: MetricInput, scope: dict) -> None:
-    rows = {r["name"].lower(): r for r in load_metric_rows(system_id)}
-
-    def check(name):
-        comp = rows.get(name.lower())
-        if comp is None:
-            raise ValueError(f"수식의 지표 [{name}] 이(가) 없습니다")
-        if comp["kind"] != "aggregate":
-            raise ValueError(
-                f"수식에는 집계형 지표만 쓸 수 있습니다 -> [{name}] 은(는) {comp['kind']}"
-            )
-        if len(comp.get("measures") or []) > 1:
-            raise ValueError(f"[{name}] 은(는) 측정값이 여럿이라 수식에 쓸 수 없습니다")
-        if comp["table_name"] not in scope:
-            raise ValueError(
-                f"[{name}] 의 테이블 {comp['table_name']} 이(가) 이 지표의 범위({', '.join(scope)})에 없습니다"
-            )
-        if any(
-            str(f.get("source") or "literal") == "question"
-            for f in comp["fixed_filters"] or []
-        ):
-            raise ValueError(
-                f"[{name}] 은(는) 질문에서 값을 받는 필터가 있어 수식에 쓸 수 없습니다"
-            )
-        return "x"
-
-    try:
-        compile_formula(data.expression, check)
-    except ValueError as error:
-        raise ApiException(400, str(error)) from None
+    # 허용 계산식마다 실제로 컴파일해 본다 — 계산식의 컬럼이 이 지표의 테이블에 있는지는 여기서 드러난다
+    preview_sqls(system_id, data, base)
+    return base, formula_ids
 
 
 def _draft_compiler(system_id: UUID, data: MetricInput, base: str) -> Compiler:
     """저장 전의 정의를 계약서에 끼운 컴파일러. 질문 없이 정의만 컴파일하므로 질문에서 값을 받는 필터는 뺀다."""
     contract = load_contract(system_id)
-    filters = [
-        f
-        for f in data.fixed_filters
-        if str(f.get("source") or "literal").lower() != "question"
-    ]
     draft = metric_entry(
         {
             "name": data.name,
             "description": data.description,
-            "kind": data.kind.value,
             "table_name": base,
             "joins": [j.model_dump() for j in data.joins],
-            "select_columns": data.select_columns,
-            "expression": data.expression,
-            "agg_field": data.agg_field,
-            "agg_function": data.agg_function,
-            "fixed_filters": filters,
-            "series": data.series.model_dump() if data.series else None,
-            "measures": [ms.model_dump() for ms in data.measures],
+            "dimensions": data.dimensions,
+            "formulas": data.formulas,
+            "fixed_filters": [
+                f
+                for f in data.fixed_filters
+                if str(f.get("source") or "literal").lower() != "question"
+            ],
         }
     )
     contract["metrics"] = [
@@ -512,18 +422,37 @@ def _draft_compiler(system_id: UUID, data: MetricInput, base: str) -> Compiler:
     return Compiler(contract)
 
 
-def _validate_measures(system_id: UUID, data: MetricInput, base: str) -> None:
-    """식 트리를 실제로 컴파일해 본다. 함수 조합 규칙(집계 안의 집계, 직전 행 비교 등)은 컴파일러가 판정한다."""
-    try:
-        _draft_compiler(system_id, data, base).compile({"metric": data.name})
-    except (ValueError, KeyError, TypeError) as error:
-        raise ApiException(400, str(error)) from None
+def preview_sqls(system_id: UUID, data: MetricInput, base: str) -> list[tuple[str, str]]:
+    """[(제목, SQL)] — 허용 계산식마다 하나. 계산식이 없으면 건수 하나."""
+    compiler = _draft_compiler(system_id, data, base)
+    formulas = {f["name"].lower(): f for f in compiler.formulas.values()}
+    asts = []
+    for name in data.formulas:
+        f = formulas.get(name.lower())
+        if f is None:
+            continue
+        expr = expand_formula({"formula": f["name"]}, compiler.formulas)
+        if measure_has_aggregate(expr):
+            asts.append((f["name"], {"aggregations": [{"formula": f["name"]}]}))
+        else:
+            asts.append((f["name"], {"columns": [{"formula": f["name"]}]}))
+    if not asts:
+        asts.append(("건수", {"aggregations": [{"field": "*", "function": "COUNT", "alias": "건수"}]}))
+    out = []
+    for title, ast in asts:
+        try:
+            out.append((title, compiler.compile({"metric": data.name, **ast})))
+        except (ValueError, KeyError, TypeError) as error:
+            raise ApiException(400, f"계산식 {title}: {error}") from None
+    return out
 
 
 def preview_metric(system_id: UUID, data: MetricInput) -> str:
     """저장하지 않고 정의를 SQL 로. 질문에서 받는 필터는 값이 없어 빠진다."""
-    base = _validate(system_id, data)
-    return _draft_compiler(system_id, data, base).compile({"metric": data.name})
+    base, _ = _validate(system_id, data)
+    return "\n\n".join(
+        f"-- {title}\n{sql}" for title, sql in preview_sqls(system_id, data, base)
+    )
 
 
 def _row_to_metric(row: dict) -> Metric:
@@ -531,15 +460,10 @@ def _row_to_metric(row: dict) -> Metric:
         id=row["id"],
         name=row["name"],
         description=row["description"],
-        kind=MetricKind(row["kind"]),
         table_name=row["table_name"],
         joins=row.get("joins") or [],
-        agg_field=row["agg_field"],
-        agg_function=row["agg_function"],
-        select_columns=row["select_columns"] or [],
-        expression=row.get("expression"),
-        series=row.get("series"),
-        measures=row.get("measures") or [],
+        dimensions=row.get("dimensions") or [],
+        formulas=row.get("formulas") or [],
         fixed_filters=row["fixed_filters"] or [],
         synonyms=row.get("synonyms") or [],
         status=row["status"],
@@ -547,3 +471,4 @@ def _row_to_metric(row: dict) -> Metric:
         version=row.get("version") or 1,
         updated_at=row["updated_at"].isoformat() if row.get("updated_at") else None,
     )
+
