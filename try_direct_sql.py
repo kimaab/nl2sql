@@ -11,29 +11,150 @@
 """
 
 import argparse
+import base64
 import json
+import os
+import re
 import sys
 import time
 from pathlib import Path
 from uuid import UUID
 
+import psycopg
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from dotenv import load_dotenv
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from psycopg.conninfo import make_conninfo
+from psycopg.rows import dict_row
+
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / "backend"))
 sys.stdout.reconfigure(encoding="utf-8")
-
-from dotenv import load_dotenv  # noqa: E402
-
-load_dotenv(ROOT / "backend" / ".env")
-
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # noqa: E402
-
-from contract import load_contract  # noqa: E402
-from llm import make_model  # noqa: E402
-from selector import parse_json, usage_of  # noqa: E402
+load_dotenv(ROOT / "backend" / ".env")  # DB_URL · NL2SQL_SECRET_KEY · LLM_* 설정만 읽는다
 
 DEFAULT_SYSTEM = "88e5f186-1f84-467a-8c47-8c0960aafe05"  # baroness개발서버
 MAX_TRIES = 3
 LOG_FILE = ROOT / "logs" / "try_direct_sql.log"
+
+
+# ── 메타데이터 DB: 테이블·컬럼·관계 읽기 ─────────────────────────────────
+
+
+def meta_query(sql: str, *args) -> list[dict]:
+    """메타데이터 DB(DB_URL) 조회. 매번 연결하고 닫는다."""
+    db_url = os.environ.get("DB_URL")
+    if not db_url:
+        raise RuntimeError("DB_URL 이 없습니다 (backend/.env 를 확인하십시오)")
+    with psycopg.connect(db_url, connect_timeout=10) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, args)
+            return cur.fetchall()
+
+
+def load_contract(system_id: UUID) -> dict:
+    """{name, domain, tables: [{name, description, columns: [{name, type, description, utc_offset}]}], relations}"""
+    systems = meta_query("SELECT name, domain_desc FROM meta_system WHERE id = %s", str(system_id))
+    if not systems:
+        raise RuntimeError(f"시스템을 찾을 수 없습니다 -> {system_id}")
+    rows = meta_query(
+        """
+        SELECT t.name AS table_name, t.comment AS table_note,
+               c.name AS column_name, c.data_type, c.comment AS column_note, c.utc_offset_hours
+          FROM meta_table t
+          LEFT JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
+         WHERE t.system_id = %s AND t.deleted_at IS NULL
+         ORDER BY t.name, c.ordinal
+        """,
+        str(system_id),
+    )
+    tables: dict = {}
+    for r in rows:
+        table = tables.setdefault(
+            r["table_name"], {"name": r["table_name"], "description": r["table_note"] or "", "columns": []}
+        )
+        if r["column_name"] is None:
+            continue
+        column = {"name": r["column_name"], "type": r["data_type"] or "", "description": r["column_note"] or ""}
+        if r["utc_offset_hours"]:
+            column["utc_offset"] = r["utc_offset_hours"]
+        table["columns"].append(column)
+    if not tables:
+        raise RuntimeError("스키마가 비어 있습니다. 시스템 화면에서 동기화를 먼저 실행하십시오")
+
+    columns = {name: {c["name"] for c in t["columns"]} for name, t in tables.items()}
+    relations = [
+        r
+        for r in meta_query(
+            """
+            SELECT lt.name AS left_table, r.left_column, rt.name AS right_table, r.right_column
+              FROM meta_relation r
+              JOIN meta_table lt ON lt.id = r.left_table_id
+              JOIN meta_table rt ON rt.id = r.right_table_id
+             WHERE r.system_id = %s
+            """,
+            str(system_id),
+        )
+        # 두 테이블과 컬럼이 모두 살아 있는 관계만
+        if r["left_column"] in columns.get(r["left_table"], ())
+        and r["right_column"] in columns.get(r["right_table"], ())
+    ]
+    return {
+        "name": systems[0]["name"],
+        "domain": systems[0]["domain_desc"],
+        "tables": list(tables.values()),
+        "relations": relations,
+    }
+
+
+def target_conninfo(system_id: UUID) -> str:
+    """대상 DB 접속 정보. 비밀번호는 NL2SQL_SECRET_KEY 로 푼다 (AES-256-GCM, 앞 12바이트가 nonce)."""
+    rows = meta_query("SELECT host, port, username, password_enc, db_name FROM meta_system WHERE id = %s",
+                      str(system_id))
+    if not rows:
+        raise RuntimeError(f"시스템을 찾을 수 없습니다 -> {system_id}")
+    r = rows[0]
+    key = base64.b64decode(os.environ.get("NL2SQL_SECRET_KEY", "").strip())
+    blob = bytes(r["password_enc"])
+    password = AESGCM(key).decrypt(blob[:12], blob[12:], None).decode("utf-8")
+    return make_conninfo(host=r["host"], port=r["port"], user=r["username"], password=password,
+                         dbname=r["db_name"], connect_timeout=5)
+
+
+# ── LLM 연결·응답 처리 ───────────────────────────────────────────────────
+
+
+def make_model(temperature: float = 0.0) -> ChatOpenAI:
+    """OpenAI 호환 LLM (LLM_BASE_URL · LLM_API_KEY · LLM_MODEL)"""
+    return ChatOpenAI(
+        base_url=os.environ.get("LLM_BASE_URL"),
+        api_key=os.environ.get("LLM_API_KEY", "not-needed"),
+        model=os.environ.get("LLM_MODEL", "gpt-3.5-turbo"),
+        temperature=temperature,
+    )
+
+
+def usage_of(message) -> tuple[int, int]:
+    """응답의 (입력, 출력) 토큰 수"""
+    meta = getattr(message, "usage_metadata", None) or {}
+    if meta:
+        return int(meta.get("input_tokens", 0)), int(meta.get("output_tokens", 0))
+    usage = (getattr(message, "response_metadata", None) or {}).get("token_usage") or {}
+    return int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0))
+
+
+def parse_json(text: str) -> dict:
+    """응답에서 JSON 객체 하나를 꺼낸다 (코드펜스·앞뒤 말 허용)"""
+    body = str(text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", body, re.S)
+    if fenced:
+        body = fenced.group(1).strip()
+    start, end = body.find("{"), body.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("JSON 객체가 없습니다")
+    parsed = json.loads(body[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON 객체가 아닙니다")
+    return parsed
 
 
 # ── 컴파일러: AST → SQL, 검증만 ─────────────────────────────────────────
@@ -457,15 +578,7 @@ def build_ast(model, contract: dict, tables: list, question: str, compiler: Mini
 
 
 def explain(system_id: UUID, sql: str) -> str:
-    import psycopg
-    from psycopg.conninfo import make_conninfo
-
-    from systems import connection_row
-
-    r = connection_row(system_id)
-    conninfo = make_conninfo(host=r["host"], port=r["port"], user=r["username"], password=r["password"],
-                             dbname=r["db_name"], connect_timeout=5)
-    with psycopg.connect(conninfo) as conn:
+    with psycopg.connect(target_conninfo(system_id)) as conn:
         conn.read_only = True
         conn.execute("SET statement_timeout = '30s'")
         conn.execute("EXPLAIN " + sql.rstrip(";"))
@@ -485,7 +598,7 @@ def main():
     compiler = MiniCompiler(contract)
     model = make_model()
     # 추론(생각 과정) 끄기 — qwen 계열 chat template 옵션 (llama.cpp·vLLM)
-    model.extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+    #model.extra_body = {"chat_template_kwargs": {"enable_thinking": False}, ""}
     print(f"질문: {args.question}\n모델: {getattr(model, 'model_name', '')}\n")
 
     results = []
@@ -517,10 +630,4 @@ def main():
 
 
 if __name__ == "__main__":
-    from db import close_pool
-
-    try:
-        main()
-    finally:
-        # 풀을 닫지 않고 끝내면 종료 중에 풀 스레드를 못 멈춰 PythonFinalizationError 가 찍힌다
-        close_pool()
+    main()
