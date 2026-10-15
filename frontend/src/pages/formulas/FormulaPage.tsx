@@ -107,6 +107,9 @@ export function FormulaPage() {
               current={editing === "new" ? null : editing}
               columns={columns}
               others={formulas.filter((f) => editing === "new" || f.id !== editing.id).map((f) => f.name)}
+              aggregateOthers={formulas
+                .filter((f) => f.level === "aggregate" && (editing === "new" || f.id !== editing.id))
+                .map((f) => f.name)}
               onDone={() => {
                 setEditing(null);
                 load();
@@ -171,6 +174,7 @@ function FormulaForm({
   current,
   columns,
   others,
+  aggregateOthers,
   onDone,
 }: {
   sysId: string;
@@ -178,6 +182,8 @@ function FormulaForm({
   current: api.Formula | null;
   columns: ColumnOption[];
   others: string[];
+  /** others 중 집계 계산식 — 가리키기만 해도 이 계산식이 집계가 된다 */
+  aggregateOthers: string[];
   onDone: () => void;
 }) {
   const [form, setForm] = useState<api.FormulaInput>(
@@ -217,7 +223,7 @@ function FormulaForm({
     patch({ expr: f.expr, source_sql: sql.trim() || null, name: form.name || f.name || "" });
   }
 
-  const aggregate = form.expr ? hasAggregate(form.expr) : false;
+  const aggregate = form.expr ? hasAggregate(form.expr, aggregateOthers) : false;
   const valid = form.name.trim() !== "" && form.expr !== null && exprComplete(form.expr);
 
   async function save() {
@@ -357,7 +363,13 @@ function FormulaForm({
               <div style={{ marginTop: 8 }}>
                 <NodeEditor
                   node={form.expr}
-                  ctx={{ kind: "aggregate", columns, baseColumns: columns.map((c) => c.value), formulas: others }}
+                  ctx={{
+                    kind: "aggregate",
+                    columns,
+                    baseColumns: columns.map((c) => c.value),
+                    formulas: others,
+                    aggregateFormulas: aggregateOthers,
+                  }}
                   onChange={(expr) => patch({ expr, source_sql: null })}
                 />
               </div>

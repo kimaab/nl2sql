@@ -635,6 +635,8 @@ def measure_text(node) -> str:
     if not isinstance(node, dict):
         return "?"
     if "formula" in node:
+        if node.get("by"):
+            return f"([{node['formula']}] BY {', '.join(by_text(b) for b in node['by'])})"
         return f"[{node['formula']}]"
     if "col" in node:
         return str(node["col"]) or "?"
@@ -1563,10 +1565,39 @@ class Compiler:
         dropped = bool(asked) and any(_group_parts(d)[0] not in asked for d in dims)
 
         def at_dims(expr):
-            """집계 계산식은 디멘젼 단위로. 계산식이 스스로 단위를 정했으면 그대로."""
-            if measure_has_aggregate(expr) and dims and not expr.get("by"):
+            """집계 계산식은 디멘젼 단위로. 계산식이 스스로 단위를 정했으면 (맨 위 BY · 안쪽 BY) 그대로."""
+            if measure_has_aggregate(expr) and dims and not expr.get("by") and not measure_nested(expr):
                 return {**expr, "by": list(dims)}
             return expr
+
+        def split(node, by):
+            """집계 계산식을 계산식 경계에서 나눈다 — 참조한 집계 계산식은 by 단위의 안쪽 질의 컬럼이 되고,
+            그 사이 계산은 바깥 집계 안에서 한다 (안쪽 컬럼은 같은 식이면 하나로 쓴다).
+
+            SUM([전체 가동시간] - [무인 가동시간]) BY 장비, 일
+              → SUM(ABS(MAX(eg_time) - MIN(eg_time)) BY 장비, 일 - ABS(MAX(uman_time) - MIN(uman_time)) BY 장비, 일)
+              → SELECT …, SUM("_m2" - "_m1") FROM (SELECT …, ABS(…) AS "_m1", ABS(…) AS "_m2" … GROUP BY 장비, 일)
+            """
+            full = expand_formula(node, self.formulas)
+            if not measure_has_aggregate(full) or not isinstance(node, dict):
+                return full
+            if "formula" in node:
+                if node.get("by"):
+                    return full
+                return split(self.formulas[_find(node["formula"], self.formulas)]["expr"], by)
+            fn = str(node.get("fn") or "").upper()
+            if fn not in MEASURE_AGGREGATES and not node.get("by") and formula_refs(node):
+                return {**node, "args": [split(c, by) for c in _measure_children(node)]}
+            return {**full, "by": list(by)}
+
+        def distribute(node):
+            """계산식이 정한 안쪽 BY 를 참조한 계산식까지 내린다 — SUM(([전체] - [무인]) BY 장비, 일) 도 split 과 같은 모양"""
+            if not isinstance(node, dict) or "fn" not in node:
+                return node
+            fn = str(node["fn"]).upper()
+            if node.get("by") and fn not in MEASURE_AGGREGATES and formula_refs(node):
+                return split({k: v for k, v in node.items() if k != "by"}, node["by"])
+            return {**node, "args": [distribute(c) for c in _measure_children(node)]}
 
         measures, rollups = [], []
         if columns:
@@ -1613,22 +1644,32 @@ class Compiler:
                     rollup = f.get("rollup")
                     expr = expand({"formula": f["name"]})
                     alias = item.get("alias") or f["name"]
-                    if measure_has_aggregate(expr):
+                    if measure_has_aggregate(expr) and measure_nested(expr):
+                        # SUM(… BY 장비, 일) — 안쪽 단위와 바깥 집계를 계산식이 이미 정했다. 질문의 묶음으로 바로 나눈다
+                        if function:
+                            raise ValueError(
+                                f"계산식 {f['name']!r} 는 안쪽 묶음(BY)과 바깥 집계를 이미 정했습니다 "
+                                f"— function 없이 {{\"formula\": \"{f['name']}\"}} 로 쓰십시오"
+                            )
+                        expr = expand_formula(distribute(f["expr"]), self.formulas)
+                    elif measure_has_aggregate(expr):
                         expr = at_dims(expr)
+                        # 바깥 집계로 다시 묶을 때는 계산식 경계에서 나눈다 (split)
+                        own = {k: v for k, v in f["expr"].items() if k != "by"}
                         if function:
                             if not expr.get("by"):
                                 raise ValueError(
                                     f"지표 {name!r} 에 디멘젼이 없어 집계 계산식 {f['name']!r} 를 다시 집계할 수 없습니다 "
                                     f"— function 없이 {{\"formula\": \"{f['name']}\"}} 로 쓰십시오"
                                 )
-                            expr = {"fn": function, "args": [expr]}
+                            expr = {"fn": function, "args": [split(own, expr["by"])]}
                         elif dropped and expr.get("by"):
                             how = str(rollup or "SUM").upper()
                             if how == "NONE":
                                 # 합칠 수 없는 계산식 — 질문의 묶음으로 다시 계산한다
                                 expr = {k: v for k, v in expr.items() if k != "by"}
                             else:
-                                expr = {"fn": how, "args": [expr]}
+                                expr = {"fn": how, "args": [split(own, expr["by"])]}
                     elif function:
                         expr = {"fn": function, "args": [expr]}
                     else:

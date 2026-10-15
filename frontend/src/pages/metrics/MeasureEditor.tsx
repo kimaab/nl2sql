@@ -8,6 +8,7 @@ import {
   changeFn,
   exprText,
   FN,
+  hasAggregate,
   FN_GROUPS,
   GRAIN_LABEL,
   isAggregate,
@@ -31,6 +32,8 @@ export type Ctx = {
   baseColumns: string[];
   /** 값 자리에 고를 수 있는 다른 계산식 이름 (계산식 등록 화면) */
   formulas?: string[];
+  /** 그중 집계 계산식 — [무인 가동시간] 처럼 가리키기만 해도 집계로 본다 */
+  aggregateFormulas?: string[];
 };
 
 const SERIES_AGGREGATES = ["DELTA_SUM", "CHANGE_COUNT"];
@@ -45,26 +48,27 @@ function canWrap(fn: string, node: api.MeasureNode, ctx: Ctx, aggs: number): boo
   if (isAggregate(fn)) {
     // 조회형은 집계를 겹칠 수 없다 (윈도 안의 윈도). 집계형은 한 단계까지 겹친다 (BY) —
     // 바깥 집계 안(aggs 1)에서도 안쪽 질의의 집계(MAX·MIN …)는 더 넣을 수 있다.
-    if (ctx.kind === "aggregate" && aggs === 1) return !(isFn(node) && containsAggregate(node));
+    if (ctx.kind === "aggregate" && aggs === 1) return !containsAggregate(node, ctx);
     if (aggs > 0) return false;
-    if (isFn(node) && containsAggregate(node)) return ctx.kind === "aggregate" && !containsBy(node);
+    if (containsAggregate(node, ctx)) return ctx.kind === "aggregate" && !containsBy(node);
     return true;
   }
   return true;
 }
 
-function containsAggregate(n: api.MeasureNode): boolean {
-  return isFn(n) && (isAggregate(n.fn) || n.args.some(containsAggregate));
+function containsAggregate(n: api.MeasureNode, ctx: Ctx): boolean {
+  return hasAggregate(n, ctx.aggregateFormulas);
 }
 
 function containsBy(n: api.MeasureNode): boolean {
+  if (isFormula(n)) return Boolean(n.by?.length);
   return isFn(n) && (Boolean(n.by?.length) || n.args.some(containsBy));
 }
 
 /** 집계를 집계로 감쌀 때 안쪽에 BY 칸을 열어 둔다 — 비워 두면 저장되지 않아 고르게 된다.
  *  감싸는 값이 집계를 품은 식(ABS(MAX − MIN))이면 식 전체에 하나만 연다 — 식이 통째로 안쪽 질의에서 계산된다. */
 function openBy(n: api.MeasureNode): api.MeasureNode {
-  if (!isFn(n)) return n;
+  if (!isFn(n) && !isFormula(n)) return n;
   return { ...n, by: n.by?.length ? n.by : [""] };
 }
 
@@ -90,7 +94,7 @@ function WrapSelect({
       onChange={(e) => {
         const fn = e.target.value;
         if (!fn) return;
-        const inner = isAggregate(fn) && ctx.kind === "aggregate" && containsAggregate(node) ? openBy(node) : node;
+        const inner = isAggregate(fn) && ctx.kind === "aggregate" && containsAggregate(node, ctx) ? openBy(node) : node;
         const wrapped = wrap(inner, fn);
         if (byHere && !isAggregate(fn) && isFn(inner) && inner.by?.length && isFn(wrapped)) {
           // ABS(…) BY 차량 을 빼기로 감싸면 (ABS(…) - b) BY 차량 — 새로 붙는 b 도 같은 묶음 안에서 계산된다
@@ -278,10 +282,23 @@ export function NodeEditor({
   depth?: number;
 }) {
   if (!isFn(node)) {
+    // 집계 계산식을 바깥 집계로 감싸면 그 계산식에 BY 를 단다 — SUM([무인 가동시간] BY 장비, 일)
+    const leafBy = isFormula(node) ? node.by ?? [] : [];
+    const showLeafBy = isFormula(node) && (leafBy.length > 0 || (byHere && containsAggregate(node, ctx)));
     return (
-      <div className="expr-leaf">
-        <LeafEditor node={node} ctx={ctx} onlyBase={onlyBase} onChange={onChange} />
-        {!onlyBase && <WrapSelect node={node} ctx={ctx} aggs={aggs} byHere={byHere} onChange={onChange} />}
+      <div className="expr-leaf-wrap">
+        <div className="expr-leaf">
+          <LeafEditor node={node} ctx={ctx} onlyBase={onlyBase} onChange={onChange} />
+          {!onlyBase && <WrapSelect node={node} ctx={ctx} aggs={aggs} byHere={byHere} onChange={onChange} />}
+        </div>
+        {showLeafBy && isFormula(node) && (
+          <ByEditor
+            by={leafBy}
+            ctx={ctx}
+            inner={aggs > 0}
+            onChange={(b) => onChange(b && b.length ? { formula: node.formula, by: b } : { formula: node.formula })}
+          />
+        )}
       </div>
     );
   }
@@ -299,7 +316,7 @@ export function NodeEditor({
     by.length > 0 ||
     (ctx.kind === "projection"
       ? agg && !SERIES_AGGREGATES.includes(node.fn)
-      : (depth === 0 || byHere) && !SERIES_AGGREGATES.includes(node.fn) && (agg || containsAggregate(node)));
+      : (depth === 0 || byHere) && !SERIES_AGGREGATES.includes(node.fn) && (agg || containsAggregate(node, ctx)));
   // 바깥 집계(aggs 0 의 집계)의 값이 BY 자리다
   const childByHere = ctx.kind === "aggregate" && agg && aggs === 0;
   const setArg = (i: number, n: api.MeasureNode) => onChange({ ...node, args: node.args.map((a, k) => (k === i ? n : a)) });

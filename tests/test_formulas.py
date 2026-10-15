@@ -249,3 +249,46 @@ def test_formula_alone_sums_dimensions_the_question_drops():
         'SELECT "vehicle_id", ABS(MAX("uman_time") - MIN("uman_time")) AS "무인 가동시간" '
         'FROM "bms_log" GROUP BY "vehicle_id";'
     )
+
+
+SPLIT_FORMULAS = [
+    {"name": "무인 가동시간", "mode": "organic", "expr": span("uman_time")},
+    {"name": "전체 가동시간", "mode": "organic", "expr": span("man_time")},
+    {"name": "유인 가동시간", "mode": "organic", "expr": fn("SUB", {"formula": "전체 가동시간"}, {"formula": "무인 가동시간"})},
+    {
+        "name": "유인 합계",
+        "mode": "organic",
+        "expr": fn("SUM", fn("SUB", {"formula": "전체 가동시간"}, {"formula": "무인 가동시간"}, by=[DAY, "vehicle_id"])),
+    },
+]
+SPLIT_METRIC = {**METRIC, "formulas": [f["name"] for f in SPLIT_FORMULAS]}
+SPLIT_SQL = (
+    'SELECT "collect_datetime_day", SUM("_m1") AS "무인 가동시간", SUM("_m2") AS "전체 가동시간", '
+    'SUM("_m2" - "_m1") AS "{name}" '
+    f'FROM (SELECT {INNER_DAY} AS "collect_datetime_day", '
+    'ABS(MAX("uman_time") - MIN("uman_time")) AS "_m1", ABS(MAX("man_time") - MIN("man_time")) AS "_m2" '
+    f'FROM "bms_log" GROUP BY {INNER_DAY}, "vehicle_id") "nested" GROUP BY "collect_datetime_day";'
+)
+
+
+@pytest.mark.parametrize("name", ["유인 가동시간", "유인 합계"])
+def test_formula_of_formulas_keeps_boundaries_when_rolled_up(name):
+    """일별 무인·전체·유인 — 참조한 계산식은 안쪽 컬럼 하나씩, 그 사이 빼기는 바깥 SUM 안에서"""
+    sql = ask(
+        {
+            "aggregations": [{"formula": "무인 가동시간"}, {"formula": "전체 가동시간"}, {"formula": name}],
+            "group_by": [DAY],
+        },
+        metric=SPLIT_METRIC,
+        formulas=SPLIT_FORMULAS,
+    )
+    assert sql == SPLIT_SQL.format(name=name)
+
+
+def test_formula_of_formulas_at_dimension_stays_one_level():
+    sql = ask({"aggregations": [{"formula": "유인 가동시간"}]}, metric=SPLIT_METRIC, formulas=SPLIT_FORMULAS)
+    assert sql == (
+        f'SELECT {INNER_DAY} AS "collect_datetime_day", "vehicle_id", '
+        'ABS(MAX("man_time") - MIN("man_time")) - ABS(MAX("uman_time") - MIN("uman_time")) AS "유인 가동시간" '
+        f'FROM "bms_log" GROUP BY {INNER_DAY}, "vehicle_id";'
+    )

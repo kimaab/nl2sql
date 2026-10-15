@@ -905,7 +905,8 @@ code {
 }
 
 .expr-arg > .expr-fn,
-.expr-arg > .expr-leaf {
+.expr-arg > .expr-leaf,
+.expr-arg > .expr-leaf-wrap {
   flex: 1;
   min-width: 0;
 }

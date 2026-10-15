@@ -56,7 +56,7 @@ const AGGREGATES = ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT", "DELT
 
 export const isCol = (n: MeasureNode): n is { col: string } => "col" in n;
 export const isNum = (n: MeasureNode): n is { num: number } => "num" in n;
-export const isFormula = (n: MeasureNode): n is { formula: string } => "formula" in n;
+export const isFormula = (n: MeasureNode): n is { formula: string; by?: ByItem[] } => "formula" in n;
 export const isFn = (n: MeasureNode): n is { fn: string; args: MeasureNode[]; by?: ByItem[] } => "fn" in n;
 export const isAggregate = (fn: string) => AGGREGATES.includes(fn);
 /** 컬럼 하나만 받는 함수 (직전 행 값·시계열 집계) */
@@ -73,7 +73,10 @@ export const byKey = (b: ByItem): string => (typeof b === "string" ? b : `${b.fi
 /** 사람이 읽는 식. 백엔드 measure_text 와 같은 모양이다. */
 export function exprText(n: MeasureNode | undefined): string {
   if (!n) return "?";
-  if (isFormula(n)) return `[${n.formula || "?"}]`;
+  if (isFormula(n)) {
+    const ref = `[${n.formula || "?"}]`;
+    return n.by?.length ? `(${ref} BY ${n.by.map(byText).join(", ")})` : ref;
+  }
   if (isCol(n)) return n.col || "?";
   if (isNum(n)) return String(n.num);
   const args = n.args ?? [];
@@ -107,7 +110,7 @@ export function usesSeries(measures: Measure[]): Set<string> {
 
 /** 빈 칸 없이 다 채웠는가 */
 export function exprComplete(n: MeasureNode): boolean {
-  if (isFormula(n)) return Boolean(n.formula);
+  if (isFormula(n)) return Boolean(n.formula) && (n.by ?? []).every((b) => Boolean(byColumn(b)));
   if (isCol(n)) return Boolean(n.col);
   if (isNum(n)) return Number.isFinite(n.num);
   const spec = FN[n.fn];
@@ -158,9 +161,10 @@ export function measureLabel(m: Measure, metricName: string, count: number): str
 export const toList = (v: string | string[] | null | undefined): string[] =>
   v == null ? [] : (Array.isArray(v) ? v : [v]).filter(Boolean);
 
-/** 식에 집계 함수가 있는가 (계산식 참조는 모른다 — 서버가 펼쳐서 판정한다) */
-export function hasAggregate(n: MeasureNode): boolean {
-  return isFn(n) && (isAggregate(n.fn) || n.args.some(hasAggregate));
+/** 식에 집계가 있는가. aggregateFormulas: 집계 계산식 이름 — 그 계산식을 가리키면 집계다 */
+export function hasAggregate(n: MeasureNode, aggregateFormulas: readonly string[] = []): boolean {
+  if (isFormula(n)) return aggregateFormulas.some((f) => f.toLowerCase() === n.formula.toLowerCase());
+  return isFn(n) && (isAggregate(n.fn) || n.args.some((a) => hasAggregate(a, aggregateFormulas)));
 }
 
 /** 식이 가리키는 다른 계산식 이름 */

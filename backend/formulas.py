@@ -35,12 +35,14 @@ _FUNCTIONS = (
 def list_formulas(system_id: UUID) -> list[Formula]:
     rows = load_formula_rows(system_id)
     users = _users(system_id)
-    return [_to_formula(r, users.get(r["id"], [])) for r in rows]
+    entries = {r["name"]: formula_entry(r) for r in rows}
+    return [_to_formula(r, users.get(r["id"], []), entries) for r in rows]
 
 
 def get_formula(system_id: UUID, formula_id: UUID) -> Formula:
     row = _get_row(system_id, formula_id)
-    return _to_formula(row, _users(system_id).get(row["id"], []))
+    entries = {r["name"]: formula_entry(r) for r in load_formula_rows(system_id)}
+    return _to_formula(row, _users(system_id).get(row["id"], []), entries)
 
 
 def create_formula(system_id: UUID, data: FormulaInput) -> Formula:
@@ -243,7 +245,16 @@ def _values(data: FormulaInput, expr: dict) -> tuple:
     )
 
 
-def _to_formula(row: dict, used_by: list[str]) -> Formula:
+def _level(name: str, expr: dict, entries: dict) -> str:
+    """집계인가 — 참조한 계산식을 펼쳐서 본다 ([전체 가동시간] - [무인 가동시간] 도 집계)"""
+    try:
+        expr = expand_formula({"formula": name}, entries)
+    except ValueError:
+        pass
+    return "aggregate" if measure_has_aggregate(expr) else "row"
+
+
+def _to_formula(row: dict, used_by: list[str], entries: dict) -> Formula:
     return Formula(
         id=row["id"],
         name=row["name"],
@@ -252,7 +263,7 @@ def _to_formula(row: dict, used_by: list[str]) -> Formula:
         mode=row["mode"],
         expr=row["expr"],
         text=measure_text(row["expr"]),
-        level="aggregate" if measure_has_aggregate(row["expr"]) else "row",
+        level=_level(row["name"], row["expr"], entries),
         source_sql=row.get("source_sql"),
         rollup=row.get("rollup"),
         refs=formula_refs(row["expr"]),

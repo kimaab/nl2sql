@@ -57,7 +57,7 @@ export type ByItem = string | { field: string; grain: string };
 export type MeasureNode =
   | { col: string }
   | { num: number }
-  | { formula: string }
+  | { formula: string; by?: ByItem[] }
   | { fn: string; args: MeasureNode[]; by?: ByItem[] };
 
 export interface Measure {
