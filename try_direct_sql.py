@@ -25,7 +25,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / "backend" / ".env")
 
-from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # noqa: E402
 
 from contract import load_contract  # noqa: E402
 from llm import make_model  # noqa: E402
@@ -33,6 +33,7 @@ from selector import parse_json, usage_of  # noqa: E402
 
 DEFAULT_SYSTEM = "88e5f186-1f84-467a-8c47-8c0960aafe05"  # baroness개발서버
 MAX_TRIES = 3
+LOG_FILE = ROOT / "logs" / "try_direct_sql.log"
 
 
 # ── 컴파일러: AST → SQL, 검증만 ─────────────────────────────────────────
@@ -380,12 +381,31 @@ def column_line(c: dict) -> str:
     return f"  - {c['name']} ({c.get('type', '')}){': ' + note if note else ''}"
 
 
-def ask(model, system: str, messages: list, stats: dict) -> str:
+def write_log(text: str) -> None:
+    """콘솔과 logs/try_direct_sql.log 에 같이 남긴다."""
+    print(text)
+    LOG_FILE.parent.mkdir(exist_ok=True)
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(text + "\n")
+
+
+def ask(model, system: str, messages: list, stats: dict, label: str | None = None) -> str:
+    """label 이 있으면 요청·응답 전문을 로그에 남긴다."""
+    if label:
+        sent = [("system", system)] + [(m.type, m.content) for m in messages]
+        if len(messages) > 1:  # 재요청은 처음 보낸 것과 겹치니 마지막 메시지만
+            sent = [sent[-1]]
+        write_log(f"\n===== [{label}] 요청 {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        for role, content in sent:
+            write_log(f"--- {role}\n{content}")
     started = time.monotonic()
     reply = model.invoke([SystemMessage(system), *messages])
     p, c = usage_of(reply)
+    elapsed = int((time.monotonic() - started) * 1000)
     stats["tokens"] += p + c
-    stats["ms"] += int((time.monotonic() - started) * 1000)
+    stats["ms"] += elapsed
+    if label:
+        write_log(f"===== [{label}] 응답 (토큰 {p}+{c}, {elapsed / 1000:.1f}초)\n{reply.content}\n")
     return reply.content
 
 
@@ -408,7 +428,7 @@ def pick_tables(model, contract: dict, question: str, stats: dict) -> list:
                 raise ValueError(f"목록에 없는 테이블입니다 -> {bad or '(비었음)'}")
             return tables
         except (ValueError, json.JSONDecodeError) as error:
-            messages += [SystemMessage(content), HumanMessage(f"형식 오류: {error}. 다시 답하십시오.")]
+            messages += [AIMessage(content), HumanMessage(f"형식 오류: {error}. 다시 답하십시오.")]
     raise RuntimeError("테이블을 고르지 못했습니다")
 
 
@@ -424,7 +444,7 @@ def build_ast(model, contract: dict, tables: list, question: str, compiler: Mini
     messages = [HumanMessage("[테이블]\n" + "\n\n".join(blocks) + f"\n\n[질문]\n{question}")]
     last = None
     for attempt in range(1, MAX_TRIES + 1):
-        content = ask(model, system, messages, stats)
+        content = ask(model, system, messages, stats, label=f"AST 생성 시도 {attempt}")
         try:
             ast = (parse_json(content) or {}).get("ast")
             sql = compiler.compile(ast)
@@ -432,7 +452,7 @@ def build_ast(model, contract: dict, tables: list, question: str, compiler: Mini
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
             last = error
             print(f"  · 시도 {attempt} 실패: {error}")
-            messages += [SystemMessage(content), HumanMessage(f"컴파일 오류: {error}\n고쳐서 JSON 으로 다시 답하십시오.")]
+            messages += [AIMessage(content), HumanMessage(f"컴파일 오류: {error}\n고쳐서 JSON 으로 다시 답하십시오.")]
     raise RuntimeError(f"AST 를 만들지 못했습니다: {last}")
 
 
@@ -464,6 +484,8 @@ def main():
     contract = load_contract(system_id)
     compiler = MiniCompiler(contract)
     model = make_model()
+    # 추론(생각 과정) 끄기 — qwen 계열 chat template 옵션 (llama.cpp·vLLM)
+    model.extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
     print(f"질문: {args.question}\n모델: {getattr(model, 'model_name', '')}\n")
 
     results = []
@@ -495,4 +517,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    from db import close_pool
+
+    try:
+        main()
+    finally:
+        # 풀을 닫지 않고 끝내면 종료 중에 풀 스레드를 못 멈춰 PythonFinalizationError 가 찍힌다
+        close_pool()
