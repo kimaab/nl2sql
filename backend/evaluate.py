@@ -7,8 +7,9 @@ python backend/evaluate.py --cases eval/shoppingmall_cases.json --contract eval/
 python backend/evaluate.py --cases eval/shoppingmall_cases.json --contract eval/shoppingmall_contract.json
 
 # 메타데이터 DB 의 시스템으로 (DB_URL 필요)
-python backend/evaluate.py --cases <파일> --system-id <uuid>                     # TO-BE (LLM 선택)
-python backend/evaluate.py --cases <파일> --system-id <uuid> --selector tfidf    # 비교 기준 (한 번에 검색)
+python backend/evaluate.py --cases <파일> --system-id <uuid>
+
+평가셋 문항: {question, expected_sql, ast(선택, --compile-only 용), expected_tables(선택), expected_metric(선택, null = 지표 없음)}
 """
 
 import argparse
@@ -158,8 +159,7 @@ def judge(outcome: dict, case: dict) -> dict:
 def run_model(
     contract: dict,
     data: dict,
-    today: datetime.date | None,
-    selector: str = "llm",
+    now: datetime.datetime | None,
     model=None,
 ) -> dict:
     from ask import run_question
@@ -170,9 +170,7 @@ def run_model(
     for i, case in enumerate(data["cases"], start=1):
         started = time.monotonic()
         try:
-            outcome = run_question(
-                contract, case["question"], model, today=today, selector=selector
-            )
+            outcome = run_question(contract, case["question"], model, now=now)
         except Exception as e:  # 한 문항의 장애가 평가 전체를 멈추지 않게
             outcome = {
                 "sql": None,
@@ -180,6 +178,7 @@ def run_model(
                 "attempts": 0,
                 "ast": None,
                 "clarification": None,
+                "needs_metric": False,
                 "tables": [],
                 "metrics": [],
                 "total_tokens": 0,
@@ -202,6 +201,8 @@ def run_model(
             status = "wrong_sql" if expected else "sql"
         elif outcome["clarification"]:
             status = "clarified"
+        elif outcome.get("needs_metric"):
+            status = "needs_metric"
         else:
             status = "fail"
         results.append(
@@ -230,7 +231,7 @@ def run_model(
             f"[{i}/{len(data['cases'])}] {status:9s} {hits:24s} {case['question']}",
             flush=True,
         )
-    return _summary(results, mode=f"model-{selector}")
+    return _summary(results, mode="model")
 
 
 def _summary(results: list[dict], mode: str) -> dict:
@@ -287,12 +288,6 @@ def main(argv=None) -> int:
     source.add_argument("--contract", type=Path, help="계약서 JSON 파일")
     source.add_argument("--system-id", help="메타데이터 DB 의 시스템 id")
     parser.add_argument(
-        "--selector",
-        choices=("llm", "tfidf"),
-        default="llm",
-        help="llm = 테이블 추론 → 지표 선택 (TO-BE) · tfidf = 한 번에 검색 (비교 기준)",
-    )
-    parser.add_argument(
         "--compile-only",
         action="store_true",
         help="모델 없이 ast → expected_sql 만 확인",
@@ -303,7 +298,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     data = load_cases(args.cases)
-    today = datetime.date.fromisoformat(data["today"]) if data.get("today") else None
+    # 평가셋에 날짜를 정해 두면 그날 정오를 '지금' 으로 본다 — 상대 기간이 매번 같은 값이 되게
+    now = (
+        datetime.datetime.combine(datetime.date.fromisoformat(data["today"]), datetime.time(12))
+        if data.get("today")
+        else None
+    )
     if args.contract:
         contract = json.loads(args.contract.read_text(encoding="utf-8"))
     else:
@@ -321,7 +321,7 @@ def main(argv=None) -> int:
     report = (
         run_compile_only(contract, data)
         if args.compile_only
-        else run_model(contract, data, today, args.selector)
+        else run_model(contract, data, now)
     )
 
     out = (

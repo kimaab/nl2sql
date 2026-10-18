@@ -7,6 +7,8 @@ import { errorMessage, formatDateTime } from "../lib/format";
 import { Steps } from "./AskPage";
 
 const PAGE = 50;
+/** 지표가 필요한 질문인데 맞는 지표가 없어 SQL 을 만들지 않은 기록 (백엔드 ask.py 의 문구) */
+const METRIC_NEEDED = "지표 등록이 필요합니다";
 type View = "all" | "favorite" | "up" | "down";
 
 export function HistoryPage() {
@@ -180,6 +182,8 @@ export function HistoryPage() {
                           <Badge tone="ok">성공</Badge>
                         ) : e.clarification ? (
                           <Badge tone="warn">되물음</Badge>
+                        ) : e.error?.startsWith(METRIC_NEEDED) ? (
+                          <Badge tone="warn">지표 필요</Badge>
                         ) : (
                           <Badge tone="danger">실패</Badge>
                         )}{" "}
@@ -208,7 +212,9 @@ export function HistoryPage() {
                             {e.sql ? (
                               <SqlBlock sql={e.sql} />
                             ) : (
-                              <div className={`alert ${e.clarification ? "warn" : "danger"}`}>
+                              <div
+                                className={`alert ${e.clarification || e.error?.startsWith(METRIC_NEEDED) ? "warn" : "danger"}`}
+                              >
                                 {e.clarification ?? e.error}
                               </div>
                             )}

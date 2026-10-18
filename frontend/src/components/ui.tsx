@@ -111,30 +111,6 @@ export function Chip({
   );
 }
 
-export function OptionCard({
-  selected,
-  icon,
-  title,
-  desc,
-  onClick,
-}: {
-  selected: boolean;
-  icon: string;
-  title: string;
-  desc: string;
-  onClick: () => void;
-}) {
-  return (
-    <button type="button" className={`option-card ${selected ? "selected" : ""}`} onClick={onClick}>
-      <span className="oc-icon">{icon}</span>
-      <span>
-        <div className="oc-title">{title}</div>
-        <div className="oc-desc">{desc}</div>
-      </span>
-    </button>
-  );
-}
-
 export function Segmented<T extends string>({
   options,
   value,

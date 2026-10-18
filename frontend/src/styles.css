@@ -499,18 +499,6 @@ code {
   color: var(--text-3);
 }
 
-.chip-box {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  max-height: 220px;
-  overflow-y: auto;
-  padding: 12px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-
 .segmented {
   display: inline-flex;
   padding: 3px;
@@ -536,64 +524,6 @@ code {
   background: var(--surface);
   color: var(--primary);
   box-shadow: var(--shadow);
-}
-
-.option-cards {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.option-card {
-  display: flex;
-  gap: 14px;
-  align-items: flex-start;
-  padding: 16px;
-  text-align: left;
-  font: inherit;
-  color: inherit;
-  background: var(--surface);
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
-}
-
-.option-card:hover {
-  border-color: var(--border-strong);
-}
-
-.option-card.selected {
-  border-color: var(--primary);
-  background: var(--primary-soft);
-}
-
-.option-card .oc-icon {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  flex-shrink: 0;
-  border-radius: 9px;
-  background: var(--info-soft);
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-2);
-}
-
-.option-card.selected .oc-icon {
-  background: var(--primary);
-  color: #fff;
-}
-
-.option-card .oc-title {
-  font-weight: 700;
-}
-
-.option-card .oc-desc {
-  margin-top: 2px;
-  font-size: 13px;
-  color: var(--text-2);
 }
 
 /* ───────── 표 ───────── */
@@ -752,60 +682,7 @@ code {
   border-left-color: #f87171;
 }
 
-/* ───────── 위저드 ───────── */
-.steps {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 20px;
-}
-
-.step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-3);
-  font-weight: 600;
-  font-size: 13px;
-}
-
-.step .dot {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: var(--info-soft);
-  font-size: 12px;
-  color: var(--text-2);
-}
-
-.step.active {
-  color: var(--text);
-}
-
-.step.active .dot {
-  background: var(--primary);
-  color: #fff;
-}
-
-.step.done {
-  color: var(--text-2);
-  cursor: pointer;
-}
-
-.step.done .dot {
-  background: var(--ok-soft);
-  color: var(--ok);
-}
-
-.step-line {
-  flex: 1;
-  height: 1px;
-  background: var(--border-strong);
-  max-width: 48px;
-}
-
+/* ───────── 입력 + 미리보기 (지표 등록) ───────── */
 .wizard {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
@@ -827,136 +704,6 @@ code {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.filter-card {
-  padding: 14px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.filter-grid {
-  display: grid;
-  grid-template-columns: 1.3fr 1fr 1.6fr;
-  gap: 10px;
-}
-
-.agg-sentence {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--mono);
-}
-
-.agg-sentence .select {
-  width: auto;
-  min-width: 110px;
-}
-
-/* 측정값 식 — 함수를 겹친 상자. 깊어질수록 왼쪽 선으로 안쪽을 보인다 */
-.measure-card .measure-name {
-  width: 200px;
-  flex: none;
-}
-
-.expr-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--primary);
-}
-
-.expr-fn {
-  padding: 8px 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--primary);
-  border-radius: var(--radius-sm);
-}
-
-.expr-fn.alt {
-  background: var(--surface-2);
-}
-
-.expr-head,
-.expr-leaf,
-.expr-by {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-}
-
-.expr-args {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 8px 0 0 12px;
-}
-
-.expr-arg {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  min-width: 0;
-}
-
-.expr-arg > .expr-fn,
-.expr-arg > .expr-leaf,
-.expr-arg > .expr-leaf-wrap {
-  flex: 1;
-  min-width: 0;
-}
-
-.expr-arg-label {
-  flex: none;
-  min-width: 34px;
-  padding-top: 8px;
-  font-size: 12px;
-  color: var(--text-3);
-}
-
-.expr-by {
-  margin: 8px 0 0 12px;
-}
-
-.expr-by .expr-arg-label {
-  padding-top: 0;
-}
-
-.expr-head .select,
-.expr-leaf .select,
-.expr-by .select,
-.expr-num {
-  width: auto;
-  height: 32px;
-}
-
-.expr-fn-select {
-  min-width: 170px;
-  font-weight: 600;
-}
-
-.expr-leaf-select {
-  min-width: 200px;
-  max-width: 100%;
-}
-
-.expr-num {
-  width: 120px;
-}
-
-.expr-wrap {
-  min-width: 110px;
-  color: var(--text-2);
-  border-style: dashed;
-}
-
-.expr-hint {
-  min-width: 0;
 }
 
 .kv {
@@ -1104,41 +851,12 @@ code {
   .page {
     padding: 20px 16px 48px;
   }
-  .form-grid,
-  .option-cards {
+  .form-grid {
     grid-template-columns: 1fr;
-  }
-  .filter-grid {
-    grid-template-columns: 1fr;
-  }
-  .measure-card .measure-name,
-  .expr-leaf-select,
-  .expr-fn-select {
-    width: 100%;
-    min-width: 0;
-  }
-  .expr-hint {
-    display: none;
   }
 }
 
-/* ───────── TO-BE: 테이블 카드 · 검수 · 선택 과정 ───────── */
-.section-title {
-  margin: 0 0 10px;
-  font-size: 15px;
-  font-weight: 600;
-}
-.card-text {
-  margin: 0;
-  padding: 12px 14px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-family: var(--font);
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-}
+/* ───────── 질문: 선택 과정 ───────── */
 .steps {
   margin-top: 10px;
   border-top: 1px dashed var(--border);

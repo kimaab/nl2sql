@@ -4,9 +4,9 @@ import * as api from "../../api";
 import { Alert, Badge, Button, EmptyState, Loading, PageHeader, SqlBlock } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage, formatDateTime } from "../../lib/format";
-import { definitionLines, dimensionLabel, OPERATORS, SOURCES, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
+import { formatSql, STATUS_LABEL, STATUS_TONE } from "../../lib/metrics";
 
-const ACTION_LABEL = { create: "등록", update: "수정", delete: "삭제", retire: "사용 중지" } as const;
+const ACTION_LABEL = { create: "등록", update: "수정", delete: "삭제" } as const;
 
 export function MetricDetail() {
   const { dsId = "", metricId = "" } = useParams();
@@ -66,7 +66,7 @@ export function MetricDetail() {
       <PageHeader
         back={{ to: `/metrics?ds=${dsId}`, label: "지표 목록" }}
         title={metric.name}
-        desc={metric.description || "설명이 없습니다 — 질문이 이 지표에 잘 걸리지 않습니다."}
+        desc={metric.description || "설명이 없습니다 — LLM 이 이 지표를 고르기 어렵습니다."}
         actions={
           <>
             <Button onClick={() => navigate(`/metrics/${dsId}/${metric.id}/edit`)}>수정</Button>
@@ -79,62 +79,36 @@ export function MetricDetail() {
 
       <div className="stack">
         {metric.broken_reason && (
-          <Alert tone="warn">스키마와 맞지 않아 질문에 쓰이지 않습니다 — {metric.broken_reason}</Alert>
+          <Alert tone="warn">질문에 쓰이지 않습니다 — {metric.broken_reason}</Alert>
         )}
-        {metric.synonyms.length > 0 && (
-          <div className="faint">같은 말: {metric.synonyms.join(", ")}</div>
-        )}
+        {metric.synonyms.length > 0 && <div className="faint">같은 말: {metric.synonyms.join(", ")}</div>}
 
         <div className="card">
           <div className="card-head">
-            <span className="card-title">정의</span>
+            <span className="card-title">등록한 SQL</span>
             <Badge tone={STATUS_TONE[metric.status]}>{STATUS_LABEL[metric.status]}</Badge>
             <span className="faint">v{metric.version}</span>
           </div>
           <div className="card-pad">
-            <SqlBlock sql={definitionLines(metric)} />
+            <SqlBlock sql={metric.sql} />
           </div>
         </div>
 
         <div className="card">
           <div className="card-head">
-            <span className="card-title">고정 필터</span>
-            <span className="faint">{metric.fixed_filters.length}개</span>
+            <span className="card-title">조회 명세(AST)에서 만든 SQL</span>
           </div>
-          {metric.fixed_filters.length === 0 ? (
-            <div className="card-pad muted">고정 필터가 없습니다.</div>
-          ) : (
-            <table className="table">
-              <tbody>
-                {metric.fixed_filters.map((f, i) => {
-                  const src = f.source ?? "literal";
-                  const op = OPERATORS.find((o) => o.value === f.operator);
-                  return (
-                    <tr key={i}>
-                      <td>
-                        <code>{f.field}</code>
-                      </td>
-                      <td>{op?.label ?? f.operator}</td>
-                      <td>
-                        {op?.noValue ? (
-                          <span className="faint">-</span>
-                        ) : src === "question" ? (
-                          <span className="faint">질문에서</span>
-                        ) : (
-                          <code>{String(f.value)}</code>
-                        )}
-                      </td>
-                      <td style={{ textAlign: "right" }}>
-                        <Badge tone={src === "literal" ? "info" : "primary"}>
-                          {SOURCES.find((s) => s.value === src)?.label}
-                        </Badge>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
+          <div className="card-pad stack" style={{ gap: 10 }}>
+            {metric.compiled_sql ? (
+              <SqlBlock sql={formatSql(metric.compiled_sql)} />
+            ) : (
+              <span className="muted">지금 스키마로 컴파일되지 않습니다.</span>
+            )}
+            <details>
+              <summary className="faint">AST 보기</summary>
+              <pre className="sql">{JSON.stringify(metric.ast, null, 2)}</pre>
+            </details>
+          </div>
         </div>
 
         <div className="card">
@@ -149,10 +123,7 @@ export function MetricDetail() {
               <tbody>
                 {history.map((h, i) => (
                   <Fragment key={i}>
-                    <tr
-                      className="clickable"
-                      onClick={() => setOpenIndex(openIndex === i ? null : i)}
-                    >
+                    <tr className="clickable" onClick={() => setOpenIndex(openIndex === i ? null : i)}>
                       <td>v{h.version}</td>
                       <td>
                         <Badge tone={h.action === "delete" ? "danger" : h.action === "create" ? "ok" : "info"}>
@@ -167,7 +138,11 @@ export function MetricDetail() {
                     {openIndex === i && (
                       <tr>
                         <td colSpan={4}>
-                          <SqlBlock sql={definitionLines(h.snapshot)} />
+                          {h.snapshot.sql ? (
+                            <SqlBlock sql={h.snapshot.sql} />
+                          ) : (
+                            <pre className="sql">{JSON.stringify(h.snapshot, null, 2)}</pre>
+                          )}
                         </td>
                       </tr>
                     )}
@@ -184,12 +159,8 @@ export function MetricDetail() {
             <dd>{system?.name}</dd>
             <dt>테이블</dt>
             <dd>
-              <code>{[metric.table_name, ...metric.joins.map((j) => j.table)].join(", ")}</code>
+              <code>{metric.tables.join(", ") || "-"}</code>
             </dd>
-            <dt>디멘젼</dt>
-            <dd>{metric.dimensions.map(dimensionLabel).join(", ") || "없음"}</dd>
-            <dt>계산식</dt>
-            <dd>{metric.formulas.join(", ") || "없음"}</dd>
             {metric.updated_at && (
               <>
                 <dt>마지막 수정</dt>

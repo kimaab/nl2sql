@@ -11,8 +11,7 @@ import { RelationsPage } from "./pages/systems/RelationsPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { MetricList } from "./pages/metrics/MetricList";
 import { MetricDetail } from "./pages/metrics/MetricDetail";
-import { MetricWizard } from "./pages/metrics/MetricWizard";
-import { FormulaPage } from "./pages/formulas/FormulaPage";
+import { MetricForm } from "./pages/metrics/MetricForm";
 import "./styles.css";
 
 function App() {
@@ -33,10 +32,9 @@ function App() {
           <Route path="/relations" element={<RelationsPage />} />
 
           <Route path="/metrics" element={<MetricList />} />
-          <Route path="/metrics/new" element={<MetricWizard />} />
+          <Route path="/metrics/new" element={<MetricForm />} />
           <Route path="/metrics/:dsId/:metricId" element={<MetricDetail />} />
-          <Route path="/metrics/:dsId/:metricId/edit" element={<MetricWizard />} />
-          <Route path="/formulas" element={<FormulaPage />} />
+          <Route path="/metrics/:dsId/:metricId/edit" element={<MetricForm />} />
 
 
           <Route path="*" element={<Navigate to="/ask" replace />} />

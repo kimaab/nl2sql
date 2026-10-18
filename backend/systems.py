@@ -1,4 +1,3 @@
-import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -10,6 +9,7 @@ from catalog import read_catalog
 from compiler import temporal_kind
 from models import (
     ApiException,
+    ColumnInfo,
     Driver,
     SyncLog,
     SyncResult,
@@ -173,12 +173,6 @@ def sync_system(system_id: UUID, trigger: str = "manual") -> SyncResult:
         )
     _write_sync_log(system_id, trigger, started, result=result)
     return result
-
-
-def structure_hash(purpose: str, columns: list[tuple[str, str]]) -> str:
-    """카드를 다시 만들어야 하는지 가르는 값: 용도 + 컬럼 구성."""
-    body = json.dumps([purpose, sorted(columns)], ensure_ascii=False)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _merge_schema(
@@ -408,6 +402,7 @@ def list_tables(system_id: UUID) -> list[TableInfo]:
         str(system_id),
     )
     times = _time_columns(system_id)
+    columns = _columns(system_id)
     return [
         TableInfo(
             id=r["id"],
@@ -417,9 +412,29 @@ def list_tables(system_id: UUID) -> list[TableInfo]:
             column_count=r["column_count"],
             metric_count=r["metric_count"],
             time_columns=times.get(r["id"], []),
+            columns=columns.get(r["id"], []),
         )
         for r in rows
     ]
+
+
+def _columns(system_id: UUID) -> dict:
+    """테이블별 컬럼과 '계산 필요' 표시"""
+    rows = db.query(
+        """
+        SELECT c.table_id, c.name, c.data_type, c.comment, c.needs_calc
+          FROM meta_column c JOIN meta_table t ON t.id = c.table_id
+         WHERE t.system_id = %s AND t.deleted_at IS NULL AND c.deleted_at IS NULL
+         ORDER BY c.table_id, c.ordinal
+    """,
+        str(system_id),
+    )
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["table_id"], []).append(
+            ColumnInfo(name=r["name"], data_type=r["data_type"], comment=r["comment"], needs_calc=r["needs_calc"])
+        )
+    return out
 
 
 def _time_columns(system_id: UUID) -> dict:
@@ -467,6 +482,24 @@ def set_utc_offset(
             (hours, str(table_id), column),
         )
     log.info("utc offset %s.%s = %s", found.name, column, hours)
+    return next(t for t in list_tables(system_id) if t.id == table_id)
+
+
+def set_needs_calc(system_id: UUID, table_id: UUID, column: str, needs_calc: bool) -> TableInfo:
+    found = next((t for t in list_tables(system_id) if t.id == table_id), None)
+    if found is None:
+        raise ApiException(404, "테이블을 찾을 수 없습니다")
+    if column not in {c.name for c in found.columns}:
+        raise ApiException(400, f"{found.name} 에 없는 컬럼입니다 -> {column}")
+    with db.connection() as conn:
+        conn.execute(
+            """
+            UPDATE meta_column SET needs_calc = %s, updated_at = now()
+             WHERE table_id = %s AND name = %s AND deleted_at IS NULL
+        """,
+            (needs_calc, str(table_id), column),
+        )
+    log.info("needs_calc %s.%s = %s", found.name, column, needs_calc)
     return next(t for t in list_tables(system_id) if t.id == table_id)
 
 

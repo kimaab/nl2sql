@@ -24,15 +24,14 @@ from models import (
     AskStep,
     CompileRequest,
     CompileResponse,
-    Formula,
-    FormulaInput,
-    FormulaParseRequest,
-    FormulaParseResponse,
     HistoryEntry,
     HistoryPatch,
     Metric,
+    MetricCheck,
+    MetricCheckRequest,
     MetricHistoryEntry,
     MetricInput,
+    NeedsCalcInput,
     Relation,
     RelationInput,
     SyncLog,
@@ -51,25 +50,19 @@ from systems import (
     list_sync_logs,
     list_systems,
     list_tables,
+    set_needs_calc,
     set_table_purpose,
     set_utc_offset,
     sync_system,
     update_system,
 )
 from metrics import (
+    check_metric,
     create_metric,
     delete_metric,
     list_metric_history,
     list_metrics,
-    preview_metric,
     update_metric,
-)
-from formulas import (
-    create_formula,
-    delete_formula,
-    list_formulas,
-    parse_sql,
-    update_formula,
 )
 from relations import create_relation, delete_relation, list_relations
 from history import (
@@ -194,6 +187,11 @@ def put_utc_offset(system_id: UUID, table_id: UUID, req: UtcOffsetInput):
     return set_utc_offset(system_id, table_id, req.column, req.utc_offset_hours)
 
 
+@app.put("/api/systems/{system_id}/tables/{table_id}/needs-calc", response_model=TableInfo)
+def put_needs_calc(system_id: UUID, table_id: UUID, req: NeedsCalcInput):
+    return set_needs_calc(system_id, table_id, req.column, req.needs_calc)
+
+
 # ── 관계 ───────────────────────────────────────────────────────────────
 @app.get("/api/systems/{system_id}/relations", response_model=list[Relation])
 def get_relations(system_id: UUID):
@@ -219,39 +217,6 @@ def delete_relation_detail(system_id: UUID, relation_id: UUID):
     delete_relation(system_id, relation_id)
 
 
-# ── 계산식 ──────────────────────────────────────────────────────────────
-@app.get("/api/systems/{system_id}/formulas", response_model=list[Formula])
-def get_formulas(system_id: UUID):
-    get_system(system_id)
-    return list_formulas(system_id)
-
-
-@app.post("/api/systems/{system_id}/formulas", response_model=Formula)
-def post_formula(system_id: UUID, req: FormulaInput):
-    get_system(system_id)
-    return create_formula(system_id, req)
-
-
-# SQL 을 식 트리로 — 등록 화면의 'SQL 로 입력'
-@app.post("/api/systems/{system_id}/formulas/parse", response_model=FormulaParseResponse)
-def post_formula_parse(system_id: UUID, req: FormulaParseRequest):
-    return parse_sql(system_id, req.sql)
-
-
-@app.put("/api/systems/{system_id}/formulas/{formula_id}", response_model=Formula)
-def put_formula(system_id: UUID, formula_id: UUID, req: FormulaInput):
-    get_system(system_id)
-    return update_formula(system_id, formula_id, req)
-
-
-@app.delete(
-    "/api/systems/{system_id}/formulas/{formula_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-def delete_formula_detail(system_id: UUID, formula_id: UUID):
-    delete_formula(system_id, formula_id)
-
-
 # ── 지표 ────────────────────────────────────────────────────────────────
 @app.get("/api/systems/{system_id}/metrics", response_model=list[Metric])
 def get_metrics(system_id: UUID):
@@ -271,16 +236,11 @@ def put_metric(system_id: UUID, metric_id: UUID, req: MetricInput):
     return update_metric(system_id, metric_id, req)
 
 
-# 저장하지 않고 정의를 SQL 로 — 등록 화면의 미리보기
-@app.post("/api/systems/{system_id}/metrics/preview", response_model=CompileResponse)
-def post_metric_preview(system_id: UUID, req: MetricInput):
+# 저장하지 않고 등록 절차만 밟아 본다: SQL → AST → SQL → 대상 DB 에서 결과 비교
+@app.post("/api/systems/{system_id}/metrics/check", response_model=MetricCheck)
+def post_metric_check(system_id: UUID, req: MetricCheckRequest):
     get_system(system_id)
-    try:
-        return CompileResponse(sql=preview_metric(system_id, req), error=None)
-    except ApiException as error:
-        return CompileResponse(sql=None, error=str(error.detail))
-    except (ValueError, KeyError, TypeError) as error:
-        return CompileResponse(sql=None, error=str(error))
+    return check_metric(system_id, req.sql)
 
 
 @app.get(
@@ -312,7 +272,7 @@ def post_compile(system_id: UUID, req: CompileRequest):
 # ── 질문 ────────────────────────────────────────────────────────────────
 @app.post("/api/ask", response_model=AskResponse)
 def post_ask(req: AskRequest):
-    """질문에서 SQL 생성: 테이블 추론 → 지표 후보 조회 → 지표 선택 → 조회 명세 → 컴파일"""
+    """질문에서 SQL 생성: 테이블 선택(지표 필요 판단) → 조회 명세 → 컴파일"""
     started = time.monotonic()
     contract = load_contract(req.system_id, active_only=True)
 
@@ -324,6 +284,8 @@ def post_ask(req: AskRequest):
         if outcome["sql"]
         else "clarify"
         if outcome["clarification"]
+        else "needs_metric"
+        if outcome["needs_metric"]
         else "fail"
     )
     log_request.info(
@@ -336,7 +298,7 @@ def post_ask(req: AskRequest):
         outcome["total_tokens"],
         result,
         elapsed_ms,
-        f" detail={outcome['error']}" if result == "fail" else "",
+        f" detail={outcome['error']}" if result in ("fail", "needs_metric") else "",
     )
     entry_id = record_ask(req.system_id, req.question, outcome, elapsed_ms)
     return AskResponse(
@@ -347,6 +309,7 @@ def post_ask(req: AskRequest):
         clarification=outcome["clarification"],
         selected_tables=outcome["tables"],
         selected_metrics=outcome["metrics"],
+        needs_metric=outcome["needs_metric"],
         steps=[
             AskStep(**{k: v for k, v in s.items() if k != "model"})
             for s in outcome["steps"]

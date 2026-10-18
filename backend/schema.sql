@@ -1,16 +1,5 @@
 -- 메타데이터 DB 스키마 (TO-BE). docs/to-be/메타데이터DB_테이블정의서.xlsx 와 같은 내용이다.
--- 여러 번 실행해도 안전하다. AS-IS 표(datasource_*)는 건드리지 않는다 — 옮기는 것은 migrate_v2.py.
-
--- AS-IS ask_log 는 TO-BE 와 이름이 같고 모양이 다르다 (datasource_id). 그대로 두면 CREATE TABLE IF NOT EXISTS 가
--- 옛 표를 남겨 모든 질문 기록이 깨진다. 옛 표를 ask_log_v1 로 비켜 두고 migrate_v2.py 가 옮긴다.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'ask_log' AND column_name = 'datasource_id') THEN
-        ALTER TABLE ask_log RENAME TO ask_log_v1;
-        ALTER INDEX IF EXISTS ask_log_pkey RENAME TO ask_log_v1_pkey;
-    END IF;
-END $$;
+-- 여러 번 실행해도 안전하다 (백엔드 기동 때마다 돈다).
 
 -- 시스템 = 조회 대상 DB. 사용자는 질문할 때 시스템을 먼저 고른다.
 CREATE TABLE IF NOT EXISTS meta_system (
@@ -38,10 +27,6 @@ CREATE TABLE IF NOT EXISTS meta_table (
     name             TEXT        NOT NULL,
     comment          TEXT        NOT NULL DEFAULT '',   -- 대상 DB 코멘트 (동기화가 채움)
     purpose          TEXT        NOT NULL DEFAULT '',   -- 테이블 용도 (사람)
-    card             TEXT        NOT NULL DEFAULT '',   -- 쓰지 않음 (보강·검수 제거, 기존 데이터 보존)
-    card_line        TEXT        NOT NULL DEFAULT '',   -- 쓰지 않음
-    card_status      TEXT        NOT NULL DEFAULT 'none',  -- 쓰지 않음
-    card_source_hash TEXT,                              -- 쓰지 않음
     deleted_at       TIMESTAMPTZ,                       -- 대상 DB 에서 사라짐 (soft delete)
     synced_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -57,8 +42,6 @@ CREATE TABLE IF NOT EXISTS meta_column (
     comment    TEXT        NOT NULL DEFAULT '',
     ordinal    INTEGER     NOT NULL,
     is_pk      BOOLEAN     NOT NULL DEFAULT false,
-    synonyms   JSONB       NOT NULL DEFAULT '[]',   -- 쓰지 않음 (컬럼 사전 제거, 기존 데이터 보존)
-    codes      JSONB       NOT NULL DEFAULT '[]',   -- 쓰지 않음 (컬럼 사전 제거, 기존 데이터 보존)
     deleted_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (table_id, name)
@@ -67,6 +50,9 @@ CREATE INDEX IF NOT EXISTS idx_meta_column_table ON meta_column (table_id);
 -- UTC 로 저장된 시각 컬럼의 현지 시차(시간, 예: KST = 9). 사람이 적고, 동기화는 건드리지 않는다.
 -- 컴파일러가 날짜 묶음·표시는 현지 시각으로, 필터 값은 UTC 로 바꿔 비교한다.
 ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS utc_offset_hours SMALLINT;
+-- 계산이 필요한 컬럼 (예: 누적값 — 그대로 합치면 틀린다). 사람이 표시하고, 동기화는 건드리지 않는다.
+-- 이 컬럼을 계산해야 답할 수 있는 질문은 지표가 필요하다 — 테이블 선택 단계의 LLM 이 판단한다.
+ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS needs_calc BOOLEAN NOT NULL DEFAULT false;
 
 -- 테이블 관계. FK 는 동기화가(source='fk'), 나머지는 사람이(source='manual') 관리한다.
 CREATE TABLE IF NOT EXISTS meta_relation (
@@ -82,87 +68,46 @@ CREATE TABLE IF NOT EXISTS meta_relation (
 );
 CREATE INDEX IF NOT EXISTS idx_meta_relation_system ON meta_relation (system_id);
 
--- 지표. 정의는 구조화 방식(AS-IS 와 같음)이라 컴파일러가 전개한다.
+-- 지표 = 이름 · 설명 · 같은 말 + SQL. SQL 을 조회 명세(AST)로 옮겨 저장하고, 질문마다 LLM 이 조건만 바꿔 쓴다.
 CREATE TABLE IF NOT EXISTS metric (
-    id             UUID PRIMARY KEY,
-    system_id      UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
-    name           TEXT        NOT NULL,
-    description    TEXT        NOT NULL DEFAULT '',
-    kind           TEXT        NOT NULL DEFAULT 'aggregate',  -- aggregate | projection | derived
-    -- 테이블은 동기화로는 지워지지 않는다 (deleted_at). 실제로 지워지는 것은 시스템을 지울 때뿐이다.
-    base_table_id  UUID        NOT NULL REFERENCES meta_table (id) ON DELETE CASCADE,
-    joins          JSONB       NOT NULL DEFAULT '[]',
-    agg_field      TEXT,
-    agg_function   TEXT,
-    select_columns JSONB       NOT NULL DEFAULT '[]',
-    expression     TEXT,
-    series         JSONB,
-    measures       JSONB       NOT NULL DEFAULT '[]',  -- 집계형·조회형의 출력 컬럼 [{name, expr(식 트리)}]
-    fixed_filters  JSONB       NOT NULL DEFAULT '[]',
-    synonyms       JSONB       NOT NULL DEFAULT '[]',
-    status         TEXT        NOT NULL DEFAULT 'draft',  -- draft | active | broken | retired
-    broken_reason  TEXT,
-    version        INTEGER     NOT NULL DEFAULT 1,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    id            UUID PRIMARY KEY,
+    system_id     UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
+    name          TEXT        NOT NULL,
+    description   TEXT        NOT NULL DEFAULT '',
+    synonyms      JSONB       NOT NULL DEFAULT '[]',
+    source_sql    TEXT        NOT NULL,                 -- 등록한 SQL 원문
+    ast           JSONB       NOT NULL,                 -- SQL 을 옮긴 조회 명세 (compiler.py)
+    status        TEXT        NOT NULL DEFAULT 'active', -- active | broken (동기화 뒤 AST 가 컴파일되지 않음)
+    broken_reason TEXT,
+    version       INTEGER     NOT NULL DEFAULT 1,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (system_id, name)
 );
-ALTER TABLE metric ADD COLUMN IF NOT EXISTS measures JSONB NOT NULL DEFAULT '[]';
--- 예시 질문 승인을 기다리던 지표(draft)는 이제 깨지지 않았으면 바로 쓰인다. 깨진 지표는 이미 broken 이다.
-UPDATE metric SET status = 'active' WHERE status = 'draft';
+-- 예전 형식(테이블 · 디멘젼 · 계산식) 지표는 옮기지 않고 지운다 — SQL 로 다시 등록한다. 정의는 metric_history 에 남아 있다.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'metric' AND column_name = 'base_table_id') THEN
+        DELETE FROM metric;
+        ALTER TABLE metric
+            DROP COLUMN kind, DROP COLUMN base_table_id, DROP COLUMN joins, DROP COLUMN agg_field,
+            DROP COLUMN agg_function, DROP COLUMN select_columns, DROP COLUMN expression, DROP COLUMN series,
+            DROP COLUMN IF EXISTS measures, DROP COLUMN fixed_filters, DROP COLUMN IF EXISTS dimensions,
+            ADD COLUMN source_sql TEXT NOT NULL, ADD COLUMN ast JSONB NOT NULL;
+        ALTER TABLE metric ALTER COLUMN status SET DEFAULT 'active';
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_metric_active ON metric (system_id) WHERE status = 'active';
 
--- 지표가 쓰는 테이블. 질의 생성의 '테이블 → 지표' 는 검색이 아니라 이 표의 조회다.
+-- 지표가 쓰는 테이블. 테이블 선택 단계에서 테이블마다 지표 설명을 붙일 때 쓴다.
 CREATE TABLE IF NOT EXISTS metric_table (
     metric_id UUID NOT NULL REFERENCES metric (id) ON DELETE CASCADE,
     table_id  UUID NOT NULL REFERENCES meta_table (id) ON DELETE CASCADE,
-    role      TEXT NOT NULL DEFAULT 'base',        -- base | join
-    origin    TEXT NOT NULL DEFAULT 'definition',  -- definition | manual
+    role      TEXT NOT NULL DEFAULT 'base',  -- base | join
     PRIMARY KEY (metric_id, table_id)
 );
 CREATE INDEX IF NOT EXISTS idx_metric_table_table ON metric_table (table_id);
-
--- 지표 = 테이블(조인) + 디멘젼 + 허용 계산식. 무엇을 조회할지는 LLM 이 정한다.
--- 디멘젼은 집계 계산식이 뜻을 갖는 단위다 (예: 장비 × 일). 질문 단위가 더 크면 이 단위로 계산한 뒤 합친다.
--- kind·agg_*·select_columns·expression·series·measures 는 예전 형식이다 — 쓰지 않는다.
-ALTER TABLE metric ADD COLUMN IF NOT EXISTS dimensions JSONB;
-
--- 시스템 계산식. 테이블에 매이지 않고 컬럼 이름으로 쓰인다. 질문에 '계산된 <이름>' 이 나오면 쓴다.
-CREATE TABLE IF NOT EXISTS formula (
-    id          UUID PRIMARY KEY,
-    system_id   UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
-    name        TEXT        NOT NULL,
-    description TEXT        NOT NULL DEFAULT '',
-    column_name TEXT,                                 -- 이 계산식이 대신하는 컬럼 (없으면 새 값)
-    mode        TEXT        NOT NULL DEFAULT 'organic', -- forced: 질문에 이름이 나올 때만 | organic: LLM 판단으로도
-    expr        JSONB       NOT NULL,                 -- 식 트리. 다른 계산식은 {"formula": 이름}
-    source_sql  TEXT,                                 -- SQL 로 등록했으면 그 원문
-    rollup      TEXT,                                 -- 더 큰 기간으로 합칠 때 SUM·AVG·MIN·MAX·NONE (비우면 SUM)
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (system_id, name)
-);
-
--- 지표가 허용하는 계산식. 질문이 다른 계산식을 물으면 지표를 다시 고른다.
-CREATE TABLE IF NOT EXISTS metric_formula (
-    metric_id  UUID NOT NULL REFERENCES metric (id) ON DELETE CASCADE,
-    formula_id UUID NOT NULL REFERENCES formula (id) ON DELETE CASCADE,
-    PRIMARY KEY (metric_id, formula_id)
-);
-
--- 쓰지 않음: 지표 예시 질문 기능 제거. 기존 데이터 보존용으로만 남긴다.
-CREATE TABLE IF NOT EXISTS metric_example (
-    id          BIGSERIAL PRIMARY KEY,
-    metric_id   UUID        NOT NULL REFERENCES metric (id) ON DELETE CASCADE,
-    question    TEXT        NOT NULL,
-    ast         JSONB,
-    origin      TEXT        NOT NULL,                 -- llm | human | feedback
-    status      TEXT        NOT NULL DEFAULT 'draft', -- draft | approved | rejected
-    reviewed_by TEXT,
-    reviewed_at TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_metric_example_approved ON metric_example (metric_id) WHERE status = 'approved';
 
 -- 지표를 바꾸거나 지울 때마다 그 시점의 정의를 남긴다. 지표가 지워져도 남는다.
 CREATE TABLE IF NOT EXISTS metric_history (
@@ -170,45 +115,11 @@ CREATE TABLE IF NOT EXISTS metric_history (
     system_id  UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
     metric_id  UUID        NOT NULL,
     version    INTEGER     NOT NULL,
-    action     TEXT        NOT NULL,  -- create | update | delete | retire
+    action     TEXT        NOT NULL,  -- create | update | delete
     snapshot   JSONB       NOT NULL,
-    actor      TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_metric_history_metric ON metric_history (metric_id, version);
-
--- 쓰지 않음: 업무 용어 사전 제거. 기존 데이터 보존용으로만 남긴다.
-CREATE TABLE IF NOT EXISTS glossary (
-    id         BIGSERIAL PRIMARY KEY,
-    system_id  UUID REFERENCES meta_system (id) ON DELETE CASCADE,  -- NULL = 전사 공통
-    term       TEXT        NOT NULL,
-    synonyms   JSONB       NOT NULL DEFAULT '[]',
-    meaning    TEXT        NOT NULL DEFAULT '',
-    maps_to    JSONB       NOT NULL DEFAULT '[]',
-    status     TEXT        NOT NULL DEFAULT 'draft',
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
--- NULL system_id 끼리도 용어가 겹치지 않게 (UNIQUE 는 NULL 을 서로 다르게 본다)
-CREATE UNIQUE INDEX IF NOT EXISTS uq_glossary_term
-    ON glossary (coalesce(system_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(term));
-
--- 쓰지 않음: 보강(LLM 초안)·검수 기능 제거. 기존 데이터 보존용으로만 남긴다.
-CREATE TABLE IF NOT EXISTS enrich_job (
-    id          BIGSERIAL PRIMARY KEY,
-    target_type TEXT        NOT NULL,  -- table | metric
-    target_id   UUID        NOT NULL,
-    reason      TEXT        NOT NULL,  -- new | changed | rejected
-    note        TEXT        NOT NULL DEFAULT '',
-    status      TEXT        NOT NULL DEFAULT 'queued',  -- queued | running | done | failed
-    attempts    INTEGER     NOT NULL DEFAULT 0,
-    error       TEXT,
-    model       TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    finished_at TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS idx_enrich_job_queue ON enrich_job (status, created_at) WHERE status = 'queued';
--- 같은 대상이 두 번 대기하지 않게
-CREATE UNIQUE INDEX IF NOT EXISTS uq_enrich_job_queued ON enrich_job (target_type, target_id) WHERE status = 'queued';
 
 CREATE TABLE IF NOT EXISTS meta_sync_log (
     id             BIGSERIAL PRIMARY KEY,
@@ -262,49 +173,12 @@ CREATE TABLE IF NOT EXISTS ask_trace (
 );
 CREATE INDEX IF NOT EXISTS idx_ask_trace_ask ON ask_trace (ask_id, stage);
 
--- 쓰지 않음: 평가 문항·평가 실행(eval_case · eval_run · eval_result) 기능 제거. 기존 데이터 보존용으로만 남긴다.
--- 평가는 파일 평가셋으로 evaluate.py 를 직접 돌린다.
-CREATE TABLE IF NOT EXISTS eval_case (
-    id                 BIGSERIAL PRIMARY KEY,
-    system_id          UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
-    question           TEXT        NOT NULL,
-    expected_tables    JSONB       NOT NULL DEFAULT '[]',  -- [table_id]
-    expected_metric_id UUID,                               -- NULL = '맞는 지표 없음' 이 정답
-    expected_sql       TEXT,
-    origin             TEXT        NOT NULL,               -- synthetic | human
-    style              TEXT        NOT NULL DEFAULT '',
-    status             TEXT        NOT NULL DEFAULT 'draft',
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_eval_case_system ON eval_case (system_id) WHERE status = 'approved';
-
-CREATE TABLE IF NOT EXISTS eval_run (
-    id              UUID PRIMARY KEY,
-    system_id       UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
-    label           TEXT        NOT NULL,
-    config          JSONB       NOT NULL DEFAULT '{}',
-    case_count      INTEGER     NOT NULL DEFAULT 0,
-    table_recall    NUMERIC,
-    metric_accuracy NUMERIC,
-    sql_accuracy    NUMERIC,
-    avg_tokens      INTEGER,
-    avg_elapsed_ms  INTEGER,
-    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    finished_at     TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS idx_eval_run_system ON eval_run (system_id, started_at DESC);
-
-CREATE TABLE IF NOT EXISTS eval_result (
-    run_id             UUID    NOT NULL REFERENCES eval_run (id) ON DELETE CASCADE,
-    case_id            BIGINT  NOT NULL REFERENCES eval_case (id),
-    selected_tables    JSONB   NOT NULL DEFAULT '[]',
-    selected_metric_id UUID,
-    sql                TEXT,
-    table_hit          BOOLEAN NOT NULL DEFAULT false,
-    metric_hit         BOOLEAN NOT NULL DEFAULT false,
-    sql_hit            BOOLEAN,
-    error              TEXT,
-    total_tokens       INTEGER NOT NULL DEFAULT 0,
-    elapsed_ms         INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (run_id, case_id)
-);
+-- 정리: 쓰지 않게 된 표 · 컬럼을 지운다 (이미 지웠으면 아무 일도 하지 않는다)
+DROP TABLE IF EXISTS eval_result, eval_run, eval_case, enrich_job, glossary, metric_example,
+                     metric_formula, formula, ask_log_v1;
+ALTER TABLE meta_table
+    DROP COLUMN IF EXISTS card, DROP COLUMN IF EXISTS card_line,
+    DROP COLUMN IF EXISTS card_status, DROP COLUMN IF EXISTS card_source_hash;
+ALTER TABLE meta_column DROP COLUMN IF EXISTS synonyms, DROP COLUMN IF EXISTS codes;
+ALTER TABLE metric_table DROP COLUMN IF EXISTS origin;
+ALTER TABLE metric_history DROP COLUMN IF EXISTS actor;

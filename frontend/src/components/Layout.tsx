@@ -15,7 +15,7 @@ const GROUPS: { label: string; links: { to: string; text: string; end?: boolean 
       { to: "/systems/new", text: "등록" },
       { to: "/sync", text: "동기화", end: true },
       { to: "/sync/history", text: "동기화 현황" },
-      { to: "/tables", text: "테이블 용도" },
+      { to: "/tables", text: "테이블" },
       { to: "/relations", text: "관계" },
     ],
   },
@@ -24,7 +24,6 @@ const GROUPS: { label: string; links: { to: string; text: string; end?: boolean 
     links: [
       { to: "/metrics", text: "목록", end: true },
       { to: "/metrics/new", text: "등록" },
-      { to: "/formulas", text: "계산식" },
     ],
   },
 ];

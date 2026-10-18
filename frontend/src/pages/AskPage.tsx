@@ -11,9 +11,9 @@ interface Entry extends api.AskResponse {
   feedback: api.Feedback | null;
 }
 
-const EXAMPLES = ["지난달 매출 합계는?", "매출 상위 10개 고객", "이번 달과 지난달 주문 수 비교"];
+const EXAMPLES = ["일별 차량별 가장 마지막 기록", "최근 5일 차량별 무인 가동시간", "어제 수집된 차량 수"];
 
-const STAGE_LABEL = { table: "테이블 추론", metric: "지표 선택", sql: "조회 명세" } as const;
+const STAGE_LABEL = { table: "테이블 선택", metric: "지표 선택", sql: "조회 명세" } as const;
 
 /** 단계별로 무엇을 골랐고 왜 골랐는지 — 틀렸을 때 어느 단계에서 틀렸는지 보인다. */
 export function Steps({ steps }: { steps: api.AskStep[] }) {
@@ -202,6 +202,8 @@ export function AskPage() {
                     <Badge tone="ok">✓ 성공</Badge>
                   ) : entry.clarification ? (
                     <Badge tone="warn">? 확인 필요</Badge>
+                  ) : entry.needs_metric ? (
+                    <Badge tone="warn">지표 필요</Badge>
                   ) : (
                     <Badge tone="danger">✗ 실패</Badge>
                   )}
@@ -248,6 +250,14 @@ export function AskPage() {
                     {entry.clarification}
                     <div className="field-hint" style={{ marginTop: 6 }}>
                       원래 질문을 입력창에 돌려놓았습니다. 답을 덧붙여 한 문장으로 다시 보내세요.
+                    </div>
+                  </div>
+                ) : entry.needs_metric ? (
+                  <div className="alert warn">
+                    {entry.error}
+                    <div className="field-hint" style={{ marginTop: 6 }}>
+                      계산이 필요한 질문입니다. <Link to={`/metrics/new?ds=${systemId}`}>지표를 SQL 로 등록</Link>하면 그
+                      지표로 답합니다.
                     </div>
                   </div>
                 ) : (

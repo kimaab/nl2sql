@@ -1,0 +1,10 @@
+{
+  "model": "qwen3.8-27b",
+  "temperature": 0,
+  "messages": [
+    {
+      "role": "user",
+      "content": "안녕"
+    }
+  ]
+}

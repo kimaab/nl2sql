@@ -4,7 +4,6 @@ from uuid import UUID
 from typing import Literal
 from pydantic import BaseModel, field_validator, model_validator
 
-from compiler import GRAINS, ROLLUPS
 
 
 class Driver(str, Enum):
@@ -85,21 +84,6 @@ class System(BaseModel):
     active_metric_count: int
 
 
-class JoinOn(BaseModel):
-    """ON 조건 한 쌍. 양쪽 모두 '테이블.컬럼'."""
-
-    left: str
-    right: str
-
-
-class JoinSpec(BaseModel):
-    """지표의 기본 테이블에 붙는 조인 하나"""
-
-    table: str
-    type: Literal["inner", "left"] = "inner"
-    on: list[JoinOn]
-
-
 def _clean_names(values: list[str]) -> list[str]:
     seen, out = set(), []
     for v in values:
@@ -110,54 +94,20 @@ def _clean_names(values: list[str]) -> list[str]:
     return out
 
 
-def _dimension(item):
-    """디멘젼 하나: 컬럼 이름이나 {"field": 날짜컬럼, "grain": "day"}"""
-    if isinstance(item, str):
-        text = item.strip()
-        if not text:
-            raise ValueError("디멘젼 컬럼이 비어 있습니다")
-        return text
-    if isinstance(item, dict) and str(item.get("field") or "").strip():
-        grain = str(item.get("grain") or "").strip().lower()
-        if grain and grain not in GRAINS:
-            raise ValueError(f"grain 은 {', '.join(GRAINS)} 중 하나입니다 -> {grain!r}")
-        field = str(item["field"]).strip()
-        return {"field": field, "grain": grain} if grain else field
-    raise ValueError(f'디멘젼은 컬럼 이름이나 {{"field", "grain"}} 입니다 -> {item!r}')
-
-
 class MetricInput(BaseModel):
-    """업무 지표 = 테이블(조인) + 디멘젼 + 허용 계산식.
-
-    무엇을 조회·집계할지는 질문마다 LLM 이 정한다. 디멘젼은 집계 계산식이 뜻을 갖는 단위다
-    (예: 장비 × 일 — 누적값의 MAX - MIN 이 하루 가동시간이 되는 단위). fixed_filters 는 컴파일러가 늘 붙인다.
-    """
+    """업무 지표 = 이름 · 설명 · 같은 말 + SQL. SQL 은 AST 로 옮겨 저장한다."""
 
     name: str
     description: str = ""
-    table_name: str
-    joins: list[JoinSpec] = []
-    dimensions: list[str | dict] = []
-    formulas: list[str] = []
-    fixed_filters: list[dict] = []
     synonyms: list[str] = []
+    sql: str
 
-    @field_validator("synonyms", "formulas")
+    @field_validator("synonyms")
     @classmethod
     def _clean_lists(cls, values: list[str]) -> list[str]:
         return _clean_names(values)
 
-    @field_validator("dimensions")
-    @classmethod
-    def _clean_dimensions(cls, values: list) -> list:
-        out = []
-        for v in values:
-            d = _dimension(v)
-            if d not in out:
-                out.append(d)
-        return out
-
-    @field_validator("name", "table_name")
+    @field_validator("name", "sql")
     @classmethod
     def _not_blank(cls, value: str) -> str:
         cleaned = (value or "").strip()
@@ -167,115 +117,43 @@ class MetricInput(BaseModel):
 
 
 class Metric(BaseModel):
-    """업무 지표"""
+    """업무 지표. compiled_sql 은 저장된 AST 를 지금 스키마로 컴파일한 것 (깨졌으면 None)."""
 
     id: UUID
     name: str
     description: str
-    table_name: str
-    joins: list[JoinSpec]
-    dimensions: list[str | dict]
-    formulas: list[str]
-    fixed_filters: list[dict]
     synonyms: list[str]
-    status: Literal["draft", "active", "broken", "retired"]
+    sql: str
+    ast: dict
+    compiled_sql: str | None
+    tables: list[str]
+    status: Literal["active", "broken"]
     broken_reason: str | None
     version: int
     updated_at: str | None
 
 
-class FormulaMode(str, Enum):
-    FORCED = "forced"  # 질문에 '계산된 <이름>' 이 있을 때만 쓴다
-    ORGANIC = "organic"  # LLM 이 맞다고 보면 이름이 없어도 쓴다
-
-
-class FormulaInput(BaseModel):
-    """시스템 계산식. expr 이 없고 source_sql 이 있으면 SQL 을 풀어 expr 을 만든다."""
-
-    name: str
-    description: str = ""
-    column_name: str | None = None
-    mode: FormulaMode = FormulaMode.ORGANIC
-    expr: dict | None = None
-    source_sql: str | None = None
-    rollup: str | None = None
-
-    @field_validator("name")
-    @classmethod
-    def _name(cls, value: str) -> str:
-        cleaned = re.sub(r"\s+", " ", (value or "").strip())
-        if not cleaned:
-            raise ValueError("must not be blank")
-        if "[" in cleaned or "]" in cleaned:
-            raise ValueError("계산식 이름에는 [ ] 를 쓸 수 없습니다")
-        return cleaned
-
-    @field_validator("column_name", "source_sql")
-    @classmethod
-    def _blank_none(cls, value):
-        text = (value or "").strip()
-        return text or None
-
-    @field_validator("rollup")
-    @classmethod
-    def _rollup(cls, value):
-        if value is None or not str(value).strip():
-            return None
-        text = str(value).strip().upper()
-        if text not in ROLLUPS:
-            raise ValueError(f"rollup 은 {', '.join(ROLLUPS)} 중 하나입니다")
-        return text
-
-    @model_validator(mode="after")
-    def _has_body(self):
-        if self.expr is None and not self.source_sql:
-            raise ValueError("계산식은 식(expr)이나 SQL(source_sql)이 필요합니다")
-        return self
-
-
-class Formula(BaseModel):
-    """저장된 계산식. level 은 식에서 정해진다 (집계 함수가 있으면 aggregate)."""
-
-    id: UUID
-    name: str
-    description: str
-    column_name: str | None
-    mode: FormulaMode
-    expr: dict
-    text: str
-    level: Literal["row", "aggregate"]
-    source_sql: str | None
-    rollup: str | None
-    refs: list[str]
-    used_by: list[str]
-    updated_at: str | None
-
-
-class FormulaParseRequest(BaseModel):
+class MetricCheckRequest(BaseModel):
     sql: str
 
 
-class ParsedFormula(BaseModel):
-    name: str | None
-    expr: dict
-    text: str
-    level: Literal["row", "aggregate"]
+class MetricCheck(BaseModel):
+    """등록 전 확인 결과. stage: 실패한 단계 (parse = AST 변환, compile = 컴파일, verify = 결과 비교)"""
 
-
-class FormulaParseResponse(BaseModel):
-    """SQL 을 푼 결과. 디멘젼·테이블은 지표 등록에 쓸 후보, outer 는 질문이 정할 바깥 집계 참고."""
-
-    formulas: list[ParsedFormula]
-    dimensions: list[str | dict]
-    table: str | None
-    outer: list[str]
+    ast: dict | None = None
+    sql: str | None = None
+    tables: list[str] = []
+    warnings: list[str] = []
+    rows: int | None = None
+    stage: Literal["parse", "compile", "verify"] | None = None
+    error: str | None = None
 
 
 class MetricHistoryEntry(BaseModel):
     """지표 정의의 한 시점"""
 
     version: int
-    action: Literal["create", "update", "delete", "retire"]
+    action: Literal["create", "update", "delete"]
     snapshot: dict
     created_at: str
 
@@ -323,7 +201,8 @@ class AskStep(BaseModel):
 
 
 class AskResponse(BaseModel):
-    """질문 응답. clarification 이 있으면 모델이 되물은 것이다 — sql 은 없다."""
+    """질문 응답. clarification 이 있으면 모델이 되물은 것이다 — sql 은 없다.
+    needs_metric 이면 지표가 필요한 질문인데 맞는 지표가 없다는 뜻이다 — error 에 이유가 있다."""
 
     id: UUID | None = None
     sql: str | None
@@ -332,6 +211,7 @@ class AskResponse(BaseModel):
     clarification: str | None = None
     selected_tables: list[str] = []
     selected_metrics: list[str] = []
+    needs_metric: bool = False
     steps: list[AskStep] = []
 
 
@@ -408,6 +288,15 @@ class TimeColumn(BaseModel):
     utc_offset_hours: int | None = None
 
 
+class ColumnInfo(BaseModel):
+    """컬럼과 '계산 필요' 표시. 계산 필요 컬럼을 계산해야 답할 수 있는 질문은 지표가 필요하다."""
+
+    name: str
+    data_type: str
+    comment: str
+    needs_calc: bool = False
+
+
 class TableInfo(BaseModel):
     """테이블 목록 화면용"""
 
@@ -418,6 +307,7 @@ class TableInfo(BaseModel):
     column_count: int
     metric_count: int
     time_columns: list[TimeColumn] = []
+    columns: list[ColumnInfo] = []
 
 
 class UtcOffsetInput(BaseModel):
@@ -434,6 +324,13 @@ class UtcOffsetInput(BaseModel):
         if value is not None and not -12 <= value <= 14:
             raise ValueError("UTC 보정값은 -12 ~ +14 시간입니다")
         return value
+
+
+class NeedsCalcInput(BaseModel):
+    """컬럼의 '계산 필요' 표시 (예: 누적값 — 그대로 집계하면 틀린다)"""
+
+    column: str
+    needs_calc: bool
 
 
 class TablePurposeInput(BaseModel):
