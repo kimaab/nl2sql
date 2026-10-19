@@ -54,10 +54,7 @@ def read_postgresql(row: dict) -> list[dict]:
             """,
                 (schema,),
             )
-            tables = {
-                name: {"name": name, "description": comment, "columns": []}
-                for name, comment in cur.fetchall()
-            }
+            tables = _table_map(cur.fetchall())
 
             cur.execute(
                 """
@@ -141,10 +138,7 @@ def read_mysql(row: dict) -> list[dict]:
                 " ORDER BY TABLE_NAME",
                 (row["db_name"],),
             )
-            tables = {
-                _text(n): {"name": _text(n), "description": _text(c), "columns": []}
-                for n, c in cur.fetchall()
-            }
+            tables = _table_map(cur.fetchall())
 
             cur.execute(
                 "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT, COLUMN_KEY"
@@ -208,10 +202,7 @@ def read_oracle(row: dict) -> list[dict]:
             """,
                 owner=owner,
             )
-            tables = {
-                _text(n): {"name": _text(n), "description": _text(c), "columns": []}
-                for n, c in cur.fetchall()
-            }
+            tables = _table_map(cur.fetchall())
 
             cur.execute(
                 """
@@ -253,7 +244,7 @@ def read_oracle(row: dict) -> list[dict]:
             """,
                 owner=owner,
             )
-            _mark_keys(tables, [(_text(t), _text(c)) for t, c in cur.fetchall()])
+            _mark_keys(tables, cur.fetchall())
         relations = _read_relations(
             row,
             connection,
@@ -314,10 +305,21 @@ def _read_relations(
 
 def _mark_keys(tables: dict, pairs) -> None:
     """기본키 컬럼 표시. SQL 생성 단계에서 컬럼을 골라 실을 때 항상 포함한다."""
-    keys = {(t, c) for t, c in pairs}
+    keys = set()
+    for t, c in pairs:
+        keys.add((_text(t), _text(c)))
     for table in tables.values():
         for column in table["columns"]:
             column["is_pk"] = (table["name"], column["name"]) in keys
+
+
+def _table_map(rows) -> dict:
+    """(테이블 이름, 코멘트) 행 → {이름: 빈 컬럼 목록을 가진 테이블}"""
+    tables = {}
+    for name, comment in rows:
+        name = _text(name)
+        tables[name] = {"name": name, "description": _text(comment), "columns": []}
+    return tables
 
 
 def _text(value) -> str:

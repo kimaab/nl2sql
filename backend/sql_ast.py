@@ -34,9 +34,13 @@ def parse_sql(sql: str, contract: dict) -> dict:
         raise ValueError("SQL 이 비어 있습니다")
     driver = contract.get("driver") or "postgresql"
     try:
-        trees = [t for t in sqlglot.parse(text, read=DIALECTS.get(driver, "postgres")) if t is not None]
+        parsed = sqlglot.parse(text, read=DIALECTS.get(driver, "postgres"))
     except sqlglot.errors.ParseError as error:
         raise ValueError(f"SQL 을 읽을 수 없습니다 -> {str(error).splitlines()[0]}") from None
+    trees = []
+    for t in parsed:
+        if t is not None:
+            trees.append(t)
     if len(trees) != 1:
         raise ValueError(f"SQL 문이 {len(trees)}개입니다 — 하나만 넣으십시오")
     tree = trees[0]
@@ -45,7 +49,8 @@ def parse_sql(sql: str, contract: dict) -> dict:
     parser = _Parser(contract)
     with_ = tree.args.get("with_") or tree.args.get("with")
     if with_ is not None:
-        parser.ctes = {cte.alias: cte.this for cte in with_.expressions}
+        for cte in with_.expressions:
+            parser.ctes[cte.alias] = cte.this
     ast = parser.select(tree)
     return {"ast": ast, "warnings": list(dict.fromkeys(parser.warnings))}
 
@@ -61,20 +66,40 @@ class _Scope:
                 if alias.lower() == table.lower():
                     return alias, src
             raise ValueError(f"FROM 에 없는 테이블·별칭입니다 -> {table}")
-        owners = [(a, s) for a, s in self.sources.items() if _find(s["columns"], column.name) is not None]
+        owners = []
+        for alias, src in self.sources.items():
+            if _find(src["columns"], column.name) is not None:
+                owners.append((alias, src))
         if not owners:
             raise ValueError(f"없는 컬럼입니다 -> {column.name}")
         if len(owners) > 1:
             raise ValueError(f"여러 테이블에 있는 컬럼입니다 -> {column.name} (테이블을 붙여 적으십시오)")
         return owners[0]
 
+    def knows(self, name: str) -> bool:
+        """어느 FROM 소스에든 있는 컬럼인가"""
+        for src in self.sources.values():
+            if _find(src["columns"], name) is not None:
+                return True
+        return False
+
 
 def _find(columns: dict, name: str):
     """컬럼 이름을 실제 이름으로 (대소문자 무시)"""
     if name in columns:
         return name
-    lowered = {c.lower(): c for c in columns}
-    return lowered.get(name.lower())
+    for c in columns:
+        if c.lower() == name.lower():
+            return c
+    return None
+
+
+def _subquery_columns(inner: dict) -> dict:
+    """하위 쿼리 결과 컬럼 → 시차 0 (UTC 정보는 하위 쿼리 밖으로 나오지 않는다)"""
+    columns = {}
+    for s in inner["select"]:
+        columns[s["as"]] = 0
+    return columns
 
 
 class _Parser:
@@ -130,9 +155,12 @@ class _Parser:
             node = self.node(body, scope)
             select.append({"expr": node, "as": name})
             aliases[name.lower()] = body
-        names = [s["as"] for s in select]
-        if len(set(n.lower() for n in names)) != len(names):
-            raise ValueError("SELECT 결과 이름이 겹칩니다 — 별칭(AS)을 붙여 주십시오")
+        names, seen = [], set()
+        for s in select:
+            if s["as"].lower() in seen:
+                raise ValueError("SELECT 결과 이름이 겹칩니다 — 별칭(AS)을 붙여 주십시오")
+            seen.add(s["as"].lower())
+            names.append(s["as"])
         ast["select"] = select
         if distinct is not None:
             ast["distinct"] = True
@@ -143,7 +171,9 @@ class _Parser:
 
         group = query.args.get("group")
         if group is not None:
-            ast["group_by"] = [self._group_item(g, query, scope, aliases) for g in group.expressions]
+            ast["group_by"] = []
+            for g in group.expressions:
+                ast["group_by"].append(self._group_item(g, query, scope, aliases))
 
         having = query.args.get("having")
         if having is not None:
@@ -151,7 +181,9 @@ class _Parser:
 
         order = query.args.get("order")
         if order is not None:
-            ast["order_by"] = [self._order_item(o, query, scope, names) for o in order.expressions]
+            ast["order_by"] = []
+            for o in order.expressions:
+                ast["order_by"].append(self._order_item(o, query, scope, names))
 
         limit = query.args.get("limit")
         if limit is not None:
@@ -168,15 +200,16 @@ class _Parser:
                     raise ValueError(f"WITH 로 만든 {node.name} 은(는) FROM 에만 쓸 수 있습니다 (JOIN 은 지원하지 않습니다)")
                 alias = node.alias or node.name
                 inner = self.select(self.ctes[node.name])
-                scope.sources[alias] = {"name": alias, "columns": {s["as"]: 0 for s in inner["select"]}, "table": False}
+                scope.sources[alias] = {"name": alias, "columns": _subquery_columns(inner), "table": False}
                 return {"query": inner, "as": alias}
             found = self.tables.get(node.name.lower())
             if found is None:
                 raise ValueError(f"메타데이터에 없는 테이블입니다 -> {node.name} (동기화했는지 확인하십시오)")
             real, columns = found
             alias = node.alias or real
-            if any(s["name"] == real for s in scope.sources.values()):
-                raise ValueError(f"같은 테이블을 두 번 쓸 수 없습니다 (셀프 조인) -> {real}")
+            for s in scope.sources.values():
+                if s["name"] == real:
+                    raise ValueError(f"같은 테이블을 두 번 쓸 수 없습니다 (셀프 조인) -> {real}")
             scope.sources[alias] = {"name": real, "columns": columns, "table": True}
             return real
         if isinstance(node, exp.Subquery):
@@ -184,7 +217,7 @@ class _Parser:
                 raise ValueError("JOIN 에는 테이블만 쓸 수 있습니다 (하위 쿼리 JOIN 은 지원하지 않습니다)")
             alias = node.alias or "sub"
             inner = self.select(node.this)
-            scope.sources[alias] = {"name": alias, "columns": {s["as"]: 0 for s in inner["select"]}, "table": False}
+            scope.sources[alias] = {"name": alias, "columns": _subquery_columns(inner), "table": False}
             return {"query": inner, "as": alias}
         raise ValueError(f"FROM 에 쓸 수 없는 것입니다 -> {node.sql()}")
 
@@ -196,7 +229,7 @@ class _Parser:
         elif not side and kind in ("", "INNER"):
             how = "inner"
         else:
-            raise ValueError(f"{' '.join(x for x in (side, kind) if x)} JOIN 은 지원하지 않습니다 (INNER · LEFT 만)")
+            raise ValueError(f"{f'{side} {kind}'.strip()} JOIN 은 지원하지 않습니다 (INNER · LEFT 만)")
         if join.args.get("using"):
             raise ValueError("JOIN … USING 은 지원하지 않습니다 — ON a.x = b.x 로 적으십시오")
         table = self._source(join.this, scope)
@@ -244,8 +277,7 @@ class _Parser:
             return self.node(_unalias(query.expressions[int(g.this) - 1]), scope)
         if isinstance(g, exp.Column) and not g.table:
             # 입력 컬럼이 결과 별칭보다 먼저다 (PostgreSQL 규칙)
-            known = any(_find(s["columns"], g.name) is not None for s in scope.sources.values())
-            if not known and g.name.lower() in aliases:
+            if not scope.knows(g.name) and g.name.lower() in aliases:
                 return self.node(aliases[g.name.lower()], scope)
         return self.node(g, scope)
 
@@ -292,9 +324,12 @@ class _Parser:
         if isinstance(node, exp.In):
             if node.args.get("query") is not None:
                 raise ValueError("IN (서브쿼리) 는 지원하지 않습니다")
-            values = [self._literal(v) for v in node.expressions]
-            if any(v is _NOT_LITERAL for v in values):
-                raise ValueError(f"IN 목록은 상수만 받습니다 -> {node.sql()}")
+            values = []
+            for v in node.expressions:
+                literal = self._literal(v)
+                if literal is _NOT_LITERAL:
+                    raise ValueError(f"IN 목록은 상수만 받습니다 -> {node.sql()}")
+                values.append(literal)
             return [self._compare(node.this, "not_in" if negate else "in", values, scope, aliases)]
         if isinstance(node, exp.Like):
             pattern = self._literal(node.expression)
@@ -321,12 +356,16 @@ class _Parser:
     def _compare(self, left, op: str, right, scope: _Scope, aliases) -> dict:
         """UTC 컬럼과 날짜 상수의 비교는 상수를 현지 시각으로 옮긴다 (컬럼은 그대로 둔다)."""
         values = right if isinstance(right, list) else [right]
-        literals = [v if not isinstance(v, exp.Expression) else self._literal(v) for v in values]
+        literals, moments = [], []
+        for v in values:
+            literals.append(self._literal(v) if isinstance(v, exp.Expression) else v)
+            moments.append(_moment(v))
         utc = self._utc_column(left, scope)
-        moments = [_moment(v) for v in values]
-        if utc and all(m is not None for m in moments):
+        if utc and None not in moments:
             ref, hours = utc
-            shifted = [(m + datetime.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S") for m in moments]
+            shifted = []
+            for m in moments:
+                shifted.append((m + datetime.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S"))
             return {"expr": {"col": ref}, "op": op, "value": shifted if isinstance(right, list) else shifted[0]}
         expr = self.node(left, scope, aliases)
         if isinstance(right, list):
@@ -369,8 +408,7 @@ class _Parser:
             if isinstance(node.this, exp.Star):
                 raise ValueError("t.* 는 SELECT 목록에만 쓸 수 있습니다")
             if aliases and not node.table and node.name.lower() in aliases:
-                known = any(_find(s["columns"], node.name) is not None for s in scope.sources.values())
-                if not known:
+                if not scope.knows(node.name):
                     return self.node(aliases[node.name.lower()], scope, aliases)
             _, src = scope.owner(node)
             name = _find(src["columns"], node.name)
@@ -425,8 +463,10 @@ class _Parser:
             return {"fn": "NULLIF", "args": [self.node(node.this, scope, aliases), self.node(node.expression, scope, aliases)]}
         for cls, name in _SCALARS.items():
             if isinstance(node, cls):
-                rest = node.expressions or []
-                return {"fn": name, "args": [self.node(a, scope, aliases) for a in [node.this, *rest]]}
+                args = []
+                for a in [node.this, *(node.expressions or [])]:
+                    args.append(self.node(a, scope, aliases))
+                return {"fn": name, "args": args}
         if isinstance(node, (exp.Date, exp.TsOrDsToDate)) or (
             isinstance(node, exp.Cast) and node.to.this == exp.DataType.Type.DATE
         ):
@@ -489,14 +529,15 @@ class _Parser:
         out = {"fn": "ROW_NUMBER", "args": []}
         part = node.args.get("partition_by") or []
         if part:
-            out["partition_by"] = [self.node(p, scope, aliases) for p in part]
+            out["partition_by"] = []
+            for p in part:
+                out["partition_by"].append(self.node(p, scope, aliases))
         order = node.args.get("order")
         if order is None:
             raise ValueError("ROW_NUMBER() 에는 ORDER BY 가 필요합니다")
-        out["order_by"] = [
-            {"expr": self.node(o.this, scope, aliases), "dir": "desc" if o.args.get("desc") else "asc"}
-            for o in order.expressions
-        ]
+        out["order_by"] = []
+        for o in order.expressions:
+            out["order_by"].append({"expr": self.node(o.this, scope, aliases), "dir": "desc" if o.args.get("desc") else "asc"})
         return out
 
 

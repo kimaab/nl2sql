@@ -43,7 +43,10 @@ def _guard_duplicate(data: SystemInput, except_id: UUID | None = None) -> None:
 
 def list_systems() -> list[System]:
     rows = db.query(f"SELECT s.*, {_COUNTS} FROM meta_system s ORDER BY s.name")
-    return [_row_to_system(r) for r in rows]
+    systems = []
+    for r in rows:
+        systems.append(_row_to_system(r))
+    return systems
 
 
 def get_system(system_id: UUID) -> System:
@@ -190,7 +193,9 @@ def _merge_schema(
                 "SELECT id, name, deleted_at FROM meta_table WHERE system_id = %s",
                 (sid,),
             )
-            existing = {name: (tid, deleted) for tid, name, deleted in cur.fetchall()}
+            existing = {}
+            for tid, name, deleted in cur.fetchall():
+                existing[name] = (tid, deleted)
             cur.execute(
                 """
                 SELECT c.table_id, c.name, c.data_type FROM meta_column c JOIN meta_table t ON t.id = c.table_id
@@ -212,7 +217,9 @@ def _merge_schema(
                     """,
                         (table["description"], tid),
                     )
-                    now_cols = {(c["name"], c["type"]) for c in table["columns"]}
+                    now_cols = set()
+                    for c in table["columns"]:
+                        now_cols.add((c["name"], c["type"]))
                     if deleted is not None:
                         added.append(tid)
                     elif before.get(tid, set()) != now_cols:
@@ -225,7 +232,10 @@ def _merge_schema(
                     )
                     added.append(tid)
 
-                names = [c["name"] for c in table["columns"]]
+                names, column_rows = [], []
+                for i, c in enumerate(table["columns"]):
+                    names.append(c["name"])
+                    column_rows.append((str(tid), c["name"], c["type"], c["description"], i, bool(c.get("is_pk"))))
                 if table["columns"]:
                     cur.executemany(
                         """
@@ -235,17 +245,7 @@ def _merge_schema(
                             data_type = EXCLUDED.data_type, comment = EXCLUDED.comment, ordinal = EXCLUDED.ordinal,
                             is_pk = EXCLUDED.is_pk, deleted_at = NULL, updated_at = now()
                     """,
-                        [
-                            (
-                                str(tid),
-                                c["name"],
-                                c["type"],
-                                c["description"],
-                                i,
-                                bool(c.get("is_pk")),
-                            )
-                            for i, c in enumerate(table["columns"])
-                        ],
+                        column_rows,
                     )
                 cur.execute(
                     """
@@ -256,13 +256,16 @@ def _merge_schema(
                 )
                 column_count += len(names)
 
+            table_names = []
+            for t in tables:
+                table_names.append(t["name"])
             cur.execute(
                 """
                 UPDATE meta_table SET deleted_at = now(), updated_at = now()
                  WHERE system_id = %s AND deleted_at IS NULL AND NOT (name = ANY(%s))
                 RETURNING id
             """,
-                (sid, [t["name"] for t in tables]),
+                (sid, table_names),
             )
             removed = len(cur.fetchall())
 
@@ -334,23 +337,25 @@ def list_sync_logs(system_id: UUID | None = None, limit: int = 100) -> list[Sync
         str(system_id) if system_id else None,
         limit,
     )
-    return [
-        SyncLog(
-            id=r["id"],
-            system_id=r["system_id"],
-            system_name=r["system_name"],
-            trigger=r["trigger"],
-            status=r["status"],
-            tables_added=r["tables_added"],
-            tables_changed=r["tables_changed"],
-            tables_removed=r["tables_removed"],
-            broken_metrics=r["broken_metrics"] or [],
-            error=r["error"],
-            started_at=r["started_at"].isoformat(),
-            finished_at=r["finished_at"].isoformat(),
+    logs = []
+    for r in rows:
+        logs.append(
+            SyncLog(
+                id=r["id"],
+                system_id=r["system_id"],
+                system_name=r["system_name"],
+                trigger=r["trigger"],
+                status=r["status"],
+                tables_added=r["tables_added"],
+                tables_changed=r["tables_changed"],
+                tables_removed=r["tables_removed"],
+                broken_metrics=r["broken_metrics"] or [],
+                error=r["error"],
+                started_at=r["started_at"].isoformat(),
+                finished_at=r["finished_at"].isoformat(),
+            )
         )
-        for r in rows
-    ]
+    return logs
 
 
 # ── 테이블 정보 ─────────────────────────────────────────────────────────
@@ -403,19 +408,35 @@ def list_tables(system_id: UUID) -> list[TableInfo]:
     )
     times = _time_columns(system_id)
     columns = _columns(system_id)
-    return [
-        TableInfo(
-            id=r["id"],
-            name=r["name"],
-            comment=r["comment"],
-            purpose=r["purpose"],
-            column_count=r["column_count"],
-            metric_count=r["metric_count"],
-            time_columns=times.get(r["id"], []),
-            columns=columns.get(r["id"], []),
+    tables = []
+    for r in rows:
+        tables.append(
+            TableInfo(
+                id=r["id"],
+                name=r["name"],
+                comment=r["comment"],
+                purpose=r["purpose"],
+                column_count=r["column_count"],
+                metric_count=r["metric_count"],
+                time_columns=times.get(r["id"], []),
+                columns=columns.get(r["id"], []),
+            )
         )
-        for r in rows
-    ]
+    return tables
+
+
+def _find_table(system_id: UUID, table_id: UUID) -> TableInfo:
+    for t in list_tables(system_id):
+        if t.id == table_id:
+            return t
+    raise ApiException(404, "테이블을 찾을 수 없습니다")
+
+
+def _has_column(columns, name: str) -> bool:
+    for c in columns:
+        if c.name == name:
+            return True
+    return False
 
 
 def _columns(system_id: UUID) -> dict:
@@ -466,10 +487,8 @@ def _time_columns(system_id: UUID) -> dict:
 def set_utc_offset(
     system_id: UUID, table_id: UUID, column: str, hours: int | None
 ) -> TableInfo:
-    found = next((t for t in list_tables(system_id) if t.id == table_id), None)
-    if found is None:
-        raise ApiException(404, "테이블을 찾을 수 없습니다")
-    if column not in {c.name for c in found.time_columns}:
+    found = _find_table(system_id, table_id)
+    if not _has_column(found.time_columns, column):
         raise ApiException(
             400, f"{column} 은(는) 시각을 포함한 날짜 컬럼이 아니라 UTC 보정을 쓸 수 없습니다"
         )
@@ -482,14 +501,12 @@ def set_utc_offset(
             (hours, str(table_id), column),
         )
     log.info("utc offset %s.%s = %s", found.name, column, hours)
-    return next(t for t in list_tables(system_id) if t.id == table_id)
+    return _find_table(system_id, table_id)
 
 
 def set_needs_calc(system_id: UUID, table_id: UUID, column: str, needs_calc: bool) -> TableInfo:
-    found = next((t for t in list_tables(system_id) if t.id == table_id), None)
-    if found is None:
-        raise ApiException(404, "테이블을 찾을 수 없습니다")
-    if column not in {c.name for c in found.columns}:
+    found = _find_table(system_id, table_id)
+    if not _has_column(found.columns, column):
         raise ApiException(400, f"{found.name} 에 없는 컬럼입니다 -> {column}")
     with db.connection() as conn:
         conn.execute(
@@ -500,7 +517,7 @@ def set_needs_calc(system_id: UUID, table_id: UUID, column: str, needs_calc: boo
             (needs_calc, str(table_id), column),
         )
     log.info("needs_calc %s.%s = %s", found.name, column, needs_calc)
-    return next(t for t in list_tables(system_id) if t.id == table_id)
+    return _find_table(system_id, table_id)
 
 
 def set_table_purpose(system_id: UUID, table_id: UUID, purpose: str) -> TableInfo:
@@ -512,10 +529,7 @@ def set_table_purpose(system_id: UUID, table_id: UUID, purpose: str) -> TableInf
         """,
             (purpose.strip(), str(table_id), str(system_id), purpose.strip()),
         )
-    found = next((t for t in list_tables(system_id) if t.id == table_id), None)
-    if found is None:
-        raise ApiException(404, "테이블을 찾을 수 없습니다")
-    return found
+    return _find_table(system_id, table_id)
 
 
 def _row_to_system(row: dict) -> System:

@@ -38,7 +38,7 @@ class Step:
 @dataclass
 class Selection:
     tables: list  # 고른 테이블 이름
-    metric: str | None  # 고른 지표 이름
+    metrics: list  # 고른 지표 이름 (질문이 묻는 계산마다 하나)
     needs_metric: bool  # 지표가 필요한 질문인가
     reason: str
     step: Step
@@ -132,13 +132,16 @@ TABLE_SYSTEM = """당신은 업무 시스템 '{name}' 의 테이블 목록에서
 
 [규칙]
 - 질문에 답하는 데 꼭 필요한 테이블만 고릅니다 (보통 하나, 조인이 필요할 때만 여럿). 목록의 테이블 이름을 그대로 적습니다.
+- 당신이 할 수 없는 행동을 제안하지 않습니다.
 - 컬럼 뒤의 [계산 필요] 는 값을 그대로 합치거나 평균내면 틀리는 컬럼입니다 (예: 계속 커지는 누적값).
   이 컬럼으로 합계·사용량·기간 증감·비율처럼 계산해야 답할 수 있는 질문은 지표가 필요한 질문입니다 (needs_metric: true).
   값을 그대로 보여 주기만 하면 (목록, 마지막 값 등) 지표가 필요하지 않습니다.
-- 지표가 필요한 질문이면 그 테이블의 [지표] 중 질문에 맞는 지표 이름을 metric 에 그대로 적습니다. 맞는 지표가 없으면 metric 은 null 입니다.
+- 지표가 필요한 질문이면 질문이 묻는 계산마다 그 테이블의 [지표] 중 맞는 지표를 골라 metrics 에 이름을 그대로 적습니다.
+  계산이 여러 개면 (예: 무인 가동시간과 유인 가동시간) 지표도 모두 적습니다.
+  계산 중 하나라도 맞는 지표가 없으면 metrics 는 빈 목록이고, reason 에 어떤 계산의 지표가 없는지 적습니다.
 - 질문이 여러 갈래로 읽혀 정할 수 없을 때만 clarify 에 사용자에게 물을 한 문장을 적습니다. 그 밖에는 빈 문자열입니다.
 - 설명 없이 JSON 객체 하나로만 답합니다:
-  {{"tables": ["테이블"], "needs_metric": false, "metric": null, "reason": "판단 이유", "clarify": ""}}"""
+  {{"tables": ["테이블"], "needs_metric": false, "metrics": [], "reason": "판단 이유", "clarify": ""}}"""
 
 
 def table_block(t: dict, metrics: list) -> str:
@@ -163,9 +166,15 @@ def select_tables(model, contract: dict, question: str) -> Selection:
     for m in metrics:
         for name in m.get("tables") or []:
             by_table.setdefault(name, []).append(m)
-    step = Step("table", candidates=[t["name"] for t in tables], model=model_name(model))
-    names = {t["name"].lower(): t["name"] for t in tables}
-    metric_names = {_squash(m["name"]): m for m in metrics}
+    candidates, names, blocks = [], {}, []
+    for t in tables:
+        candidates.append(t["name"])
+        names[t["name"].lower()] = t["name"]
+        blocks.append(table_block(t, by_table.get(t["name"], [])))
+    metric_names = {}
+    for m in metrics:
+        metric_names[_squash(m["name"])] = m
+    step = Step("table", candidates=candidates, model=model_name(model))
 
     def validate(p):
         picked = []
@@ -175,33 +184,42 @@ def select_tables(model, contract: dict, question: str) -> Selection:
                 raise ValueError(f"'{n}' 는 [테이블 목록] 에 없는 테이블입니다")
             if real not in picked:
                 picked.append(real)
-        metric = None
-        if p.get("metric"):
-            metric = metric_names.get(_squash(p["metric"]))
+        asked = p.get("metrics")
+        if asked is None:
+            asked = [p["metric"]] if p.get("metric") else []  # 예전 형식 {"metric": "이름"}
+        if isinstance(asked, str):
+            asked = [asked]
+        chosen = []
+        for n in asked:
+            metric = metric_names.get(_squash(n))
             if metric is None:
-                raise ValueError(f"'{p['metric']}' 는 [지표] 에 없는 지표 이름입니다. 이름을 그대로 적거나 null 로 답하십시오")
-        if not picked and metric is None and not str(p.get("clarify") or "").strip():
+                raise ValueError(f"'{n}' 는 [지표] 에 없는 지표 이름입니다. 이름을 그대로 적거나 빈 목록으로 답하십시오")
+            if metric["name"] not in chosen:
+                chosen.append(metric["name"])
+                # 지표를 골랐으면 지표의 테이블도 쓴다
+                for t in metric.get("tables") or []:
+                    if t not in picked:
+                        picked.append(t)
+        if not picked and not str(p.get("clarify") or "").strip():
             raise ValueError('"tables" 가 비었습니다')
-        # 지표를 골랐으면 지표의 테이블도 쓴다
-        for n in (metric or {}).get("tables") or []:
-            if n not in picked:
-                picked.append(n)
-        return {**p, "tables": picked, "metric": metric["name"] if metric else None}
+        return {**p, "tables": picked, "metrics": chosen}
 
     system = TABLE_SYSTEM.format(name=contract.get("name", ""), domain=contract.get("domain") or "(설명 없음)")
     user = (
         "[테이블 목록]\n"
-        + "\n".join(table_block(t, by_table.get(t["name"], [])) for t in tables)
+        + "\n".join(blocks)
         + f"\n\n[질문]\n{question}"
     )
     parsed = ask_json(model, system, user, step, validate)
     reason = str(parsed.get("reason") or "")
     clarify = str(parsed.get("clarify") or "").strip() or None
-    needs_metric = bool(parsed.get("needs_metric")) or bool(parsed.get("metric"))
-    step.selected = parsed["tables"] + ([f"지표: {parsed['metric']}"] if parsed["metric"] else [])
+    needs_metric = bool(parsed.get("needs_metric")) or bool(parsed["metrics"])
+    step.selected = list(parsed["tables"])
+    for name in parsed["metrics"]:
+        step.selected.append(f"지표: {name}")
     step.reason = reason
     log.info(
-        "%s 테이블 선택 결과: tables=%s needs_metric=%s metric=%s%s",
-        LLM_LOG, parsed["tables"], needs_metric, parsed["metric"], f" 되묻기={clarify}" if clarify else "",
+        "%s 테이블 선택 결과: tables=%s needs_metric=%s metrics=%s%s",
+        LLM_LOG, parsed["tables"], needs_metric, parsed["metrics"], f" 되묻기={clarify}" if clarify else "",
     )
-    return Selection(parsed["tables"], parsed["metric"], needs_metric, reason, step, clarification=clarify)
+    return Selection(parsed["tables"], parsed["metrics"], needs_metric, reason, step, clarification=clarify)

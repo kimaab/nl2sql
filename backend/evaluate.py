@@ -37,9 +37,13 @@ def normalize_sql(sql: str | None) -> str:
     if sql is None:
         return ""
     parts = re.split(r"('(?:[^']|'')*')", sql.strip())
-    return "".join(
-        p if i % 2 else re.sub(r"\s+", " ", p) for i, p in enumerate(parts)
-    ).strip()
+    out = []
+    for i, p in enumerate(parts):
+        if i % 2:
+            out.append(p)  # 문자열 리터럴
+        else:
+            out.append(re.sub(r"\s+", " ", p))
+    return "".join(out).strip()
 
 
 def _split_top(text: str) -> list[str]:
@@ -136,16 +140,20 @@ def judge(outcome: dict, case: dict) -> dict:
     table_hit: 정답 테이블이 모두 골라졌나 (재현율) · metric_hit: 정답 지표를 골랐나
     ('맞는 지표 없음' 이 정답이면 아무것도 고르지 않아야 맞다) · sql_hit: 기대 SQL 과 같나 (별칭 무시)
     """
-    picked_tables = {t.lower() for t in outcome.get("tables", [])}
-    expected_tables = case.get("expected_tables")
-    table_hit = (
-        None
-        if not expected_tables
-        else all(t.lower() in picked_tables for t in expected_tables)
-    )
+    picked_tables = set()
+    for t in outcome.get("tables", []):
+        picked_tables.add(t.lower())
+    table_hit = None
+    if case.get("expected_tables"):
+        table_hit = True
+        for t in case["expected_tables"]:
+            if t.lower() not in picked_tables:
+                table_hit = False
     metric_hit = None
     if "expected_metric" in case:
-        picked = [m.lower() for m in outcome.get("metrics", [])]
+        picked = []
+        for m in outcome.get("metrics", []):
+            picked.append(m.lower())
         expected = case["expected_metric"]
         metric_hit = (not picked) if expected is None else (expected.lower() in picked)
     sql_hit = None
@@ -222,11 +230,11 @@ def run_model(
                 "clarification": outcome["clarification"],
             }
         )
-        hits = " ".join(
-            f"{k[:-4]}={'O' if v else 'X'}"
-            for k, v in judge(outcome, case).items()
-            if v is not None
-        )
+        marks = []
+        for k, v in judge(outcome, case).items():
+            if v is not None:
+                marks.append(f"{k[:-4]}={'O' if v else 'X'}")
+        hits = " ".join(marks)
         print(
             f"[{i}/{len(data['cases'])}] {status:9s} {hits:24s} {case['question']}",
             flush=True,
@@ -235,19 +243,36 @@ def run_model(
 
 
 def _summary(results: list[dict], mode: str) -> dict:
-    counted = [r for r in results if r["status"] != "skipped"]
+    counted, failures, with_sql = [], [], []
+    attempts, tokens, elapsed = [], [], []
     by_status: dict = {}
-    for r in counted:
+    for r in results:
+        if r["status"] == "skipped":
+            continue
+        counted.append(r)
         by_status[r["status"]] = by_status.get(r["status"], 0) + 1
-    attempts = [r["attempts"] for r in counted if "attempts" in r]
+        if r.get("expected_sql"):
+            with_sql.append(r)
+        if "attempts" in r:
+            attempts.append(r["attempts"])
+        if "total_tokens" in r:
+            tokens.append(r["total_tokens"])
+        if "elapsed_ms" in r:
+            elapsed.append(r["elapsed_ms"])
+        if (
+            r["status"] not in ("pass", "pass_alias")
+            or r.get("table_hit") is False
+            or r.get("metric_hit") is False
+        ):
+            failures.append(r)
 
     def rate(key):
-        judged = [r[key] for r in counted if r.get(key) is not None]
+        judged = []
+        for r in counted:
+            if r.get(key) is not None:
+                judged.append(r[key])
         return round(sum(judged) / len(judged), 4) if judged else None
 
-    with_sql = [r for r in counted if r.get("expected_sql")]
-    tokens = [r["total_tokens"] for r in counted if "total_tokens" in r]
-    elapsed = [r["elapsed_ms"] for r in counted if "elapsed_ms" in r]
     return {
         "mode": mode,
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -270,13 +295,7 @@ def _summary(results: list[dict], mode: str) -> dict:
         "avg_elapsed_ms": round(sum(elapsed) / len(elapsed)) if elapsed else None,
         "by_status": by_status,
         "avg_attempts": round(sum(attempts) / len(attempts), 2) if attempts else None,
-        "failures": [
-            r
-            for r in counted
-            if r["status"] not in ("pass", "pass_alias")
-            or r.get("table_hit") is False
-            or r.get("metric_hit") is False
-        ],
+        "failures": failures,
         "results": results,
     }
 

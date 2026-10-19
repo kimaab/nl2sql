@@ -22,7 +22,10 @@ def list_relations(system_id: UUID) -> list[Relation]:
         f"{_SELECT} WHERE r.system_id = %s ORDER BY lt.name, rt.name, r.constraint_name, r.left_column",
         str(system_id),
     )
-    return [Relation(**r) for r in rows]
+    relations = []
+    for r in rows:
+        relations.append(Relation(**r))
+    return relations
 
 
 def create_relation(system_id: UUID, data: RelationInput) -> Relation:
@@ -30,19 +33,18 @@ def create_relation(system_id: UUID, data: RelationInput) -> Relation:
     tables = load_tables(system_id)
 
     def resolve(table: str, column: str) -> tuple[dict, str]:
-        found = next(
-            (t for t in tables.values() if t["name"].lower() == table.lower()), None
-        )
+        found = None
+        for t in tables.values():
+            if t["name"].lower() == table.lower():
+                found = t
+                break
         if found is None:
             raise ApiException(400, f"테이블을 찾을 수 없습니다: {table}")
-        col = next(
-            (
-                c["name"]
-                for c in found["columns"]
-                if c["name"].lower() == column.lower()
-            ),
-            None,
-        )
+        col = None
+        for c in found["columns"]:
+            if c["name"].lower() == column.lower():
+                col = c["name"]
+                break
         if col is None:
             raise ApiException(
                 400, f"컬럼을 찾을 수 없습니다: {found['name']}.{column}"
@@ -141,19 +143,21 @@ def replace_fk_relations(cur, system_id: UUID, relations: list[dict]) -> None:
         (str(system_id),),
     )
     ids = dict(cur.fetchall())
-    rows = [
-        (
-            str(uuid4()),
-            str(system_id),
-            r["constraint"],
-            ids[r["left_table"]],
-            r["left_column"],
-            ids[r["right_table"]],
-            r["right_column"],
+    rows = []
+    for r in relations:
+        if r["left_table"] not in ids or r["right_table"] not in ids:
+            continue
+        rows.append(
+            (
+                str(uuid4()),
+                str(system_id),
+                r["constraint"],
+                ids[r["left_table"]],
+                r["left_column"],
+                ids[r["right_table"]],
+                r["right_column"],
+            )
         )
-        for r in relations
-        if r["left_table"] in ids and r["right_table"] in ids
-    ]
     cur.executemany(
         """
         INSERT INTO meta_relation (id, system_id, constraint_name, left_table_id, left_column,

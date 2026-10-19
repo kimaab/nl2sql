@@ -240,7 +240,7 @@ class FakeLLM:
         from langchain_core.messages import AIMessage
 
         if "[테이블 목록]" in messages[-1].content:
-            body = {"tables": ["TB_ORDER"], "needs_metric": True, "metric": "주문수", "reason": "건수", "clarify": ""}
+            body = {"tables": ["TB_ORDER"], "needs_metric": True, "metrics": ["주문수"], "reason": "건수", "clarify": ""}
         else:
             body = {"ast": {"from": "TB_ORDER", "select": [{"expr": {"fn": "COUNT", "args": []}, "as": "n"}]}}
         return AIMessage(content=json.dumps(body, ensure_ascii=False))

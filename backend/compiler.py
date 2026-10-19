@@ -158,7 +158,10 @@ class Scope:
             if col not in self.sources[alias]:
                 raise AstError(f"{alias} 에 없는 컬럼입니다 -> {col}")
             return alias, col, self.sources[alias][col]
-        owners = [a for a, cols in self.sources.items() if ref in cols]
+        owners = []
+        for alias, cols in self.sources.items():
+            if ref in cols:
+                owners.append(alias)
         if not owners:
             known = sorted(set().union(*self.sources.values())) if self.sources else []
             raise AstError(f"없는 컬럼입니다 -> {ref} (쓸 수 있는 것: {', '.join(known)})")
@@ -176,11 +179,20 @@ def _info(agg=False, window=False, cols=False) -> dict:
 
 
 def _merge(parts) -> dict:
-    return _info(
-        any(p[1]["agg"] for p in parts),
-        any(p[1]["window"] for p in parts),
-        any(p[1]["cols"] for p in parts),
-    )
+    merged = _info()
+    for _, info in parts:
+        for key in merged:
+            if info[key]:
+                merged[key] = True
+    return merged
+
+
+def _sqls(parts) -> list[str]:
+    """(SQL, info) 목록에서 SQL 만"""
+    out = []
+    for sql, _ in parts:
+        out.append(sql)
+    return out
 
 
 class Compiler:
@@ -219,7 +231,7 @@ class Compiler:
         elif isinstance(source, dict) and "query" in source:
             alias = str(source.get("as") or "sub").strip()
             inner_sql, names = self._query(source["query"], depth + 1)
-            scope.add(alias, {n: 0 for n in names})
+            scope.add(alias, dict.fromkeys(names, 0))
             from_sql = f"({inner_sql}) {d.q(alias)}"
         else:
             raise AstError('from 은 테이블 이름이나 {"query": AST, "as": "별칭"} 입니다')
@@ -238,8 +250,11 @@ class Compiler:
             for pair in pairs:
                 if not isinstance(pair, (list, tuple)) or len(pair) != 2:
                     raise AstError('on 은 [["a.컬럼", "b.컬럼"]] 모양입니다')
-                left, right = (scope.raw(*scope.resolve(ref)[:2]) for ref in pair)
-                on.append(f"{left} = {right}")
+                sides = []
+                for ref in pair:
+                    alias, col, _ = scope.resolve(ref)
+                    sides.append(scope.raw(alias, col))
+                on.append(f"{sides[0]} = {sides[1]}")
             from_sql += f" {kind} {table_sql} ON {' AND '.join(on)}"
 
         select = ast.get("select") or []
@@ -279,7 +294,10 @@ class Compiler:
                     raise AstError(f"집계하지 않은 select 항목은 group_by 에 같은 식으로 있어야 합니다 -> {name}")
 
         head = "SELECT DISTINCT " if ast.get("distinct") else "SELECT "
-        parts = [head + ", ".join(f"{s} AS {d.q(n)}" for s, _, n in items), "FROM " + from_sql]
+        columns = []
+        for sql, _, name in items:
+            columns.append(f"{sql} AS {d.q(name)}")
+        parts = [head + ", ".join(columns), "FROM " + from_sql]
         where = self._conditions(ast.get("where"), scope, allow_agg=False)
         if where:
             parts.append("WHERE " + where)
@@ -335,7 +353,10 @@ class Compiler:
             return ""
         if not isinstance(items, list):
             raise AstError("where·having 은 조건 목록입니다")
-        return " AND ".join(self._condition(c, scope, allow_agg) for c in items)
+        out = []
+        for c in items:
+            out.append(self._condition(c, scope, allow_agg))
+        return " AND ".join(out)
 
     def _condition(self, c, scope: Scope, allow_agg: bool) -> str:
         if isinstance(c, dict) and ("or" in c or "and" in c):
@@ -343,7 +364,10 @@ class Compiler:
             group = c[key]
             if not isinstance(group, list) or not group:
                 raise AstError(f"{key} 는 조건 목록입니다")
-            joined = f" {key.upper()} ".join(self._condition(x, scope, allow_agg) for x in group)
+            out = []
+            for x in group:
+                out.append(self._condition(x, scope, allow_agg))
+            joined = f" {key.upper()} ".join(out)
             return f"({joined})" if len(group) > 1 else joined
         if not isinstance(c, dict) or "expr" not in c or "op" not in c:
             raise AstError('조건은 {"expr": 식, "op": "=", "value": 값} 입니다')
@@ -366,7 +390,10 @@ class Compiler:
         if op in ("in", "not_in", "between"):
             if not isinstance(value, list) or not value or (op == "between" and len(value) != 2):
                 raise AstError(f"{op} 의 value 는 값 목록입니다" + (" (두 개)" if op == "between" else ""))
-            return self._compare(left, op, [self._value(v, scope, allow_agg) for v in value])
+            right = []
+            for v in value:
+                right.append(self._value(v, scope, allow_agg))
+            return self._compare(left, op, right)
         if op in ("like", "not_like"):
             return f"{left} {'LIKE' if op == 'like' else 'NOT LIKE'} {self.dialect.literal(value)}"
         return self._compare(left, op, self._value(value, scope, allow_agg))
@@ -399,12 +426,16 @@ class Compiler:
     def _utc_values(self, value, hours: int):
         """현지 시각 상수를 UTC 로. 날짜·시각 상수가 아니면 None (그때는 컬럼을 보정해 비교한다)."""
         values = value if isinstance(value, list) else [value]
-        # 값을 {"str": "…"} 식으로 적어도 상수다
-        values = [v["str"] if isinstance(v, dict) and set(v) == {"str"} else v for v in values]
-        moments = [parse_datetime(v) if isinstance(v, str) else None for v in values]
-        if not values or any(m is None for m in moments):
+        if not values:
             return None
-        out = [self.dialect.add_interval(self.dialect.timestamp(m), -hours, "hours") for m in moments]
+        out = []
+        for v in values:
+            if isinstance(v, dict) and set(v) == {"str"}:
+                v = v["str"]  # 값을 {"str": "…"} 식으로 적어도 상수다
+            moment = parse_datetime(v) if isinstance(v, str) else None
+            if moment is None:
+                return None
+            out.append(self.dialect.add_interval(self.dialect.timestamp(moment), -hours, "hours"))
         return out if isinstance(value, list) else out[0]
 
     # ── 식 → (SQL, {agg, window, cols}) ──────────────────────────────────
@@ -432,7 +463,10 @@ class Compiler:
             raise AstError(f"{fn} 의 args 는 목록입니다")
 
         def subs(items, inside=in_agg):
-            return [self._expr(a, scope, inside) for a in items]
+            out = []
+            for a in items:
+                out.append(self._expr(a, scope, inside))
+            return out
 
         if fn in AGGREGATES:
             if in_agg:
@@ -450,7 +484,7 @@ class Compiler:
             if len(args) < 2:
                 raise AstError(f"{fn} 은 인자 둘 이상입니다")
             parts = subs(args)
-            return "(" + f" {ARITHMETIC[fn]} ".join(p[0] for p in parts) + ")", _merge(parts)
+            return "(" + f" {ARITHMETIC[fn]} ".join(_sqls(parts)) + ")", _merge(parts)
         if fn == "DIV":
             if len(args) != 2:
                 raise AstError("DIV 는 인자 둘입니다")
@@ -461,7 +495,7 @@ class Compiler:
             if not lo <= len(args) <= hi:
                 raise AstError(f"{fn} 은 인자 {lo}~{hi}개입니다")
             parts = subs(args)
-            return f"{fn}({', '.join(p[0] for p in parts)})", _merge(parts)
+            return f"{fn}({', '.join(_sqls(parts))})", _merge(parts)
         if fn == "DATE":
             if len(args) != 1:
                 raise AstError("DATE 는 인자 하나입니다")
@@ -497,7 +531,7 @@ class Compiler:
             order = self._order(e.get("order_by"), scope, [])
             if not order:
                 raise AstError("ROW_NUMBER 에는 order_by 가 필요합니다")
-            over = (f"PARTITION BY {', '.join(p[0] for p in part)} " if part else "") + "ORDER BY " + order
+            over = (f"PARTITION BY {', '.join(_sqls(part))} " if part else "") + "ORDER BY " + order
             return f"ROW_NUMBER() OVER ({over})", {**_merge(part), "window": True}
         known = sorted(AGGREGATES | set(ARITHMETIC) | set(SCALARS) | OTHER_FUNCTIONS)
         raise AstError(f"모르는 함수입니다 -> {fn} (쓸 수 있는 것: {', '.join(known)})")
@@ -539,7 +573,9 @@ class Compiler:
                 continue  # 모양 오류는 _condition 이 알린다
             parts.append(self._expr(c["expr"], scope))
             values = c.get("value") if isinstance(c.get("value"), list) else [c.get("value")]
-            parts += [self._expr(v, scope) for v in values if isinstance(v, dict)]
+            for v in values:
+                if isinstance(v, dict):
+                    parts.append(self._expr(v, scope))
         return _merge(parts) if parts else _info()
 
 

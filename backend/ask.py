@@ -1,7 +1,8 @@
 """질문 하나를 처리한다: 테이블 선택(지표 필요 판단) → AST 생성(LLM) → 컴파일(조합·검증).
 
 지표가 필요한 질문인데 맞는 지표가 없으면 SQL 을 만들지 않고 '지표 등록이 필요합니다' 로 끝난다.
-지표를 쓰면 그 지표의 AST 를 LLM 에 주고 질문에 맞게 조건만 바꾸게 한다.
+지표를 쓰면 고른 지표(질문이 묻는 계산마다 하나)의 AST 를 모두 LLM 에 주고,
+질문에 맞게 조건만 바꾸거나 지표들의 계산 식을 한 AST 로 합치게 한다.
 """
 
 import datetime
@@ -56,6 +57,12 @@ METRIC_GUIDE = """[지표] {name} — {description}
 {ast}
 이 지표의 AST 를 바탕으로 질문에 맞게 기간·조건·묶음·정렬·개수만 바꾸십시오. 계산 부분(select 의 식)은 그대로 둡니다."""
 
+METRICS_RULE = """[지표 여러 개]
+위 지표들의 계산 식을 한 AST 에 합칩니다.
+- 묶음(group_by)과 기간이 같으면 각 지표의 select 계산 식을 그대로 옮겨 나란히 둡니다.
+- 질문이 지표끼리의 계산(차이, 합, 비율)을 물으면 각 지표의 계산 식을 그대로 SUB, ADD, DIV 의 인자로 씁니다.
+- 지표에 없는 새 계산([계산 필요] 컬럼의 집계)은 만들지 않습니다. 결과 이름("as")은 그 지표가 뜻하는 값으로 붙입니다."""
+
 
 def column_line(c: dict, driver: str) -> str:
     note = " ".join(str(c.get("description") or "").split())
@@ -64,7 +71,7 @@ def column_line(c: dict, driver: str) -> str:
     return f"  - {c['name']} ({c.get('type', '')}){': ' + note if note else ''}"
 
 
-def ast_prompt(contract: dict, tables: list, metric: dict | None, now: datetime.datetime) -> tuple[str, str]:
+def ast_prompt(contract: dict, tables: list, metrics: list, now: datetime.datetime) -> tuple[str, str]:
     """→ (시스템 프롬프트, 사용자 메시지 앞부분)"""
     driver = contract.get("driver") or "postgresql"
     today = f"{now:%Y-%m-%d} ({'월화수목금토일'[now.weekday()]}요일) 현재 시각 {now:%H:%M}"
@@ -74,19 +81,23 @@ def ast_prompt(contract: dict, tables: list, metric: dict | None, now: datetime.
     for t in contract["tables"]:
         if t["name"] in tables:
             note = t.get("purpose") or t.get("description") or ""
-            lines = "\n".join(column_line(c, driver) for c in t["columns"])
-            blocks.append(f"[{t['name']}] {' '.join(note.split())}\n{lines}")
+            lines = []
+            for c in t["columns"]:
+                lines.append(column_line(c, driver))
+            blocks.append(f"[{t['name']}] {' '.join(note.split())}\n" + "\n".join(lines))
     for r in contract.get("relations") or []:
         if r["left_table"] in tables and r["right_table"] in tables:
             blocks.append(f"[관계] {r['left_table']}.{r['left_column']} = {r['right_table']}.{r['right_column']}")
     user = "[테이블]\n" + "\n\n".join(blocks)
-    if metric:
+    for metric in metrics:
         user += "\n\n" + METRIC_GUIDE.format(
             name=metric["name"],
             description=" ".join(str(metric.get("description") or "").split()) or "(설명 없음)",
             sql=metric["sql"],
             ast=json.dumps(metric["ast"], ensure_ascii=False),
         )
+    if len(metrics) > 1:
+        user += "\n\n" + METRICS_RULE
     return system, user
 
 
@@ -113,18 +124,23 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
         outcome["error"] = str(error)
         return outcome
     outcome["tables"] = selection.tables
-    outcome["metrics"] = [selection.metric] if selection.metric else []
+    outcome["metrics"] = list(selection.metrics)
     outcome["steps"].append(selection.step.as_dict())
     if selection.clarification:
         outcome["clarification"] = selection.clarification
         return _with_tokens(outcome)
-    if selection.needs_metric and not selection.metric:
+    if selection.needs_metric and not selection.metrics:
         outcome["needs_metric"] = True
         outcome["error"] = f"지표 등록이 필요합니다 — {selection.reason or '계산이 필요한 질문인데 맞는 지표가 없습니다'}"
         return _with_tokens(outcome)
 
-    metric = next((m for m in contract.get("metrics") or [] if m["name"] == selection.metric), None)
-    system, user = ast_prompt(contract, selection.tables, metric, now or datetime.datetime.now())
+    metrics = []
+    for name in selection.metrics:
+        for m in contract.get("metrics") or []:
+            if m["name"] == name:
+                metrics.append(m)
+                break
+    system, user = ast_prompt(contract, selection.tables, metrics, now or datetime.datetime.now())
     messages = [SystemMessage(system), HumanMessage(f"{user}\n\n[질문]\n{question}")]
     compiler = Compiler(contract)
     step = Step("sql", model=model_name(model))
@@ -152,5 +168,8 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
 
 
 def _with_tokens(outcome: dict) -> dict:
-    outcome["total_tokens"] = sum(s["prompt_tokens"] + s["completion_tokens"] for s in outcome["steps"])
+    total = 0
+    for s in outcome["steps"]:
+        total += s["prompt_tokens"] + s["completion_tokens"]
+    outcome["total_tokens"] = total
     return outcome

@@ -71,9 +71,7 @@ def load_relations(system_id: UUID, tables: dict) -> list[dict]:
         right = tables.get(r["right_table"])
         if not left or not right:
             continue
-        if r["left_column"] not in {c["name"] for c in left["columns"]}:
-            continue
-        if r["right_column"] not in {c["name"] for c in right["columns"]}:
+        if not _has_column(left, r["left_column"]) or not _has_column(right, r["right_column"]):
             continue
         out.append(
             {
@@ -86,6 +84,13 @@ def load_relations(system_id: UUID, tables: dict) -> list[dict]:
             }
         )
     return out
+
+
+def _has_column(table: dict, name: str) -> bool:
+    for c in table["columns"]:
+        if c["name"] == name:
+            return True
+    return False
 
 
 def load_metric_rows(system_id: UUID) -> list[dict]:
@@ -135,11 +140,10 @@ def load_contract(system_id: UUID, active_only: bool = False) -> dict:
             400,
             f"'{row['name']}'의 스키마가 비어 있습니다. 시스템 화면에서 동기화를 먼저 실행하십시오",
         )
-    metrics = [
-        metric_entry(m)
-        for m in load_metric_rows(system_id)
-        if not active_only or m["status"] == "active"
-    ]
+    metrics = []
+    for m in load_metric_rows(system_id):
+        if not active_only or m["status"] == "active":
+            metrics.append(metric_entry(m))
     return {
         "name": row["name"],
         "code": row["code"],

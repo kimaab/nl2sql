@@ -301,6 +301,11 @@ def post_ask(req: AskRequest):
         f" detail={outcome['error']}" if result in ("fail", "needs_metric") else "",
     )
     entry_id = record_ask(req.system_id, req.question, outcome, elapsed_ms)
+    steps = []
+    for s in outcome["steps"]:
+        fields = dict(s)
+        fields.pop("model", None)
+        steps.append(AskStep(**fields))
     return AskResponse(
         id=entry_id,
         sql=outcome["sql"],
@@ -310,10 +315,7 @@ def post_ask(req: AskRequest):
         selected_tables=outcome["tables"],
         selected_metrics=outcome["metrics"],
         needs_metric=outcome["needs_metric"],
-        steps=[
-            AskStep(**{k: v for k, v in s.items() if k != "model"})
-            for s in outcome["steps"]
-        ],
+        steps=steps,
     )
 
 

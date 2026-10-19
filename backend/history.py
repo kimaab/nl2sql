@@ -39,13 +39,9 @@ def record_ask(
                         int(elapsed_ms),
                     ),
                 )
-                cur.executemany(
-                    """
-                    INSERT INTO ask_trace (ask_id, stage, candidates, selected, reason, prompt_tokens,
-                                           completion_tokens, elapsed_ms, model)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                    [
+                trace_rows = []
+                for s in outcome.get("steps", []):
+                    trace_rows.append(
                         (
                             str(entry_id),
                             s["stage"],
@@ -57,8 +53,14 @@ def record_ask(
                             s["elapsed_ms"],
                             s["model"],
                         )
-                        for s in outcome.get("steps", [])
-                    ],
+                    )
+                cur.executemany(
+                    """
+                    INSERT INTO ask_trace (ask_id, stage, candidates, selected, reason, prompt_tokens,
+                                           completion_tokens, elapsed_ms, model)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                    trace_rows,
                 )
     except Exception:
         log.exception("질문 기록 실패: %r", question)
@@ -89,7 +91,10 @@ def list_history(
         min(max(limit, 1), 500),
         max(offset, 0),
     )
-    return [_row_to_entry(r) for r in rows]
+    entries = []
+    for r in rows:
+        entries.append(_row_to_entry(r))
+    return entries
 
 
 def get_history(entry_id: UUID) -> HistoryEntry:
@@ -110,18 +115,20 @@ def get_trace(entry_id: UUID) -> list[AskStep]:
     rows = db.query(
         "SELECT * FROM ask_trace WHERE ask_id = %s ORDER BY id", str(entry_id)
     )
-    return [
-        AskStep(
-            stage=r["stage"],
-            candidates=r["candidates"],
-            selected=r["selected"],
-            reason=r["reason"],
-            prompt_tokens=r["prompt_tokens"],
-            completion_tokens=r["completion_tokens"],
-            elapsed_ms=r["elapsed_ms"],
+    steps = []
+    for r in rows:
+        steps.append(
+            AskStep(
+                stage=r["stage"],
+                candidates=r["candidates"],
+                selected=r["selected"],
+                reason=r["reason"],
+                prompt_tokens=r["prompt_tokens"],
+                completion_tokens=r["completion_tokens"],
+                elapsed_ms=r["elapsed_ms"],
+            )
         )
-        for r in rows
-    ]
+    return steps
 
 
 def patch_history(entry_id: UUID, patch: HistoryPatch) -> HistoryEntry:
@@ -162,18 +169,13 @@ def export_eval_cases(system_id: UUID) -> dict:
     """,
         str(system_id),
     )
-    return {
-        "system": system["name"],
-        "cases": [
-            {
-                "question": r["question"],
-                "ast": r["ast"],
-                "expected_sql": r["sql"],
-                **({"note": r["feedback_note"]} if r["feedback_note"] else {}),
-            }
-            for r in rows
-        ],
-    }
+    cases = []
+    for r in rows:
+        case = {"question": r["question"], "ast": r["ast"], "expected_sql": r["sql"]}
+        if r["feedback_note"]:
+            case["note"] = r["feedback_note"]
+        cases.append(case)
+    return {"system": system["name"], "cases": cases}
 
 
 def _row_to_entry(row: dict) -> HistoryEntry:

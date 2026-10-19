@@ -30,14 +30,17 @@ STAGE_LABEL = {"parse": "AST 변환 실패", "compile": "컴파일 실패", "ver
 def list_metrics(system_id: UUID) -> list[Metric]:
     rows = load_metric_rows(system_id)
     compiler = _compiler(system_id)
-    return [_row_to_metric(r, compiler) for r in sorted(rows, key=lambda r: r["created_at"], reverse=True)]
+    metrics = []
+    for r in sorted(rows, key=lambda r: r["created_at"], reverse=True):
+        metrics.append(_row_to_metric(r, compiler))
+    return metrics
 
 
 def get_metric(system_id: UUID, metric_id: UUID) -> Metric:
-    row = next((r for r in load_metric_rows(system_id) if str(r["id"]) == str(metric_id)), None)
-    if row is None:
-        raise ApiException(404, "지표를 찾을 수 없습니다")
-    return _row_to_metric(row, _compiler(system_id))
+    for row in load_metric_rows(system_id):
+        if str(row["id"]) == str(metric_id):
+            return _row_to_metric(row, _compiler(system_id))
+    raise ApiException(404, "지표를 찾을 수 없습니다")
 
 
 # ── 등록 전 확인: SQL → AST → SQL → 결과 비교 ──────────────────────────────
@@ -147,7 +150,10 @@ def _snapshot(row: dict):
             rows = cur.fetchmany(MAX_COMPARE_ROWS + 1)
             if len(rows) > MAX_COMPARE_ROWS:
                 raise ValueError(f"결과가 {MAX_COMPARE_ROWS:,}행을 넘어 비교할 수 없습니다 — 기간을 좁혀 등록하십시오")
-            return len(rows), sorted(repr(tuple(r)) for r in rows)
+            printed = []
+            for r in rows:
+                printed.append(repr(tuple(r)))
+            return len(rows), sorted(printed)
         except ValueError:
             raise
         except psycopg.errors.QueryCanceled:
@@ -241,15 +247,17 @@ def list_metric_history(system_id: UUID, metric_id: UUID) -> list[MetricHistoryE
         str(system_id),
         str(metric_id),
     )
-    return [
-        MetricHistoryEntry(
-            version=r["version"],
-            action=r["action"],
-            snapshot=r["snapshot"],
-            created_at=r["created_at"].isoformat(),
+    entries = []
+    for r in rows:
+        entries.append(
+            MetricHistoryEntry(
+                version=r["version"],
+                action=r["action"],
+                snapshot=r["snapshot"],
+                created_at=r["created_at"].isoformat(),
+            )
         )
-        for r in rows
-    ]
+    return entries
 
 
 def refresh_statuses(system_id: UUID) -> list[dict]:
@@ -296,14 +304,11 @@ def _save_tables(cur, system_id: UUID, metric_id: UUID, names: list[str]) -> Non
     """지표가 쓰는 테이블. 질문 처리에서 테이블마다 지표 설명을 붙일 때 쓴다."""
     tables = load_tables(system_id)
     cur.execute("DELETE FROM metric_table WHERE metric_id = %s", (str(metric_id),))
-    cur.executemany(
-        "INSERT INTO metric_table (metric_id, table_id, role) VALUES (%s, %s, %s)",
-        [
-            (str(metric_id), tables[n]["id"], "base" if i == 0 else "join")
-            for i, n in enumerate(names)
-            if n in tables
-        ],
-    )
+    links = []
+    for i, n in enumerate(names):
+        if n in tables:
+            links.append((str(metric_id), tables[n]["id"], "base" if i == 0 else "join"))
+    cur.executemany("INSERT INTO metric_table (metric_id, table_id, role) VALUES (%s, %s, %s)", links)
 
 
 def _record_history(cur, system_id: UUID, metric_id: UUID, version: int, action: str) -> None:
