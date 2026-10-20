@@ -57,6 +57,8 @@ export function AskPage() {
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  // Superset 링크를 만드는 중인 버튼 ("답 번호.종류")
+  const [opening, setOpening] = useState<string | null>(null);
   // 지표 초안 모달: 어느 질문의 어느 계산인지
   const [drafting, setDrafting] = useState<{ systemId: string; question: string; missing: api.MissingMetric } | null>(
     null
@@ -95,11 +97,18 @@ export function AskPage() {
     }
   }
 
-  async function openSuperset(entry: Entry) {
+  async function openSuperset(index: number, kind: "sqllab" | "chart") {
+    const entry = history[index];
     // 링크를 받은 뒤 window.open 하면 팝업 차단에 걸린다 — 클릭하는 순간 빈 창을 먼저 연다
     const win = window.open("", "_blank");
+    console.log()
+    setOpening(`${index}.${kind}`);
     try {
-      const { url } = await api.openInSqlLab(entry.systemId, entry.sql!, entry.question);
+      // 차트는 Superset 이 SQL 을 한 번 실행해 결과 컬럼을 읽은 뒤 종류를 정한다 — 몇 초 걸린다
+      const { url } =
+        kind === "chart"
+          ? await api.createSupersetChart(entry.systemId, entry.sql!, entry.question)
+          : await api.openInSqlLab(entry.systemId, entry.sql!, entry.question);
       if (win) {
         win.opener = null;
         win.location.href = url;
@@ -108,7 +117,13 @@ export function AskPage() {
       }
     } catch (err) {
       win?.close();
-      toast("Superset 링크를 만들지 못했습니다: " + errorMessage(err), "error");
+      toast(
+        (kind === "chart" ? "Superset 차트를 만들지 못했습니다: " : "Superset 링크를 만들지 못했습니다: ") +
+          errorMessage(err),
+        "error"
+      );
+    } finally {
+      setOpening(null);
     }
   }
 
@@ -269,9 +284,24 @@ export function AskPage() {
                     </>
                   )}
                   {entry.sql && linked.has(entry.systemId) && (
-                    <Button size="sm" title="Superset SQL Lab 에 SQL 을 열어 둡니다" onClick={() => openSuperset(entry)}>
-                      Superset에서 열기
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        title="결과 모양으로 차트 종류를 정해 Superset 차트를 만듭니다. 같은 SQL 이면 전에 만든 차트를 엽니다"
+                        disabled={opening !== null}
+                        onClick={() => openSuperset(i, "chart")}
+                      >
+                        {opening === `${i}.chart` ? "차트 만드는 중..." : "차트 만들기"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        title="Superset SQL Lab 에 SQL 을 열어 둡니다"
+                        disabled={opening !== null}
+                        onClick={() => openSuperset(i, "sqllab")}
+                      >
+                        Superset에서 열기
+                      </Button>
+                    </>
                   )}
                   {entry.sql && (
                     <Button size="sm" onClick={() => copySql(i, entry.sql!)}>

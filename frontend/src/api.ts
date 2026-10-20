@@ -270,6 +270,11 @@ export const syncSystem = (id: string) => request<SyncResult>(`/systems/${id}/sy
 export const linkSuperset = (id: string) => request<System>(`/systems/${id}/superset`, { method: "POST" });
 export const openInSqlLab = (id: string, sql: string, name: string) =>
   request<{ url: string }>(`/systems/${id}/superset/sqllab`, { method: "POST", body: { sql, name } });
+export const createSupersetChart = (id: string, sql: string, name: string) =>
+  request<{ url: string; viz_type: string; dataset_id: number; chart_id: number }>(`/systems/${id}/superset/chart`, {
+    method: "POST",
+    body: { sql, name },
+  });
 export const listSyncLogs = (systemId?: string, limit = 100) =>
   request<SyncLog[]>(`/sync-logs${q({ system_id: systemId, limit })}`);
 export const getSchema = (id: string) => request<{ tables: SchemaTable[] }>(`/systems/${id}/schema`);

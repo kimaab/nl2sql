@@ -282,6 +282,15 @@ class SqlLabLink(BaseModel):
     url: str
 
 
+class SupersetChart(BaseModel):
+    """Superset 에 만든 차트. url 은 차트 편집 화면(Explore), viz_type 은 고른 차트 종류."""
+
+    url: str
+    viz_type: str
+    dataset_id: int
+    chart_id: int
+
+
 class CompileRequest(BaseModel):
     ast: dict
 

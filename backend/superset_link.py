@@ -7,6 +7,8 @@ Superset 의 연결 id 는 meta_system.superset_database_id 에 남긴다 — 'S
 설정 (backend/.env): SUPERSET_URL, SUPERSET_USERNAME, SUPERSET_PASSWORD
 """
 
+import hashlib
+import json
 import logging
 import os
 from urllib.parse import quote
@@ -58,11 +60,7 @@ def sqllab_link(system_id: UUID, sql: str, name: str = "") -> str:
 
     SQL 을 URL 에 싣지 않고 Superset 의 permalink 로 저장한다 — 긴 SQL 도 잘리지 않는다.
     """
-    row = db.one("SELECT name, db_schema, superset_database_id FROM meta_system WHERE id = %s", str(system_id))
-    if row is None:
-        raise ApiException(404, "시스템을 찾을 수 없습니다")
-    if not row["superset_database_id"]:
-        raise ApiException(400, f"{row['name']} 은 아직 Superset 에 연결하지 않았습니다 (시스템 목록의 Superset 연결)")
+    row = _linked(system_id)
     state = {
         "dbId": row["superset_database_id"],
         "sql": sql,
@@ -75,6 +73,183 @@ def sqllab_link(system_id: UUID, sql: str, name: str = "") -> str:
     key = api.call("POST", "/api/v1/sqllab/permalink", json=state)["key"]
     # 응답의 url 은 Superset 이 요청받은 호스트로 만든다 — 브라우저가 여는 주소는 SUPERSET_URL 로 맞춘다
     return f"{api.base}/sqllab/p/{key}"
+
+
+def create_chart(system_id: UUID, sql: str, name: str = "") -> dict:
+    """SQL 로 Superset 차트를 만들고 그 편집 화면(Explore) 링크를 돌려준다. → {url, viz_type, dataset_id, chart_id}
+
+    1. SQL 을 가상 데이터셋으로 등록한다. Superset 이 SQL 을 실행해 결과 컬럼과 타입을 읽는다.
+    2. 컬럼 모양으로 차트 종류를 정해 차트를 저장한다 (chart_params).
+    같은 SQL 이면 데이터셋과 차트를 새로 만들지 않고 전에 만든 것을 연다 — 질문을 다시 해도 쌓이지 않는다.
+    """
+    row = _linked(system_id)
+    sql = sql.strip().rstrip(";").strip()  # 가상 데이터셋은 문장 하나만 받는다
+    title = (name or row["name"]).strip()[:80]
+    api = _Api()
+    dataset_id = _dataset(api, row, sql, title)
+    columns = api.call("GET", f"/api/v1/dataset/{dataset_id}")["result"]["columns"]
+    viz_type, params = chart_params(dataset_id, columns)
+    chart_id = _chart(api, dataset_id, title, viz_type, params)
+    return {
+        "url": f"{api.base}/explore/?slice_id={chart_id}",
+        "viz_type": viz_type,
+        "dataset_id": dataset_id,
+        "chart_id": chart_id,
+    }
+
+
+def chart_params(dataset_id: int, columns: list[dict]) -> tuple[str, dict]:
+    """결과 컬럼 모양으로 차트 종류와 설정을 정한다.
+
+    시각 + 숫자 → 선 차트 (문자 컬럼이 있으면 그 값마다 선 하나)
+    문자 + 숫자 → 막대 차트
+    숫자 하나만 → 큰 숫자
+    그 밖 → 표 (숫자 컬럼이 MAX_METRICS 보다 많을 때도)
+    생성된 SQL 은 이미 집계한 결과라 차트는 다시 묶지 않는다 — 같은 칸에 한 행이면 SUM 이 그 값이다.
+    """
+    times, numbers, texts = [], [], []
+    for c in columns:
+        kind = _kind(c)
+        if kind == "time":
+            times.append(c["column_name"])
+        elif kind == "number":
+            numbers.append(c["column_name"])
+        else:
+            texts.append(c["column_name"])
+    base = {"datasource": f"{dataset_id}__table", "adhoc_filters": [], "row_limit": ROW_LIMIT}
+    # 숫자 컬럼이 많으면 대개 원본 행 조회다 — 한 차트에 다 그리면 읽을 수 없어 표로 둔다
+    plottable = 0 < len(numbers) <= MAX_METRICS
+
+    if times and plottable:
+        params = {
+            **base,
+            "viz_type": "echarts_timeseries_line",
+            "x_axis": times[0],
+            "time_grain_sqla": None,  # 결과의 시각을 그대로 쓴다
+            "metrics": _metrics(numbers),
+            "groupby": texts[:1],
+            # 선이 너무 많으면 첫 숫자 컬럼 합이 큰 SERIES_LIMIT 개만 그린다 (기준 지표가 없으면 제한이 먹지 않는다)
+            "limit": SERIES_LIMIT if texts else None,  # 화면의 Series limit
+            "timeseries_limit_metric": _metrics(numbers)[0],  # 화면의 Sort query by
+            "order_desc": True,
+            "show_legend": True,
+            "rich_tooltip": True,
+        }
+        return "echarts_timeseries_line", params
+    if texts and plottable:
+        params = {
+            **base,
+            "viz_type": "echarts_timeseries_bar",
+            "x_axis": texts[0],
+            "metrics": _metrics(numbers),
+            "groupby": texts[1:2],
+            # 값이 큰 막대부터
+            "x_axis_sort": numbers[0],
+            "x_axis_sort_asc": False,
+            "show_legend": True,
+            "rich_tooltip": True,
+        }
+        return "echarts_timeseries_bar", params
+    if len(numbers) == 1 and len(columns) == 1:
+        params = {**base, "viz_type": "big_number_total", "metric": _metrics(numbers)[0]}
+        return "big_number_total", params
+    all_columns = []
+    for c in columns:
+        all_columns.append(c["column_name"])
+    params = {**base, "viz_type": "table", "query_mode": "raw", "all_columns": all_columns}
+    return "table", params
+
+
+# 차트가 읽을 최대 행 수, 선 차트에서 그릴 최대 선 수 (값이 큰 순)
+ROW_LIMIT = 10000
+SERIES_LIMIT = 20
+# 한 차트에 그릴 최대 숫자 컬럼 수
+MAX_METRICS = 3
+# Superset 의 GenericDataType: 0 숫자, 1 문자, 2 시각, 3 참거짓
+_GENERIC = {0: "number", 1: "text", 2: "time", 3: "text"}
+
+
+def _kind(column: dict) -> str:
+    if column.get("is_dttm"):
+        return "time"
+    generic = column.get("type_generic")
+    if generic in _GENERIC:
+        return _GENERIC[generic]
+    type_name = (column.get("type") or "").upper()
+    for word in ("INT", "NUMERIC", "DECIMAL", "DOUBLE", "FLOAT", "REAL"):
+        if word in type_name:
+            return "number"
+    return "text"
+
+
+def _metrics(numbers: list[str]) -> list[dict]:
+    out = []
+    for name in numbers:
+        out.append(
+            {
+                "expressionType": "SIMPLE",
+                "column": {"column_name": name},
+                "aggregate": "SUM",
+                "label": name,
+                "hasCustomLabel": True,
+                "optionName": f"metric_{name}",
+            }
+        )
+    return out
+
+
+def _dataset(api: "_Api", row: dict, sql: str, title: str) -> int:
+    """SQL 의 가상 데이터셋 id. 이름에 SQL 해시를 넣어 같은 SQL 이면 전에 만든 것을 쓴다."""
+    table_name = f"nl2sql {title} [{hashlib.sha1(sql.encode()).hexdigest()[:10]}]"
+    found = api.call(
+        "GET",
+        "/api/v1/dataset/",
+        params={"q": f"(filters:!((col:table_name,opr:eq,value:{_rison(table_name)})),page_size:1)"},
+    )
+    for d in found.get("result") or []:
+        return d["id"]
+    body = {"database": row["superset_database_id"], "table_name": table_name, "sql": sql}
+    if row["db_schema"]:
+        body["schema"] = row["db_schema"]
+    dataset_id = api.call("POST", "/api/v1/dataset/", json=body)["id"]
+    log.info("superset dataset created: %s → #%s", table_name, dataset_id)
+    return dataset_id
+
+
+def _chart(api: "_Api", dataset_id: int, title: str, viz_type: str, params: dict) -> int:
+    """데이터셋의 차트 id. 이 데이터셋으로 만든 차트가 있으면 그것을 연다 (사람이 고친 설정을 덮지 않는다)."""
+    found = api.call(
+        "GET",
+        "/api/v1/chart/",
+        params={"q": f"(filters:!((col:datasource_id,opr:eq,value:{dataset_id})),page_size:1)"},
+    )
+    for c in found.get("result") or []:
+        return c["id"]
+    body = {
+        "slice_name": title,
+        "viz_type": viz_type,
+        "datasource_id": dataset_id,
+        "datasource_type": "table",
+        "params": json.dumps(params, ensure_ascii=False),
+    }
+    chart_id = api.call("POST", "/api/v1/chart/", json=body)["id"]
+    log.info("superset chart created: %s (%s) → #%s", title, viz_type, chart_id)
+    return chart_id
+
+
+def _rison(text: str) -> str:
+    """rison 문자열 (Superset 목록 API 의 q 인자)"""
+    return "'" + text.replace("!", "!!").replace("'", "!'") + "'"
+
+
+def _linked(system_id: UUID) -> dict:
+    """Superset 에 연결한 시스템 행. 연결하지 않았으면 400."""
+    row = db.one("SELECT name, db_schema, superset_database_id FROM meta_system WHERE id = %s", str(system_id))
+    if row is None:
+        raise ApiException(404, "시스템을 찾을 수 없습니다")
+    if not row["superset_database_id"]:
+        raise ApiException(400, f"{row['name']} 은 아직 Superset 에 연결하지 않았습니다 (시스템 목록의 Superset 연결)")
+    return row
 
 
 def _uri(scheme: str, row: dict) -> str:

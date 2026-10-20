@@ -38,6 +38,7 @@ from models import (
     RelationInput,
     SqlLabLink,
     SqlLabRequest,
+    SupersetChart,
     SyncLog,
     SyncResult,
     System,
@@ -82,7 +83,7 @@ from contract import load_contract
 from compiler import Compiler
 from ask import run_question
 from metric_draft import draft_metric
-from superset_link import link_database, sqllab_link
+from superset_link import create_chart, link_database, sqllab_link
 from llm import make_model
 from scheduler import AutoSync
 
@@ -177,6 +178,12 @@ def post_superset(system_id: UUID):
 @app.post("/api/systems/{system_id}/superset/sqllab", response_model=SqlLabLink)
 def post_superset_sqllab(system_id: UUID, req: SqlLabRequest):
     return SqlLabLink(url=sqllab_link(system_id, req.sql, req.name))
+
+
+# 생성한 SQL 로 Superset 차트를 만든다. 결과 컬럼 모양으로 차트 종류를 정하고, 같은 SQL 이면 전에 만든 차트를 연다.
+@app.post("/api/systems/{system_id}/superset/chart", response_model=SupersetChart)
+def post_superset_chart(system_id: UUID, req: SqlLabRequest):
+    return SupersetChart(**create_chart(system_id, req.sql, req.name))
 
 
 @app.get("/api/sync-logs", response_model=list[SyncLog])

@@ -163,3 +163,76 @@ def test_sqllab_link_needs_superset_connection(monkeypatch):
     with pytest.raises(ApiException) as caught:
         superset_link.sqllab_link("sid", "SELECT 1")
     assert "Superset 에 연결하지 않았습니다" in caught.value.detail
+
+
+def col(name, generic, is_dttm=False):
+    return {"column_name": name, "type_generic": generic, "is_dttm": is_dttm}
+
+
+def test_chart_kind_follows_result_columns():
+    viz, params = superset_link.chart_params(3, [col("day", 2, True), col("vehicle_id", 1), col("wk_area", 0)])
+    assert viz == "echarts_timeseries_line"
+    assert params["x_axis"] == "day" and params["groupby"] == ["vehicle_id"]
+    assert params["metrics"][0]["column"] == {"column_name": "wk_area"}
+    assert params["limit"] == superset_link.SERIES_LIMIT and params["datasource"] == "3__table"
+
+    viz, params = superset_link.chart_params(3, [col("vehicle_id", 1), col("n", 0)])
+    assert viz == "echarts_timeseries_bar" and params["x_axis"] == "vehicle_id"
+    assert params["x_axis_sort"] == "n" and params["x_axis_sort_asc"] is False
+
+    viz, params = superset_link.chart_params(3, [col("vehicles", 0)])
+    assert viz == "big_number_total" and params["metric"]["label"] == "vehicles"
+
+    # 숫자 컬럼이 많으면 원본 행 조회로 보고 표로 둔다
+    many = [col("t", 2, True), col("vehicle_id", 1), col("a", 0), col("b", 0), col("c", 0), col("d", 0)]
+    viz, params = superset_link.chart_params(3, many)
+    assert viz == "table" and params["all_columns"] == ["t", "vehicle_id", "a", "b", "c", "d"]
+
+
+def test_type_name_is_used_when_generic_type_is_missing():
+    viz, _ = superset_link.chart_params(3, [{"column_name": "k", "type": "VARCHAR"}, {"column_name": "v", "type": "BIGINT"}])
+    assert viz == "echarts_timeseries_bar"
+
+
+def test_create_chart_reuses_dataset_and_chart_of_same_sql(monkeypatch):
+    session, _ = setup(
+        monkeypatch,
+        {
+            ("GET", "/api/v1/dataset/"): (200, {"result": [{"id": 11}]}),
+            ("GET", "/api/v1/dataset/11"): (200, {"result": {"columns": [col("vehicles", 0)]}}),
+            ("GET", "/api/v1/chart/"): (200, {"result": [{"id": 10}]}),
+        },
+    )
+    monkeypatch.setattr(
+        superset_link.db, "one", lambda sql, *args: {"name": "A", "db_schema": "public", "superset_database_id": 1}
+    )
+    out = superset_link.create_chart("sid", "SELECT count(*) AS vehicles FROM t;", "차량 수")
+    assert out == {"url": "http://superset:8088/explore/?slice_id=10", "viz_type": "big_number_total", "dataset_id": 11, "chart_id": 10}
+    for method, path, body, headers in session.calls:
+        assert method == "GET" or path.startswith("/api/v1/security")
+
+
+def test_create_chart_makes_dataset_and_chart(monkeypatch):
+    session, _ = setup(
+        monkeypatch,
+        {
+            ("GET", "/api/v1/dataset/"): (200, {"result": []}),
+            ("POST", "/api/v1/dataset/"): (201, {"id": 12}),
+            ("GET", "/api/v1/dataset/12"): (200, {"result": {"columns": [col("k", 1), col("v", 0)]}}),
+            ("GET", "/api/v1/chart/"): (200, {"result": []}),
+            ("POST", "/api/v1/chart/"): (201, {"id": 20}),
+        },
+    )
+    monkeypatch.setattr(
+        superset_link.db, "one", lambda sql, *args: {"name": "A", "db_schema": "public", "superset_database_id": 1}
+    )
+    out = superset_link.create_chart("sid", "SELECT k, v FROM t;", "it's 차트!")
+    assert out["chart_id"] == 20 and out["viz_type"] == "echarts_timeseries_bar"
+    dataset_body = session.calls[3][2]
+    # 끝의 ; 는 떼고, 이름에 SQL 해시를 넣는다
+    assert dataset_body["sql"] == "SELECT k, v FROM t" and dataset_body["schema"] == "public"
+    assert dataset_body["table_name"].startswith("nl2sql it's 차트! [")
+    # 목록 검색의 rison 문자열은 ' 와 ! 를 ! 로 이스케이프한다
+    assert superset_link._rison("it's 차트!") == "'it!'s 차트!!'"
+    chart_body = session.calls[-1][2]
+    assert chart_body["datasource_id"] == 12 and chart_body["slice_name"] == "it's 차트!"
