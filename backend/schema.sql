@@ -84,20 +84,6 @@ CREATE TABLE IF NOT EXISTS metric (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (system_id, name)
 );
--- 예전 형식(테이블 · 디멘젼 · 계산식) 지표는 옮기지 않고 지운다 — SQL 로 다시 등록한다. 정의는 metric_history 에 남아 있다.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'metric' AND column_name = 'base_table_id') THEN
-        DELETE FROM metric;
-        ALTER TABLE metric
-            DROP COLUMN kind, DROP COLUMN base_table_id, DROP COLUMN joins, DROP COLUMN agg_field,
-            DROP COLUMN agg_function, DROP COLUMN select_columns, DROP COLUMN expression, DROP COLUMN series,
-            DROP COLUMN IF EXISTS measures, DROP COLUMN fixed_filters, DROP COLUMN IF EXISTS dimensions,
-            ADD COLUMN source_sql TEXT NOT NULL, ADD COLUMN ast JSONB NOT NULL;
-        ALTER TABLE metric ALTER COLUMN status SET DEFAULT 'active';
-    END IF;
-END $$;
 CREATE INDEX IF NOT EXISTS idx_metric_active ON metric (system_id) WHERE status = 'active';
 
 -- 지표가 쓰는 테이블. 테이블 선택 단계에서 테이블마다 지표 설명을 붙일 때 쓴다.
@@ -172,13 +158,3 @@ CREATE TABLE IF NOT EXISTS ask_trace (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_ask_trace_ask ON ask_trace (ask_id, stage);
-
--- 정리: 쓰지 않게 된 표 · 컬럼을 지운다 (이미 지웠으면 아무 일도 하지 않는다)
-DROP TABLE IF EXISTS eval_result, eval_run, eval_case, enrich_job, glossary, metric_example,
-                     metric_formula, formula, ask_log_v1;
-ALTER TABLE meta_table
-    DROP COLUMN IF EXISTS card, DROP COLUMN IF EXISTS card_line,
-    DROP COLUMN IF EXISTS card_status, DROP COLUMN IF EXISTS card_source_hash;
-ALTER TABLE meta_column DROP COLUMN IF EXISTS synonyms, DROP COLUMN IF EXISTS codes;
-ALTER TABLE metric_table DROP COLUMN IF EXISTS origin;
-ALTER TABLE metric_history DROP COLUMN IF EXISTS actor;
