@@ -15,14 +15,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 log = logging.getLogger("nl2sql.selector")
 
 LLM_LOG = "[LLM 연동]"
-STAGE_NAMES = {"table": "테이블 선택", "sql": "조회 명세"}
+STAGE_NAMES = {"table": "테이블 선택", "sql": "조회 명세", "draft": "지표 초안"}
 
 
 @dataclass
 class Step:
     """ask_trace 한 행"""
 
-    stage: str  # table | sql
+    stage: str  # table | sql | draft
     candidates: list = field(default_factory=list)
     selected: list = field(default_factory=list)
     reason: str = ""
@@ -43,6 +43,7 @@ class Selection:
     reason: str
     step: Step
     clarification: str | None = None
+    missing: list = field(default_factory=list)  # 지표가 없는 계산 [{name, table, column}]
 
 
 # ── 공통 ──────────────────────────────────────────────────────────────────
@@ -139,9 +140,11 @@ TABLE_SYSTEM = """당신은 업무 시스템 '{name}' 의 테이블 목록에서
 - 지표가 필요한 질문이면 질문이 묻는 계산마다 그 테이블의 [지표] 중 맞는 지표를 골라 metrics 에 이름을 그대로 적습니다.
   계산이 여러 개면 (예: 무인 가동시간과 유인 가동시간) 지표도 모두 적습니다.
   계산 중 하나라도 맞는 지표가 없으면 metrics 는 빈 목록이고, reason 에 어떤 계산의 지표가 없는지 적습니다.
+  그리고 missing 에 지표가 없는 계산마다 {{"name": "계산 이름", "table": "테이블", "column": "계산할 [계산 필요] 컬럼"}} 을 적습니다.
+  name 은 기간·묶음·합계 같은 말을 뺀 계산 자체의 이름입니다 (예: '최근 7일 차량별 무인 절단 시간 합계' → '무인 절단 시간').
 - 질문이 여러 갈래로 읽혀 정할 수 없을 때만 clarify 에 사용자에게 물을 한 문장을 적습니다. 그 밖에는 빈 문자열입니다.
 - 설명 없이 JSON 객체 하나로만 답합니다:
-  {{"tables": ["테이블"], "needs_metric": false, "metrics": [], "reason": "판단 이유", "clarify": ""}}"""
+  {{"tables": ["테이블"], "needs_metric": false, "metrics": [], "missing": [], "reason": "판단 이유", "clarify": ""}}"""
 
 
 def table_block(t: dict, metrics: list) -> str:
@@ -166,10 +169,13 @@ def select_tables(model, contract: dict, question: str) -> Selection:
     for m in metrics:
         for name in m.get("tables") or []:
             by_table.setdefault(name, []).append(m)
-    candidates, names, blocks = [], {}, []
+    candidates, names, columns, blocks = [], {}, {}, []
     for t in tables:
         candidates.append(t["name"])
         names[t["name"].lower()] = t["name"]
+        columns[t["name"]] = {}
+        for c in t["columns"]:
+            columns[t["name"]][c["name"].lower()] = c["name"]
         blocks.append(table_block(t, by_table.get(t["name"], [])))
     metric_names = {}
     for m in metrics:
@@ -202,7 +208,17 @@ def select_tables(model, contract: dict, question: str) -> Selection:
                         picked.append(t)
         if not picked and not str(p.get("clarify") or "").strip():
             raise ValueError('"tables" 가 비었습니다')
-        return {**p, "tables": picked, "metrics": chosen}
+        # 없는 계산은 지표 초안의 출발점일 뿐이라 틀린 항목은 다시 묻지 않고 버린다
+        missing = []
+        for m in p.get("missing") or []:
+            if not isinstance(m, dict) or not str(m.get("name") or "").strip():
+                continue
+            table = names.get(str(m.get("table") or "").strip().lower())
+            if table is None:
+                continue
+            column = columns[table].get(str(m.get("column") or "").strip().lower(), "")
+            missing.append({"name": str(m["name"]).strip(), "table": table, "column": column})
+        return {**p, "tables": picked, "metrics": chosen, "missing": missing}
 
     system = TABLE_SYSTEM.format(name=contract.get("name", ""), domain=contract.get("domain") or "(설명 없음)")
     user = (
@@ -218,8 +234,12 @@ def select_tables(model, contract: dict, question: str) -> Selection:
     for name in parsed["metrics"]:
         step.selected.append(f"지표: {name}")
     step.reason = reason
+    missing = parsed["missing"] if needs_metric and not parsed["metrics"] else []
     log.info(
-        "%s 테이블 선택 결과: tables=%s needs_metric=%s metrics=%s%s",
-        LLM_LOG, parsed["tables"], needs_metric, parsed["metrics"], f" 되묻기={clarify}" if clarify else "",
+        "%s 테이블 선택 결과: tables=%s needs_metric=%s metrics=%s%s%s",
+        LLM_LOG, parsed["tables"], needs_metric, parsed["metrics"],
+        f" 없는 지표={missing}" if missing else "", f" 되묻기={clarify}" if clarify else "",
     )
-    return Selection(parsed["tables"], parsed["metrics"], needs_metric, reason, step, clarification=clarify)
+    return Selection(
+        parsed["tables"], parsed["metrics"], needs_metric, reason, step, clarification=clarify, missing=missing
+    )

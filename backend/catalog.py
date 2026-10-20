@@ -266,6 +266,74 @@ def read_oracle(row: dict) -> list[dict]:
     return list(tables.values()), relations
 
 
+def read_indexes(cur, row: dict, table: str, columns: set) -> list[dict]:
+    """테이블의 B-tree 인덱스 [{name, columns}] (columns 는 인덱스 순서).
+
+    식·함수 인덱스 칸, 앞부분만 거는 칸(MySQL prefix), 모르는 컬럼이 나오면 그 앞까지만 남긴다 —
+    인덱스는 앞 칸부터 쓰이므로 그 뒤 칸은 조회에 쓸 수 없다. 부분 인덱스(PostgreSQL WHERE)는 뺀다.
+    """
+    driver = Driver(row["driver"])
+    if driver is Driver.MYSQL:
+        cur.execute(
+            "SELECT INDEX_NAME, COLUMN_NAME, SUB_PART FROM information_schema.STATISTICS"
+            " WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND INDEX_TYPE = 'BTREE'"
+            " ORDER BY INDEX_NAME = 'PRIMARY' DESC, INDEX_NAME, SEQ_IN_INDEX",
+            (row["db_name"], table),
+        )
+        fetched = []
+        for name, column, sub_part in cur.fetchall():
+            fetched.append((name, None if sub_part is not None else column))
+    elif driver is Driver.ORACLE:
+        owner = (row["db_schema"] or row["username"] or "").strip().upper()
+        cur.execute(
+            """
+            SELECT ic.index_name, ic.column_name
+              FROM all_indexes i
+              JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name
+             WHERE i.table_owner = :1 AND i.table_name = :2 AND i.index_type = 'NORMAL'
+               AND i.status IN ('VALID', 'N/A')
+             ORDER BY ic.index_name, ic.column_position
+        """,
+            [owner, table],
+        )
+        fetched = cur.fetchall()
+    else:
+        cur.execute(
+            """
+            SELECT ic.relname, a.attname
+              FROM pg_index x
+              JOIN pg_class c ON c.oid = x.indrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              JOIN pg_class ic ON ic.oid = x.indexrelid
+              JOIN pg_am am ON am.oid = ic.relam
+              JOIN LATERAL unnest(x.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON k.ord <= x.indnkeyatts
+              LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum AND k.attnum > 0
+             WHERE n.nspname = %s AND c.relname = %s
+               AND x.indisvalid AND x.indpred IS NULL AND am.amname = 'btree'
+             ORDER BY x.indisprimary DESC, ic.relname, k.ord
+        """,
+            (row["db_schema"] or "public", table),
+        )
+        fetched = cur.fetchall()
+
+    indexes, cut = [], set()
+    for name, column in fetched:
+        name, column = _text(name), _text(column) if column is not None else None
+        if name in cut:
+            continue
+        if not indexes or indexes[-1]["name"] != name:
+            indexes.append({"name": name, "columns": []})
+        if column is None or column not in columns:
+            cut.add(name)
+            continue
+        indexes[-1]["columns"].append(column)
+    usable = []
+    for index in indexes:
+        if index["columns"]:
+            usable.append(index)
+    return usable
+
+
 def _read_relations(
     row: dict, connection, sql: str, params, tables: dict
 ) -> list[dict] | None:

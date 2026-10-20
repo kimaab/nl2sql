@@ -72,6 +72,48 @@ def test_needs_metric_without_metric_stops_before_sql():
     assert len(model.calls) == 1
 
 
+def test_missing_metric_is_returned_and_wrong_entries_are_dropped():
+    model = FakeModel(
+        {
+            "tables": ["bms_log"],
+            "needs_metric": True,
+            "metrics": [],
+            "missing": [
+                {"name": "무인 절단 시간", "table": "BMS_LOG", "column": "UMAN_TIME"},
+                {"name": "없는 테이블", "table": "nope", "column": "x"},
+                {"name": "컬럼 모름", "table": "bms_log", "column": "nope"},
+                {"table": "bms_log"},
+            ],
+            "reason": "uman_time 지표 없음",
+            "clarify": "",
+        }
+    )
+    out = run_question({**contract(), "metrics": []}, "최근 7일 차량별 무인 절단 시간 합계", model, now=NOW)
+    assert out["needs_metric"] is True
+    assert out["missing"] == [
+        {"name": "무인 절단 시간", "table": "bms_log", "column": "uman_time"},
+        {"name": "컬럼 모름", "table": "bms_log", "column": ""},
+    ]
+    assert len(model.calls) == 1
+
+
+def test_missing_is_empty_when_a_metric_is_used():
+    model = FakeModel(
+        {
+            "tables": ["bms_log"],
+            "needs_metric": True,
+            "metrics": ["무인 가동시간"],
+            "missing": [{"name": "무인 가동시간", "table": "bms_log", "column": "uman_time"}],
+            "reason": "",
+            "clarify": "",
+        },
+        {"ast": METRIC_AST},
+    )
+    out = run_question(contract(), "일별 차량별 무인 가동시간", model, now=NOW)
+    assert out["missing"] == []
+    assert out["sql"] is not None
+
+
 def test_metric_ast_is_given_and_conditions_are_changed():
     changed = {**METRIC_AST, "where": [{"expr": {"col": "collect_datetime"}, "op": ">=", "value": "2026-10-10"}]}
     model = FakeModel(

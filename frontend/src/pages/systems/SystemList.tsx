@@ -7,6 +7,7 @@ import { errorMessage, formatAgo } from "../../lib/format";
 
 export function SystemList() {
   const [items, setItems] = useState<api.System[] | null>(null);
+  const [linking, setLinking] = useState<string | null>(null);
   const toast = useToast();
   const navigate = useNavigate();
 
@@ -20,6 +21,22 @@ export function SystemList() {
     } catch (err) {
       toast("시스템을 불러오지 못했습니다: " + errorMessage(err), "error");
       setItems([]);
+    }
+  }
+
+  async function handleSuperset(ds: api.System) {
+    try {
+      setLinking(ds.id);
+      const saved = await api.linkSuperset(ds.id);
+      toast(
+        ds.superset_database_id ? "Superset 연결 정보를 갱신했습니다" : `Superset 에 연결했습니다 (#${saved.superset_database_id})`,
+        "ok"
+      );
+      await load();
+    } catch (err) {
+      toast("Superset 연결 실패: " + errorMessage(err), "error");
+    } finally {
+      setLinking(null);
     }
   }
 
@@ -70,6 +87,7 @@ export function SystemList() {
                   <th>상태</th>
                   <th className="num">테이블</th>
                   <th className="num">지표 (활성 / 전체)</th>
+                  <th>Superset</th>
                   <th />
                 </tr>
               </thead>
@@ -104,12 +122,27 @@ export function SystemList() {
                       </Link>
                     </td>
                     <td>
+                      {ds.superset_database_id ? (
+                        <Badge tone="ok">연결됨 #{ds.superset_database_id}</Badge>
+                      ) : (
+                        <span className="faint">미연결</span>
+                      )}
+                    </td>
+                    <td>
                       <div className="row" style={{ justifyContent: "flex-end" }}>
                         <Button size="sm" onClick={() => navigate(`/sync?ds=${ds.id}`)}>
                           동기화
                         </Button>
                         <Button size="sm" onClick={() => navigate(`/tables?ds=${ds.id}`)}>
                           테이블
+                        </Button>
+                        <Button
+                          size="sm"
+                          disabled={linking !== null}
+                          title="접속 정보를 Superset DB 연결로 등록합니다. 데이터는 옮기지 않습니다."
+                          onClick={() => handleSuperset(ds)}
+                        >
+                          {linking === ds.id ? "연결 중..." : ds.superset_database_id ? "Superset 갱신" : "Superset 연결"}
                         </Button>
                         <Button size="sm" variant="ghost" onClick={() => navigate(`/systems/${ds.id}/edit`)}>
                           편집

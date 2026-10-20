@@ -29,11 +29,15 @@ from models import (
     Metric,
     MetricCheck,
     MetricCheckRequest,
+    MetricDraft,
+    MetricDraftRequest,
     MetricHistoryEntry,
     MetricInput,
     NeedsCalcInput,
     Relation,
     RelationInput,
+    SqlLabLink,
+    SqlLabRequest,
     SyncLog,
     SyncResult,
     System,
@@ -49,6 +53,7 @@ from systems import (
     get_system,
     list_sync_logs,
     list_systems,
+    connection_row,
     list_tables,
     set_needs_calc,
     set_table_purpose,
@@ -76,6 +81,8 @@ from history import (
 from contract import load_contract
 from compiler import Compiler
 from ask import run_question
+from metric_draft import draft_metric
+from superset_link import link_database, sqllab_link
 from llm import make_model
 from scheduler import AutoSync
 
@@ -158,6 +165,18 @@ def delete_system_detail(system_id: UUID):
 @app.post("/api/systems/{system_id}/sync", response_model=SyncResult)
 def post_sync(system_id: UUID):
     return sync_system(system_id)
+
+
+# 시스템을 Superset DB 연결로 등록한다 (이미 있으면 접속 정보 갱신). 데이터는 옮기지 않는다.
+@app.post("/api/systems/{system_id}/superset", response_model=System)
+def post_superset(system_id: UUID):
+    return link_database(system_id)
+
+
+# 생성한 SQL 을 Superset SQL Lab 에 열어 두는 링크. 실행은 SQL Lab 에서 사람이 한다.
+@app.post("/api/systems/{system_id}/superset/sqllab", response_model=SqlLabLink)
+def post_superset_sqllab(system_id: UUID, req: SqlLabRequest):
+    return SqlLabLink(url=sqllab_link(system_id, req.sql, req.name))
 
 
 @app.get("/api/sync-logs", response_model=list[SyncLog])
@@ -243,6 +262,12 @@ def post_metric_check(system_id: UUID, req: MetricCheckRequest):
     return check_metric(system_id, req.sql)
 
 
+# 지표가 없어 멈춘 질문에서 지표 SQL 초안을 쓴다 (저장하지 않는다). 값 샘플은 인덱스를 타는 조회로만 읽는다.
+@app.post("/api/systems/{system_id}/metrics/draft", response_model=MetricDraft)
+def post_metric_draft(system_id: UUID, req: MetricDraftRequest):
+    return draft_metric(system_id, req, make_model(), connection_row(system_id))
+
+
 @app.get(
     "/api/systems/{system_id}/metrics/{metric_id}/history",
     response_model=list[MetricHistoryEntry],
@@ -315,6 +340,7 @@ def post_ask(req: AskRequest):
         selected_tables=outcome["tables"],
         selected_metrics=outcome["metrics"],
         needs_metric=outcome["needs_metric"],
+        missing=outcome["missing"],
         steps=steps,
     )
 

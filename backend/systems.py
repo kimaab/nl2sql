@@ -548,4 +548,5 @@ def _row_to_system(row: dict) -> System:
         table_count=row["table_count"],
         metric_count=row["metric_count"],
         active_metric_count=row["active_metric_count"],
+        superset_database_id=row.get("superset_database_id"),
     )

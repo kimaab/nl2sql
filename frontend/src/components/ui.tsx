@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { useEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
@@ -151,6 +151,27 @@ export function EmptyState({
       {desc && <p className="empty-desc">{desc}</p>}
       {action}
     </div>
+  );
+}
+
+/** 브라우저 기본 <dialog> 모달. 배경을 막고 Esc 로 닫힌다 — 닫히면 onClose. 배경을 눌러서는 닫지 않는다 (쓰던 것을 잃지 않게). */
+export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    // StrictMode 는 effect 를 두 번 부른다 — 이미 열렸으면 그대로 둔다. 닫기는 DOM 에서 빠질 때 브라우저가 한다.
+    if (ref.current && !ref.current.open) ref.current.showModal();
+  }, []);
+  return (
+    <dialog ref={ref} className="modal" onClose={onClose}>
+      <div className="modal-head">
+        <span className="card-title">{title}</span>
+        <span className="spacer" />
+        <Button size="sm" variant="ghost" onClick={() => ref.current?.close()}>
+          닫기
+        </Button>
+      </div>
+      <div className="modal-body">{children}</div>
+    </dialog>
   );
 }
 

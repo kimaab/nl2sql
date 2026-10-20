@@ -24,7 +24,7 @@ log = logging.getLogger("nl2sql.metrics")
 
 VERIFY_TIMEOUT_S = 60
 MAX_COMPARE_ROWS = 100_000  # 해시로 비교하지 못하는 드라이버(MySQL·Oracle)에서 가져와 비교할 최대 행 수
-STAGE_LABEL = {"parse": "AST 변환 실패", "compile": "컴파일 실패", "verify": "결과 비교 실패"}
+STAGE_LABEL = {"parse": "AST 변환 실패", "compile": "컴파일 실패", "guard": "실행 전 확인에서 멈춤", "verify": "결과 비교 실패"}
 
 
 def list_metrics(system_id: UUID) -> list[Metric]:
@@ -46,8 +46,11 @@ def get_metric(system_id: UUID, metric_id: UUID) -> Metric:
 # ── 등록 전 확인: SQL → AST → SQL → 결과 비교 ──────────────────────────────
 
 
-def check_metric(system_id: UUID, sql: str) -> MetricCheck:
-    """저장하지 않고 등록 절차만 밟아 본다. 실패하면 error 와 단계(stage)를 채워 돌려준다."""
+def check_metric(system_id: UUID, sql: str, guard=None) -> MetricCheck:
+    """저장하지 않고 등록 절차만 밟아 본다. 실패하면 error 와 단계(stage)를 채워 돌려준다.
+
+    guard(원본 SQL, 옮긴 SQL) 는 대상 DB 에서 실행하기 전에 부른다 — 실행하면 안 되는 이유를 돌려주면 실행하지 않는다.
+    """
     contract = load_contract(system_id)
     try:
         parsed = parse_sql(sql, contract)
@@ -59,6 +62,11 @@ def check_metric(system_id: UUID, sql: str) -> MetricCheck:
     except ValueError as error:
         return MetricCheck(ast=ast, warnings=warnings, stage="compile", error=str(error))
     out = MetricCheck(ast=ast, sql=compiled, tables=ast_tables(ast), warnings=warnings)
+    if guard is not None:
+        reason = guard(sql, compiled)
+        if reason:
+            out.stage, out.error = "guard", reason
+            return out
     try:
         out.rows = verify(system_id, sql, compiled)
     except ValueError as error:
@@ -95,11 +103,10 @@ def verify(system_id: UUID, original: str, compiled: str) -> int:
 
 
 @contextmanager
-def _snapshot(row: dict):
-    """같은 스냅샷에서 SQL 의 비교값을 만드는 함수 digest(sql, 이름) 를 준다.
+def read_only(row: dict, timeout_s: int = VERIFY_TIMEOUT_S):
+    """대상 DB 의 읽기 전용 트랜잭션 커서를 준다. 쿼리 하나가 timeout_s 를 넘으면 끊는다.
 
-    PostgreSQL: REPEATABLE READ 읽기 전용 트랜잭션, (행 수, 결과 전체의 md5) 를 DB 안에서 만든다.
-    MySQL · Oracle: 일관된 스냅샷 트랜잭션, 행을 가져와 (행 수, 정렬한 행 목록) 으로 비교한다.
+    PostgreSQL 은 REPEATABLE READ, MySQL 은 CONSISTENT SNAPSHOT 이라 트랜잭션 안의 쿼리가 같은 스냅샷을 본다.
     """
     driver = row["driver"]
     try:
@@ -113,21 +120,21 @@ def _snapshot(row: dict):
         elif driver == "mysql":
             conn = pymysql.connect(
                 host=row["host"], port=row["port"], user=row["username"], password=row["password"],
-                database=row["db_name"], connect_timeout=10, read_timeout=VERIFY_TIMEOUT_S, charset="utf8mb4",
+                database=row["db_name"], connect_timeout=10, read_timeout=timeout_s, charset="utf8mb4",
             )
         else:
             conn = oracledb.connect(
                 user=row["username"], password=row["password"], host=row["host"], port=row["port"],
                 service_name=row["db_name"], tcp_connect_timeout=10,
             )
-            conn.call_timeout = VERIFY_TIMEOUT_S * 1000
+            conn.call_timeout = timeout_s * 1000
     except Exception as error:
         raise ApiException(502, f"{row['name']} 에 접속하지 못했습니다: {_first_line(error)}") from error
 
     cur = conn.cursor()
     try:
         if driver == "postgresql":
-            cur.execute(f"SET LOCAL statement_timeout = '{VERIFY_TIMEOUT_S}s'")
+            cur.execute(f"SET LOCAL statement_timeout = '{int(timeout_s)}s'")
             if row.get("db_schema"):
                 cur.execute("SELECT set_config('search_path', %s, true)", (row["db_schema"],))
         elif driver == "mysql":
@@ -138,36 +145,50 @@ def _snapshot(row: dict):
         conn.close()
         raise ApiException(502, f"{row['name']} 에서 읽기 전용 트랜잭션을 열지 못했습니다: {_first_line(error)}") from error
 
-    def digest(sql: str, which: str) -> tuple:
-        try:
-            if driver == "postgresql":
-                cur.execute(
-                    "SELECT count(*), md5(coalesce(string_agg(t::text, E'\\n' ORDER BY t::text), '')) "
-                    f"FROM ({sql}) t"
-                )
-                return tuple(cur.fetchone())
-            cur.execute(sql)
-            rows = cur.fetchmany(MAX_COMPARE_ROWS + 1)
-            if len(rows) > MAX_COMPARE_ROWS:
-                raise ValueError(f"결과가 {MAX_COMPARE_ROWS:,}행을 넘어 비교할 수 없습니다 — 기간을 좁혀 등록하십시오")
-            printed = []
-            for r in rows:
-                printed.append(repr(tuple(r)))
-            return len(rows), sorted(printed)
-        except ValueError:
-            raise
-        except psycopg.errors.QueryCanceled:
-            raise ValueError(f"결과 비교가 {VERIFY_TIMEOUT_S}초를 넘었습니다 — 기간을 좁혀 등록하십시오") from None
-        except Exception as error:
-            raise ValueError(f"{which} SQL 실행 실패: {_first_line(error)}") from None
-
     try:
-        yield digest
+        yield cur
     finally:
         try:
             conn.rollback()
         finally:
             conn.close()
+
+
+@contextmanager
+def _snapshot(row: dict):
+    """같은 스냅샷에서 SQL 의 비교값을 만드는 함수 digest(sql, 이름) 를 준다.
+
+    PostgreSQL: (행 수, 결과 전체의 md5) 를 DB 안에서 만든다.
+    MySQL · Oracle: 행을 가져와 (행 수, 정렬한 행 목록) 으로 비교한다.
+    """
+    driver = row["driver"]
+
+    with read_only(row) as cur:
+
+        def digest(sql: str, which: str) -> tuple:
+            try:
+                if driver == "postgresql":
+                    cur.execute(
+                        "SELECT count(*), md5(coalesce(string_agg(t::text, E'\\n' ORDER BY t::text), '')) "
+                        f"FROM ({sql}) t"
+                    )
+                    return tuple(cur.fetchone())
+                cur.execute(sql)
+                rows = cur.fetchmany(MAX_COMPARE_ROWS + 1)
+                if len(rows) > MAX_COMPARE_ROWS:
+                    raise ValueError(f"결과가 {MAX_COMPARE_ROWS:,}행을 넘어 비교할 수 없습니다 — 기간을 좁혀 등록하십시오")
+                printed = []
+                for r in rows:
+                    printed.append(repr(tuple(r)))
+                return len(rows), sorted(printed)
+            except ValueError:
+                raise
+            except psycopg.errors.QueryCanceled:
+                raise ValueError(f"결과 비교가 {VERIFY_TIMEOUT_S}초를 넘었습니다 — 기간을 좁혀 등록하십시오") from None
+            except Exception as error:
+                raise ValueError(f"{which} SQL 실행 실패: {_first_line(error)}") from None
+
+        yield digest
 
 
 def _first_line(error) -> str:

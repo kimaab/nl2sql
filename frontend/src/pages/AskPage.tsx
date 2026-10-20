@@ -4,9 +4,11 @@ import * as api from "../api";
 import { Badge, Button, Chip, SqlBlock } from "../components/ui";
 import { useToast } from "../components/Toast";
 import { errorMessage } from "../lib/format";
+import { MetricDraftDialog } from "./metrics/MetricDraftDialog";
 
 interface Entry extends api.AskResponse {
   question: string;
+  systemId: string;
   favorite: boolean;
   feedback: api.Feedback | null;
 }
@@ -55,6 +57,10 @@ export function AskPage() {
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  // 지표 초안 모달: 어느 질문의 어느 계산인지
+  const [drafting, setDrafting] = useState<{ systemId: string; question: string; missing: api.MissingMetric } | null>(
+    null
+  );
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const toast = useToast();
@@ -89,9 +95,29 @@ export function AskPage() {
     }
   }
 
+  async function openSuperset(entry: Entry) {
+    // 링크를 받은 뒤 window.open 하면 팝업 차단에 걸린다 — 클릭하는 순간 빈 창을 먼저 연다
+    const win = window.open("", "_blank");
+    try {
+      const { url } = await api.openInSqlLab(entry.systemId, entry.sql!, entry.question);
+      if (win) {
+        win.opener = null;
+        win.location.href = url;
+      } else {
+        window.location.href = url;
+      }
+    } catch (err) {
+      win?.close();
+      toast("Superset 링크를 만들지 못했습니다: " + errorMessage(err), "error");
+    }
+  }
+
   async function handleSubmit() {
-    const asked = question.trim();
-    if (!systemId) {
+    await send(question.trim());
+  }
+
+  async function send(asked: string, askedSystem = systemId) {
+    if (!askedSystem) {
       toast("시스템을 먼저 선택하세요", "error");
       return;
     }
@@ -102,8 +128,11 @@ export function AskPage() {
     setQuestion("");
     try {
       // 서버는 이전 질문을 모른다 — body 에는 이번 질문 하나만 싣는다.
-      const res = await api.ask(systemId, asked);
-      setHistory((prev) => [...prev, { question: asked, ...res, favorite: false, feedback: null }]);
+      const res = await api.ask(askedSystem, asked);
+      setHistory((prev) => [
+        ...prev,
+        { question: asked, systemId: askedSystem, ...res, favorite: false, feedback: null },
+      ]);
       if (res.clarification) {
         // 되물었으면 원래 질문을 돌려놓고, 답을 덧붙여 한 문장으로 다시 보내게 한다
         setQuestion(asked + " ");
@@ -144,6 +173,8 @@ export function AskPage() {
   }
 
   const noSystem = systems !== null && systems.length === 0;
+  // Superset 에 연결한 시스템만 'Superset에서 열기' 를 보인다
+  const linked = new Set((systems ?? []).filter((d) => d.superset_database_id).map((d) => d.id));
 
   return (
     <div className="ask">
@@ -237,6 +268,11 @@ export function AskPage() {
                       </Button>
                     </>
                   )}
+                  {entry.sql && linked.has(entry.systemId) && (
+                    <Button size="sm" title="Superset SQL Lab 에 SQL 을 열어 둡니다" onClick={() => openSuperset(entry)}>
+                      Superset에서 열기
+                    </Button>
+                  )}
                   {entry.sql && (
                     <Button size="sm" onClick={() => copySql(i, entry.sql!)}>
                       {copiedIndex === i ? "복사됨" : "SQL 복사"}
@@ -256,8 +292,24 @@ export function AskPage() {
                   <div className="alert warn">
                     {entry.error}
                     <div className="field-hint" style={{ marginTop: 6 }}>
-                      계산이 필요한 질문입니다. <Link to={`/metrics/new?ds=${systemId}`}>지표를 SQL 로 등록</Link>하면 그
-                      지표로 답합니다.
+                      계산이 필요한 질문입니다. 지표를 SQL 로 등록하면 그 지표로 답합니다. LLM 이 값 샘플을 보고 초안을
+                      쓰니, 확인하고 등록하세요.
+                    </div>
+                    <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
+                      {(entry.missing.length > 0
+                        ? entry.missing
+                        : [{ name: "", table: entry.selected_tables[0] ?? "", column: "" }]
+                      ).map((m) => (
+                        <Button
+                          key={`${m.table}.${m.column}.${m.name}`}
+                          size="sm"
+                          variant="primary"
+                          disabled={!m.table || loading}
+                          onClick={() => setDrafting({ systemId: entry.systemId, question: entry.question, missing: m })}
+                        >
+                          {m.name ? `${m.name} 지표 등록` : "지표 등록"}
+                        </Button>
+                      ))}
                     </div>
                   </div>
                 ) : (
@@ -277,6 +329,20 @@ export function AskPage() {
           <div ref={bottomRef} />
         </div>
       </div>
+
+      {drafting && (
+        <MetricDraftDialog
+          dsId={drafting.systemId}
+          question={drafting.question}
+          missing={drafting.missing}
+          onClose={() => setDrafting(null)}
+          onSaved={() => {
+            setDrafting(null);
+            // 등록한 지표로 같은 질문에 다시 답한다
+            send(drafting.question, drafting.systemId);
+          }}
+        />
+      )}
 
       <div className="ask-input">
         <div className="ask-input-inner">

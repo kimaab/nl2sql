@@ -82,6 +82,7 @@ class System(BaseModel):
     table_count: int
     metric_count: int
     active_metric_count: int
+    superset_database_id: int | None = None  # Superset 에 등록한 DB 연결 id (없으면 미연결)
 
 
 def _clean_names(values: list[str]) -> list[str]:
@@ -138,15 +139,61 @@ class MetricCheckRequest(BaseModel):
 
 
 class MetricCheck(BaseModel):
-    """등록 전 확인 결과. stage: 실패한 단계 (parse = AST 변환, compile = 컴파일, verify = 결과 비교)"""
+    """등록 전 확인 결과. stage: 실패한 단계 (parse = AST 변환, compile = 컴파일, guard = 실행 전 확인, verify = 결과 비교)"""
 
     ast: dict | None = None
     sql: str | None = None
     tables: list[str] = []
     warnings: list[str] = []
     rows: int | None = None
-    stage: Literal["parse", "compile", "verify"] | None = None
+    stage: Literal["parse", "compile", "guard", "verify"] | None = None
     error: str | None = None
+
+
+class MissingMetric(BaseModel):
+    """지표가 없는 계산 하나. 테이블 선택 단계가 적는다 — 지표 초안의 출발점이다."""
+
+    name: str
+    table: str
+    column: str = ""
+
+
+class MetricDraftRequest(BaseModel):
+    question: str
+    missing: MissingMetric
+
+
+class ValueSample(BaseModel):
+    """대상 컬럼의 실제 값 샘플. 인덱스를 타는 조회로만 뽑는다 — 쓸 인덱스가 없으면 rows 가 비고 note 에 이유가 있다.
+
+    queries: 실제로 실행한 조회, latest: 데이터의 가장 최근 시각 (초안의 예시 기간 기준)
+    """
+
+    index: str | None = None
+    queries: list[str] = []
+    columns: list[str] = []
+    rows: list[list[str]] = []
+    latest: str | None = None
+    note: str = ""
+
+
+class MetricDraft(BaseModel):
+    """LLM 이 쓴 지표 초안. 저장하지 않는다 — 사람이 고치고 확인한 뒤 지표 등록으로 저장한다.
+
+    unsure: 계산 방식을 정하지 못한 이유 (그때 sql 은 비어 있다). check: 초안 SQL 의 등록 확인 결과
+    full_scans: 초안 SQL 의 실행 계획이 전체를 훑는 큰 테이블 (인덱스를 타지 못한다)
+    """
+
+    name: str = ""
+    description: str = ""
+    synonyms: list[str] = []
+    sql: str = ""
+    assumptions: list[str] = []
+    unsure: str | None = None
+    attempts: int = 0
+    sample: ValueSample
+    check: MetricCheck | None = None
+    full_scans: list[str] = []
 
 
 class MetricHistoryEntry(BaseModel):
@@ -202,7 +249,7 @@ class AskStep(BaseModel):
 
 class AskResponse(BaseModel):
     """질문 응답. clarification 이 있으면 모델이 되물은 것이다 — sql 은 없다.
-    needs_metric 이면 지표가 필요한 질문인데 맞는 지표가 없다는 뜻이다 — error 에 이유가 있다."""
+    needs_metric 이면 지표가 필요한 질문인데 맞는 지표가 없다는 뜻이다 — error 에 이유가, missing 에 없는 계산이 있다."""
 
     id: UUID | None = None
     sql: str | None
@@ -212,7 +259,27 @@ class AskResponse(BaseModel):
     selected_tables: list[str] = []
     selected_metrics: list[str] = []
     needs_metric: bool = False
+    missing: list[MissingMetric] = []
     steps: list[AskStep] = []
+
+
+class SqlLabRequest(BaseModel):
+    """Superset SQL Lab 에 열 SQL. name 은 SQL Lab 탭 이름 (보통 질문)."""
+
+    sql: str
+    name: str = ""
+
+    @field_validator("sql")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise ValueError("must not be blank")
+        return cleaned
+
+
+class SqlLabLink(BaseModel):
+    url: str
 
 
 class CompileRequest(BaseModel):

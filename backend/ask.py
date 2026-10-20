@@ -104,7 +104,7 @@ def ast_prompt(contract: dict, tables: list, metrics: list, now: datetime.dateti
 def run_question(contract: dict, question: str, model, now: datetime.datetime | None = None) -> dict:
     """질문 하나를 처리한다. 상태는 이 호출 안에서만 산다.
 
-    돌려주는 것: {sql, error, attempts, ast, clarification, needs_metric, tables, metrics, steps, total_tokens}
+    돌려주는 것: {sql, error, attempts, ast, clarification, needs_metric, missing, tables, metrics, steps, total_tokens}
     """
     outcome = {
         "sql": None,
@@ -113,6 +113,7 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
         "ast": None,
         "clarification": None,
         "needs_metric": False,
+        "missing": [],
         "tables": [],
         "metrics": [],
         "steps": [],
@@ -131,6 +132,7 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
         return _with_tokens(outcome)
     if selection.needs_metric and not selection.metrics:
         outcome["needs_metric"] = True
+        outcome["missing"] = selection.missing
         outcome["error"] = f"지표 등록이 필요합니다 — {selection.reason or '계산이 필요한 질문인데 맞는 지표가 없습니다'}"
         return _with_tokens(outcome)
 

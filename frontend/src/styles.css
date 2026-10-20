@@ -706,6 +706,65 @@ code {
   gap: 12px;
 }
 
+/* ───────── 모달 (<dialog>) ───────── */
+.modal {
+  width: min(1180px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+}
+
+.modal::backdrop {
+  background: rgba(17, 24, 39, 0.45);
+}
+
+.modal-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-body {
+  padding: 20px;
+}
+
+/* 모달 안에서는 확인 결과 칸을 넓혀 값 샘플 표가 들어가게 한다 */
+.modal .wizard {
+  grid-template-columns: minmax(0, 1fr) 440px;
+}
+
+.modal .preview {
+  position: static;
+}
+
+.draft-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.sample-table th,
+.sample-table td {
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .modal .wizard {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .kv {
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr);

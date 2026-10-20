@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:8000/api";
+const API_BASE = "/api"; // vite.config 의 proxy 가 백엔드(localhost:8000)로 넘긴다
 
 export type Driver = "mysql" | "postgresql" | "oracle";
 
@@ -18,6 +18,8 @@ export interface System {
   table_count: number;
   metric_count: number;
   active_metric_count: number;
+  /** Superset 에 등록한 DB 연결 id (없으면 미연결) */
+  superset_database_id: number | null;
 }
 
 export interface SystemInput {
@@ -55,15 +57,46 @@ export interface Metric extends MetricInput {
   updated_at: string | null;
 }
 
-/** 등록 전 확인: SQL → AST → SQL → 대상 DB 에서 결과 비교. stage 는 실패한 단계 */
+/** 등록 전 확인: SQL → AST → SQL → (초안이면 실행 전 확인) → 대상 DB 에서 결과 비교. stage 는 실패한 단계 */
 export interface MetricCheck {
   ast: Record<string, any> | null;
   sql: string | null;
   tables: string[];
   warnings: string[];
   rows: number | null;
-  stage: "parse" | "compile" | "verify" | null;
+  stage: "parse" | "compile" | "guard" | "verify" | null;
   error: string | null;
+}
+
+/** 지표가 없는 계산 하나. 테이블 선택 단계가 적고, 지표 초안의 출발점이 된다 */
+export interface MissingMetric {
+  name: string;
+  table: string;
+  column: string;
+}
+
+/** 대상 컬럼의 실제 값 샘플. 인덱스를 타는 조회로만 뽑는다 — 못 뽑으면 rows 가 비고 note 에 이유가 있다 */
+export interface ValueSample {
+  index: string | null;
+  queries: string[];
+  columns: string[];
+  rows: string[][];
+  latest: string | null;
+  note: string;
+}
+
+/** LLM 이 쓴 지표 초안 (저장되지 않음). full_scans: 초안 SQL 의 실행 계획이 전체를 훑는 큰 테이블 */
+export interface MetricDraft {
+  name: string;
+  description: string;
+  synonyms: string[];
+  sql: string;
+  assumptions: string[];
+  unsure: string | null;
+  attempts: number;
+  sample: ValueSample;
+  check: MetricCheck | null;
+  full_scans: string[];
 }
 
 export interface MetricHistoryEntry {
@@ -145,6 +178,7 @@ export interface AskResponse {
   selected_metrics: string[];
   /** 지표가 필요한 질문인데 맞는 지표가 없다 — error 에 이유가 있다 */
   needs_metric: boolean;
+  missing: MissingMetric[];
   steps: AskStep[];
 }
 
@@ -232,6 +266,10 @@ export const updateSystem = (id: string, input: SystemInput) =>
   request<System>(`/systems/${id}`, { method: "PUT", body: input });
 export const deleteSystem = (id: string) => request<void>(`/systems/${id}`, { method: "DELETE" });
 export const syncSystem = (id: string) => request<SyncResult>(`/systems/${id}/sync`, { method: "POST" });
+/** 시스템을 Superset DB 연결로 등록 (이미 있으면 접속 정보 갱신) */
+export const linkSuperset = (id: string) => request<System>(`/systems/${id}/superset`, { method: "POST" });
+export const openInSqlLab = (id: string, sql: string, name: string) =>
+  request<{ url: string }>(`/systems/${id}/superset/sqllab`, { method: "POST", body: { sql, name } });
 export const listSyncLogs = (systemId?: string, limit = 100) =>
   request<SyncLog[]>(`/sync-logs${q({ system_id: systemId, limit })}`);
 export const getSchema = (id: string) => request<{ tables: SchemaTable[] }>(`/systems/${id}/schema`);
@@ -265,6 +303,8 @@ export const updateMetric = (sysId: string, id: string, input: MetricInput) =>
 /** 저장하지 않고 등록 절차만 밟아 본다 (SQL → AST → SQL → 결과 비교) */
 export const checkMetric = (sysId: string, sql: string) =>
   request<MetricCheck>(`/systems/${sysId}/metrics/check`, { method: "POST", body: { sql } });
+export const draftMetric = (sysId: string, question: string, missing: MissingMetric) =>
+  request<MetricDraft>(`/systems/${sysId}/metrics/draft`, { method: "POST", body: { question, missing } });
 export const deleteMetric = (sysId: string, id: string) =>
   request<void>(`/systems/${sysId}/metrics/${id}`, { method: "DELETE" });
 export const metricHistory = (sysId: string, id: string) =>

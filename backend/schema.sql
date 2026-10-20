@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS meta_system (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_system_name ON meta_system (lower(name));
+-- Superset 에 등록한 DB 연결 id (superset_link.py 가 채운다). 비어 있으면 아직 Superset 에 연결하지 않은 것이다.
+ALTER TABLE meta_system ADD COLUMN IF NOT EXISTS superset_database_id INTEGER;
 
 -- 테이블. 동기화는 이름 기준 병합이라 id 가 유지된다 — 지표 연결(metric_table)이 id 를 가리킨다.
 CREATE TABLE IF NOT EXISTS meta_table (

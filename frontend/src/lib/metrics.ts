@@ -20,6 +20,7 @@ export const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | undefined> =
 export const CHECK_STAGE_LABEL: Record<string, string> = {
   parse: "AST 로 옮기지 못했습니다",
   compile: "옮긴 AST 를 컴파일하지 못했습니다",
+  guard: "실행 전 확인에서 멈췄습니다 (대상 DB 에서 실행하지 않았습니다)",
   verify: "원본과 결과를 비교하지 못했습니다",
 };
 
