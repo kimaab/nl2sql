@@ -263,21 +263,6 @@ class AskResponse(BaseModel):
     steps: list[AskStep] = []
 
 
-class SqlLabRequest(BaseModel):
-    """Superset SQL Lab 에 열 SQL. name 은 SQL Lab 탭 이름 (보통 질문)."""
-
-    sql: str
-    name: str = ""
-
-    @field_validator("sql")
-    @classmethod
-    def _not_blank(cls, value: str) -> str:
-        cleaned = (value or "").strip()
-        if not cleaned:
-            raise ValueError("must not be blank")
-        return cleaned
-
-
 class SqlLabLink(BaseModel):
     url: str
 

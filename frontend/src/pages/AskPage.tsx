@@ -105,10 +105,9 @@ export function AskPage() {
     setOpening(`${index}.${kind}`);
     try {
       // 차트는 Superset 이 SQL 을 한 번 실행해 결과 컬럼을 읽은 뒤 종류를 정한다 — 몇 초 걸린다
+      // SQL 은 보내지 않는다 — 백엔드가 질문 기록의 SQL 을 꺼내 쓴다
       const { url } =
-        kind === "chart"
-          ? await api.createSupersetChart(entry.systemId, entry.sql!, entry.question)
-          : await api.openInSqlLab(entry.systemId, entry.sql!, entry.question);
+        kind === "chart" ? await api.createSupersetChart(entry.id!) : await api.openInSqlLab(entry.id!);
       if (win) {
         win.opener = null;
         win.location.href = url;
@@ -283,7 +282,7 @@ export function AskPage() {
                       </Button>
                     </>
                   )}
-                  {entry.sql && linked.has(entry.systemId) && (
+                  {entry.sql && entry.id && linked.has(entry.systemId) && (
                     <>
                       <Button
                         size="sm"

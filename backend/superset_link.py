@@ -291,6 +291,10 @@ class _Api:
                 400, "Superset 연동 설정이 없습니다 (backend/.env 의 SUPERSET_URL, SUPERSET_USERNAME, SUPERSET_PASSWORD)"
             )
         self.session = requests.Session()
+        # 자체 서명 인증서로 띄운 Superset 은 그 CA 로 검증한다 (superset/certs/ca.crt)
+        ca_bundle = os.environ.get("SUPERSET_CA_BUNDLE", "").strip()
+        if ca_bundle:
+            self.session.verify = ca_bundle
         login = self.call(
             "POST",
             "/api/v1/security/login",

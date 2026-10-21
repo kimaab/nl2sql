@@ -37,7 +37,6 @@ from models import (
     Relation,
     RelationInput,
     SqlLabLink,
-    SqlLabRequest,
     SupersetChart,
     SyncLog,
     SyncResult,
@@ -74,6 +73,7 @@ from relations import create_relation, delete_relation, list_relations
 from history import (
     delete_history,
     export_eval_cases,
+    get_history,
     get_trace,
     list_history,
     patch_history,
@@ -174,16 +174,27 @@ def post_superset(system_id: UUID):
     return link_database(system_id)
 
 
+# Superset 으로 보내는 SQL 은 화면에서 받지 않는다 — 질문 기록에 남은 생성 SQL 만 쓴다.
+# 화면이 보낸 SQL 을 받으면 API 를 직접 불러 아무 SQL 이나 대상 DB 에 실행시킬 수 있다.
+def _generated_sql(entry_id: UUID) -> HistoryEntry:
+    entry = get_history(entry_id)
+    if not entry.sql:
+        raise ApiException(400, "SQL 을 만들지 못한 질문입니다")
+    return entry
+
+
 # 생성한 SQL 을 Superset SQL Lab 에 열어 두는 링크. 실행은 SQL Lab 에서 사람이 한다.
-@app.post("/api/systems/{system_id}/superset/sqllab", response_model=SqlLabLink)
-def post_superset_sqllab(system_id: UUID, req: SqlLabRequest):
-    return SqlLabLink(url=sqllab_link(system_id, req.sql, req.name))
+@app.post("/api/history/{entry_id}/superset/sqllab", response_model=SqlLabLink)
+def post_superset_sqllab(entry_id: UUID):
+    entry = _generated_sql(entry_id)
+    return SqlLabLink(url=sqllab_link(entry.system_id, entry.sql, entry.question))
 
 
 # 생성한 SQL 로 Superset 차트를 만든다. 결과 컬럼 모양으로 차트 종류를 정하고, 같은 SQL 이면 전에 만든 차트를 연다.
-@app.post("/api/systems/{system_id}/superset/chart", response_model=SupersetChart)
-def post_superset_chart(system_id: UUID, req: SqlLabRequest):
-    return SupersetChart(**create_chart(system_id, req.sql, req.name))
+@app.post("/api/history/{entry_id}/superset/chart", response_model=SupersetChart)
+def post_superset_chart(entry_id: UUID):
+    entry = _generated_sql(entry_id)
+    return SupersetChart(**create_chart(entry.system_id, entry.sql, entry.question))
 
 
 @app.get("/api/sync-logs", response_model=list[SyncLog])

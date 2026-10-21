@@ -22,3 +22,10 @@ EXPLORE_FORM_DATA_CACHE_CONFIG = {**CACHE_CONFIG, "CACHE_KEY_PREFIX": "superset_
 
 # 로그인 시도 제한 저장소 (Redis 대신 메모리)
 RATELIMIT_STORAGE_URI = "memory://"
+
+# nginx 뒤에서 https 로 받는다 (docker-compose.yml, nginx.conf).
+# X-Forwarded-Proto/Host 를 믿어야 로그인 뒤 이동이나 링크가 https 와 원래 주소로 만들어진다.
+ENABLE_PROXY_FIX = True
+PREFERRED_URL_SCHEME = "https"
+# 세션 쿠키를 https 로만 보낸다
+SESSION_COOKIE_SECURE = True

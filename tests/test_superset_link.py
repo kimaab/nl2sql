@@ -236,3 +236,27 @@ def test_create_chart_makes_dataset_and_chart(monkeypatch):
     assert superset_link._rison("it's 차트!") == "'it!'s 차트!!'"
     chart_body = session.calls[-1][2]
     assert chart_body["datasource_id"] == 12 and chart_body["slice_name"] == "it's 차트!"
+
+
+def test_superset_endpoints_use_sql_from_history_only(monkeypatch):
+    """화면은 질문 기록 id 만 보낸다 — Superset 으로 가는 SQL 은 기록의 생성 SQL 이다"""
+    import app as app_module
+    from types import SimpleNamespace
+
+    entry = SimpleNamespace(system_id="sid", sql="SELECT 1", question="질문")
+    monkeypatch.setattr(app_module, "get_history", lambda entry_id: entry)
+    seen = []
+    monkeypatch.setattr(
+        app_module,
+        "create_chart",
+        lambda *args: seen.append(args) or {"url": "u", "viz_type": "table", "dataset_id": 1, "chart_id": 2},
+    )
+    monkeypatch.setattr(app_module, "sqllab_link", lambda *args: seen.append(args) or "u")
+    app_module.post_superset_chart("eid")
+    app_module.post_superset_sqllab("eid")
+    assert seen == [("sid", "SELECT 1", "질문"), ("sid", "SELECT 1", "질문")]
+
+    entry.sql = None
+    with pytest.raises(ApiException) as caught:
+        app_module.post_superset_chart("eid")
+    assert caught.value.status_code == 400

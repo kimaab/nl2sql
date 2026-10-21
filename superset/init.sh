@@ -4,6 +4,7 @@
 #   2. 스키마 마이그레이션
 #   3. 관리자 계정 (이미 있으면 그대로 둔다)
 #   4. 기본 역할과 권한
+#   5. HTTPS 인증서 (없거나 이름이 바뀌었으면 만든다)
 set -e
 
 python - <<'EOF'
@@ -39,3 +40,4 @@ superset fab create-admin \
     --email "${ADMIN_EMAIL:-admin@localhost}" \
     --password "${ADMIN_PASSWORD:?ADMIN_PASSWORD 를 .env 에 적으십시오}"
 superset init
+python /app/make_cert.py

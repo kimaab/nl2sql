@@ -268,13 +268,14 @@ export const deleteSystem = (id: string) => request<void>(`/systems/${id}`, { me
 export const syncSystem = (id: string) => request<SyncResult>(`/systems/${id}/sync`, { method: "POST" });
 /** 시스템을 Superset DB 연결로 등록 (이미 있으면 접속 정보 갱신) */
 export const linkSuperset = (id: string) => request<System>(`/systems/${id}/superset`, { method: "POST" });
-export const openInSqlLab = (id: string, sql: string, name: string) =>
-  request<{ url: string }>(`/systems/${id}/superset/sqllab`, { method: "POST", body: { sql, name } });
-export const createSupersetChart = (id: string, sql: string, name: string) =>
-  request<{ url: string; viz_type: string; dataset_id: number; chart_id: number }>(`/systems/${id}/superset/chart`, {
-    method: "POST",
-    body: { sql, name },
-  });
+/** 질문 기록의 생성 SQL 을 Superset 으로 연다. SQL 은 보내지 않는다 — 백엔드가 기록에서 꺼낸다 */
+export const openInSqlLab = (entryId: string) =>
+  request<{ url: string }>(`/history/${entryId}/superset/sqllab`, { method: "POST" });
+export const createSupersetChart = (entryId: string) =>
+  request<{ url: string; viz_type: string; dataset_id: number; chart_id: number }>(
+    `/history/${entryId}/superset/chart`,
+    { method: "POST" }
+  );
 export const listSyncLogs = (systemId?: string, limit = 100) =>
   request<SyncLog[]>(`/sync-logs${q({ system_id: systemId, limit })}`);
 export const getSchema = (id: string) => request<{ tables: SchemaTable[] }>(`/systems/${id}/schema`);
