@@ -6,7 +6,7 @@
 
 AST 모양
   {"from": "테이블" | {"query": AST, "as": "별칭"},
-   "joins": [{"table": "테이블", "type": "inner|left", "on": [["a.컬럼", "b.컬럼"]]}],
+   "joins": [{"table": "테이블" | "query": AST, "as": "별칭", "type": "inner|left", "on": [["a.컬럼", "b.컬럼"]]}],
    "select": [{"expr": 식, "as": "이름"}],        {"expr": {"col": "*"}} 는 모든 컬럼
    "distinct": true, "where": [조건], "group_by": [식], "having": [조건],
    "order_by": [{"expr": 식, "dir": "asc|desc"}], "limit": 숫자}
@@ -15,6 +15,7 @@ AST 모양
 """
 
 import datetime
+import json
 
 AGGREGATES = {"SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"}
 ARITHMETIC = {"ADD": "+", "SUB": "-", "MUL": "*"}
@@ -174,17 +175,63 @@ class Scope:
         return q(col) if len(self.sources) == 1 else f"{q(alias)}.{q(col)}"
 
 
-def _info(agg=False, window=False, cols=False) -> dict:
-    return {"agg": agg, "window": window, "cols": cols}
+def _info(agg=False, window=False, cols=False, raw=(), calc=()) -> dict:
+    """식의 성질. raw: 집계하지 않은 [계산 필요] 컬럼, calc: 집계한 [계산 필요] 컬럼 — (테이블, 컬럼) 목록"""
+    return {"agg": agg, "window": window, "cols": cols, "raw": list(raw), "calc": list(calc)}
 
 
 def _merge(parts) -> dict:
     merged = _info()
     for _, info in parts:
-        for key in merged:
+        for key in ("agg", "window", "cols"):
             if info[key]:
                 merged[key] = True
+        for key in ("raw", "calc"):
+            for ref in info[key]:
+                if ref not in merged[key]:
+                    merged[key].append(ref)
     return merged
+
+
+class CalcColumnError(AstError):
+    """[계산 필요] 컬럼을 지표에 없는 방식으로 계산했다. table, column: 그 컬럼"""
+
+    def __init__(self, message: str, table: str, column: str):
+        super().__init__(message)
+        self.table = table
+        self.column = column
+
+
+def _normalized(node):
+    """지표 식과 비교하려고 모양을 맞춘다: 함수 이름은 대문자, 컬럼의 '테이블.' 은 뺀다"""
+    if isinstance(node, list):
+        out = []
+        for x in node:
+            out.append(_normalized(x))
+        return out
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for key, value in node.items():
+        if key == "col" and isinstance(value, str):
+            out[key] = value.split(".")[-1]
+        elif key == "fn" and isinstance(value, str):
+            out[key] = value.upper()
+        else:
+            out[key] = _normalized(value)
+    return out
+
+
+def _fn_nodes(node, out: set):
+    """AST 안의 모든 함수 식 (정규화한 JSON)"""
+    if isinstance(node, list):
+        for x in node:
+            _fn_nodes(x, out)
+    elif isinstance(node, dict):
+        if "fn" in node:
+            out.add(json.dumps(_normalized(node), sort_keys=True, ensure_ascii=False))
+        for value in node.values():
+            _fn_nodes(value, out)
 
 
 def _sqls(parts) -> list[str]:
@@ -196,17 +243,28 @@ def _sqls(parts) -> list[str]:
 
 
 class Compiler:
-    def __init__(self, contract: dict):
+    def __init__(self, contract: dict, metrics: list | None = None):
+        """metrics 를 주면 [계산 필요] 컬럼의 계산을 그 지표들의 식으로만 허용한다 (질문 처리).
+        주지 않으면 검사하지 않는다 (지표 등록 — 지표가 곧 그 계산이다)."""
         self.dialect = Dialect(contract.get("driver") or "postgresql")
         self.tables: dict[str, dict[str, int]] = {}
+        self.calc_columns: dict[str, set] = {}
         for t in contract.get("tables", []):
-            cols = {}
+            cols, calc = {}, set()
             for c in t.get("columns", []):
                 hours = c.get("utc_offset") or 0
                 if hours and temporal_kind(c.get("type", ""), self.dialect.driver) != "datetime":
                     hours = 0
                 cols[c["name"]] = int(hours)
+                if c.get("needs_calc"):
+                    calc.add(c["name"])
             self.tables[t["name"]] = cols
+            self.calc_columns[t["name"]] = calc
+        self.allowed: set | None = None
+        if metrics is not None:
+            self.allowed = set()
+            for m in metrics:
+                _fn_nodes(m.get("ast"), self.allowed)
 
     def compile(self, ast: dict) -> str:
         sql, _ = self._query(ast, 0)
@@ -229,23 +287,30 @@ class Compiler:
         if isinstance(source, str):
             from_sql = self._table(source, scope)
         elif isinstance(source, dict) and "query" in source:
-            alias = str(source.get("as") or "sub").strip()
-            inner_sql, names = self._query(source["query"], depth + 1)
-            scope.add(alias, dict.fromkeys(names, 0))
-            from_sql = f"({inner_sql}) {d.q(alias)}"
+            from_sql = self._subquery(source["query"], str(source.get("as") or "sub").strip(), scope, depth)
         else:
             raise AstError('from 은 테이블 이름이나 {"query": AST, "as": "별칭"} 입니다')
 
         for join in ast.get("joins") or []:
             if not isinstance(join, dict):
-                raise AstError('joins 항목은 {"table", "type", "on"} 입니다')
+                raise AstError('joins 항목은 {"table", "type", "on"} 또는 {"query", "as", "type", "on"} 입니다')
             kind = {"inner": "JOIN", "left": "LEFT JOIN"}.get(str(join.get("type", "inner")).lower())
             if kind is None:
                 raise AstError("join type 은 inner 나 left 입니다")
-            table_sql = self._table(join.get("table"), scope)
+            # 하위 쿼리 조인 (예: 합계 상위 5대만 남기기). {"table": {"query", "as"}} 로 적어도 받는다
+            target = join.get("table") if isinstance(join.get("table"), dict) else join
+            if "query" in target:
+                alias = str(target.get("as") or "").strip()
+                if not alias:
+                    raise AstError('하위 쿼리 조인에는 "as"(별칭)가 있어야 합니다')
+                table_sql = self._subquery(target["query"], alias, scope, depth)
+                label = alias
+            else:
+                table_sql = self._table(join.get("table"), scope)
+                label = join.get("table")
             pairs = join.get("on") or []
             if not pairs:
-                raise AstError(f"{join.get('table')} 조인에 on 이 없습니다")
+                raise AstError(f"{label} 조인에 on 이 없습니다")
             on = []
             for pair in pairs:
                 if not isinstance(pair, (list, tuple)) or len(pair) != 2:
@@ -317,6 +382,12 @@ class Compiler:
                 raise AstError(f"limit 은 1~{MAX_LIMIT} 정수입니다")
             parts.append(d.limit(limit))
         return " ".join(parts), names
+
+    def _subquery(self, ast, alias: str, scope: Scope, depth: int) -> str:
+        """하위 쿼리 하나 (from 이나 joins). 바깥에서는 하위 쿼리 select 의 이름을 컬럼으로 쓴다."""
+        inner_sql, names = self._query(ast, depth + 1)
+        scope.add(alias, dict.fromkeys(names, 0))
+        return f"({inner_sql}) {self.dialect.q(alias)}"
 
     def _table(self, name, scope: Scope) -> str:
         if not isinstance(name, str) or name not in self.tables:
@@ -592,8 +663,14 @@ def ast_tables(ast: dict) -> list[str]:
         elif isinstance(source, dict):
             walk(source.get("query"))
         for j in node.get("joins") or []:
-            if isinstance(j, dict) and isinstance(j.get("table"), str):
+            if not isinstance(j, dict):
+                continue
+            if isinstance(j.get("table"), str):
                 out.append(j["table"])
+            elif isinstance(j.get("table"), dict):
+                walk(j["table"].get("query"))
+            elif "query" in j:
+                walk(j.get("query"))
 
     walk(ast)
     return list(dict.fromkeys(out))

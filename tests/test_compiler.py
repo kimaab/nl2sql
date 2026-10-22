@@ -186,6 +186,62 @@ def test_join_qualifies_columns(c):
     assert ast_tables(ast) == ["bms_log", "vehicle"]
 
 
+DAILY = {
+    "from": "bms_log",
+    "select": [
+        {"expr": {"fn": "DATE", "args": [{"col": "collect_datetime"}]}, "as": "day"},
+        {"expr": {"col": "vehicle_id"}, "as": "vehicle_id"},
+        {"expr": {"fn": "SUB", "args": [{"fn": "MAX", "args": [{"col": "uman_time"}]}, {"fn": "MIN", "args": [{"col": "uman_time"}]}]}, "as": "uman_hours"},
+    ],
+    "where": [{"expr": {"col": "collect_datetime"}, "op": ">=", "value": "2026-09-02"}],
+    "group_by": [{"fn": "DATE", "args": [{"col": "collect_datetime"}]}, {"col": "vehicle_id"}],
+}
+
+
+def test_join_subquery_keeps_details_of_top_groups(c):
+    """합계 상위 5대 차량의 일별 값: 상위 5대를 구하는 하위 쿼리와 조인한다"""
+    top = {
+        "from": {"query": DAILY, "as": "d"},
+        "select": [
+            {"expr": {"col": "vehicle_id"}, "as": "vehicle_id"},
+            {"expr": {"fn": "SUM", "args": [{"col": "uman_hours"}]}, "as": "total"},
+        ],
+        "group_by": [{"col": "vehicle_id"}],
+        "order_by": [{"expr": {"col": "total"}, "dir": "desc"}],
+        "limit": 5,
+    }
+    ast = {
+        "from": {"query": DAILY, "as": "daily"},
+        "joins": [{"query": top, "as": "top", "type": "inner", "on": [["daily.vehicle_id", "top.vehicle_id"]]}],
+        "select": [
+            {"expr": {"col": "daily.day"}, "as": "day"},
+            {"expr": {"col": "daily.vehicle_id"}, "as": "vehicle_id"},
+            {"expr": {"col": "uman_hours"}, "as": "uman_hours"},
+        ],
+        "order_by": [{"expr": {"col": "top.total"}, "dir": "desc"}, {"expr": {"col": "day"}, "dir": "asc"}],
+    }
+    sql = c.compile(ast)
+    assert sql.startswith('SELECT "daily"."day" AS "day", "daily"."vehicle_id" AS "vehicle_id", "daily"."uman_hours" AS "uman_hours" FROM (SELECT ')
+    assert ') "daily" JOIN (SELECT "vehicle_id" AS "vehicle_id", SUM("uman_hours") AS "total" FROM (SELECT ' in sql
+    assert ') "top" ON "daily"."vehicle_id" = "top"."vehicle_id" ORDER BY "top"."total" DESC, "day" ASC' in sql
+    assert 'GROUP BY "vehicle_id" ORDER BY "total" DESC LIMIT 5) "top"' in sql
+    assert ast_tables(ast) == ["bms_log"]
+    # {"table": {"query", "as"}} 로 적어도 같다
+    other = {**ast, "joins": [{"table": {"query": top, "as": "top"}, "type": "inner", "on": [["daily.vehicle_id", "top.vehicle_id"]]}]}
+    assert c.compile(other) == sql
+
+
+def test_join_subquery_needs_alias(c):
+    with pytest.raises(ValueError, match="별칭"):
+        c.compile(
+            {
+                "from": "bms_log",
+                "joins": [{"query": DAILY, "on": [["bms_log.vehicle_id", "vehicle_id"]]}],
+                "select": [{"expr": {"col": "bms_log.vehicle_id"}, "as": "v"}],
+            }
+        )
+
+
 def test_dialects():
     ast = {
         "from": "bms_log",
