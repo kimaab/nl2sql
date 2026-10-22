@@ -1,14 +1,13 @@
 import { useEffect, useState } from "react";
 import * as api from "../../api";
-import { Button, Chip, EmptyState, Loading, PageHeader } from "../../components/ui";
+import { Link } from "react-router-dom";
+import { Badge, Button, EmptyState, Loading, PageHeader } from "../../components/ui";
 import { SystemPicker, useSystemParam } from "../../components/SystemPicker";
 import { useToast } from "../../components/Toast";
 import { errorMessage } from "../../lib/format";
 
-/** UTC 보정으로 고를 수 있는 시차 (0 은 '보정 없음') */
-const OFFSETS = Array.from({ length: 27 }, (_, i) => i - 12).filter((h) => h !== 0);
-
-/** 테이블 용도 · UTC 보정 · 계산 필요 컬럼. 테이블 선택(LLM)이 보는 것은 용도 → 코멘트 순이다. */
+/** 테이블 용도와 컬럼 설정 요약. 컬럼 설정(UTC 보정, 계산 필요)은 하위 페이지(TableColumns)에서 한다.
+ * 테이블 선택(LLM)이 보는 것은 용도 → 코멘트 순이다. */
 export function TablesPage() {
   const { systems, sysId, setSysId } = useSystemParam();
   const [tables, setTables] = useState<api.TableInfo[] | null>(null);
@@ -35,26 +34,6 @@ export function TablesPage() {
       setTables((prev) => (prev ?? []).map((x) => (x.id === t.id ? saved : x)));
       setDrafts(({ [t.id]: _, ...rest }) => rest);
       toast("용도를 저장했습니다", "ok");
-    } catch (err) {
-      toast("저장 실패: " + errorMessage(err), "error");
-    }
-  }
-
-  async function saveOffset(t: api.TableInfo, column: string, hours: number | null) {
-    try {
-      const saved = await api.setUtcOffset(sysId, t.id, column, hours);
-      setTables((prev) => (prev ?? []).map((x) => (x.id === t.id ? saved : x)));
-      toast(hours ? `${column}: UTC${hours > 0 ? "+" : ""}${hours} 로 보정합니다` : `${column}: 보정하지 않습니다`, "ok");
-    } catch (err) {
-      toast("저장 실패: " + errorMessage(err), "error");
-    }
-  }
-
-  async function saveNeedsCalc(t: api.TableInfo, column: string, needsCalc: boolean) {
-    try {
-      const saved = await api.setNeedsCalc(sysId, t.id, column, needsCalc);
-      setTables((prev) => (prev ?? []).map((x) => (x.id === t.id ? saved : x)));
-      toast(needsCalc ? `${column}: 계산 필요로 표시했습니다` : `${column}: 표시를 지웠습니다`, "ok");
     } catch (err) {
       toast("저장 실패: " + errorMessage(err), "error");
     }
@@ -94,13 +73,12 @@ export function TablesPage() {
                 <tr>
                   <th>테이블</th>
                   <th>용도 (테이블 선택에 쓰임)</th>
-                  <th title="DB 에 UTC 로 저장된 시각 컬럼이면 현지 시차를 고릅니다. 날짜 묶음·기간 조건·표시가 현지 시각 기준이 됩니다.">
-                    시각 컬럼 UTC 보정
-                  </th>
-                  <th title="그대로 합치거나 평균내면 틀리는 컬럼 (예: 계속 커지는 누적값). 이 컬럼을 계산해야 하는 질문은 지표가 있어야 답합니다.">
+                  <th title="DB 에 UTC 로 저장된 시각 컬럼의 현지 시차. 컬럼 설정에서 고릅니다.">UTC 보정</th>
+                  <th title="그대로 합치거나 평균내면 틀리는 컬럼 (예: 계속 커지는 누적값). 컬럼 설정에서 표시합니다.">
                     계산 필요 컬럼
                   </th>
                   <th className="num">지표</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -127,62 +105,40 @@ export function TablesPage() {
                       </div>
                     </td>
                     <td>
-                      {t.time_columns.length === 0 ? (
-                        <span className="muted">—</span>
+                      {t.time_columns.filter((c) => c.utc_offset_hours).length === 0 ? (
+                        <span className="muted">{t.time_columns.length ? "보정 없음" : "—"}</span>
                       ) : (
-                        t.time_columns.map((c) => (
-                          <div key={c.name} className="row" style={{ gap: 6, marginBottom: 4 }}>
-                            <span className="cell-sub" style={{ minWidth: 120 }} title={c.data_type}>
-                              {c.name}
-                            </span>
-                            <select
-                              className="select"
-                              style={{ width: 130 }}
-                              value={c.utc_offset_hours ?? ""}
-                              onChange={(e) => saveOffset(t, c.name, e.target.value === "" ? null : Number(e.target.value))}
-                            >
-                              <option value="">보정 없음</option>
-                              {OFFSETS.map((h) => (
-                                <option key={h} value={h}>
-                                  UTC{h > 0 ? "+" : ""}
-                                  {h}
-                                  {h === 9 ? " (KST)" : ""}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        ))
+                        t.time_columns
+                          .filter((c) => c.utc_offset_hours)
+                          .map((c) => (
+                            <div key={c.name} className="cell-sub">
+                              {c.name} UTC{c.utc_offset_hours! > 0 ? "+" : ""}
+                              {c.utc_offset_hours}
+                            </div>
+                          ))
                       )}
                     </td>
-                    <td style={{ minWidth: 220 }}>
+                    <td style={{ minWidth: 180 }}>
                       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-                        {t.columns
-                          .filter((c) => c.needs_calc)
-                          .map((c) => (
-                            <Chip key={c.name} selected onClick={() => saveNeedsCalc(t, c.name, false)}>
-                              <span title={c.comment || c.data_type}>{c.name} ✕</span>
-                            </Chip>
-                          ))}
-                        <select
-                          className="select"
-                          style={{ width: 150 }}
-                          value=""
-                          aria-label="계산 필요 컬럼 추가"
-                          onChange={(e) => e.target.value && saveNeedsCalc(t, e.target.value, true)}
-                        >
-                          <option value="">+ 컬럼 표시</option>
-                          {t.columns
-                            .filter((c) => !c.needs_calc)
+                        {t.columns.filter((c) => c.needs_calc).length === 0 ? (
+                          <span className="muted">—</span>
+                        ) : (
+                          t.columns
+                            .filter((c) => c.needs_calc)
                             .map((c) => (
-                              <option key={c.name} value={c.name}>
-                                {c.name}
-                                {c.comment ? ` — ${c.comment}` : ""}
-                              </option>
-                            ))}
-                        </select>
+                              <Badge key={c.name} tone="warn">
+                                <span title={c.comment || c.data_type}>{c.name}</span>
+                              </Badge>
+                            ))
+                        )}
                       </div>
                     </td>
                     <td className="num">{t.metric_count}</td>
+                    <td>
+                      <Link to={`/tables/${sysId}/${t.id}`} className="btn sm">
+                        컬럼 설정
+                      </Link>
+                    </td>
                   </tr>
                 ))}
               </tbody>

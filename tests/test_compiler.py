@@ -1,6 +1,6 @@
 import pytest
 
-from compiler import Compiler, ast_tables
+from compiler import CalcColumnError, Compiler, ast_tables
 
 CONTRACT = {
     "driver": "postgresql",
@@ -314,3 +314,74 @@ def test_case_inside_aggregate_and_errors(c):
                 "select": [{"expr": flag, "as": "f"}, {"expr": {"fn": "COUNT", "args": []}, "as": "n"}],
             }
         )
+
+
+def calc_contract():
+    tables = []
+    for t in CONTRACT["tables"]:
+        columns = []
+        for col in t["columns"]:
+            columns.append({**col, "needs_calc": True} if col["name"] == "uman_time" else col)
+        tables.append({**t, "columns": columns})
+    return {**CONTRACT, "tables": tables}
+
+
+USAGE = {"fn": "SUB", "args": [{"fn": "MAX", "args": [{"col": "uman_time"}]}, {"fn": "MIN", "args": [{"col": "uman_time"}]}]}
+
+
+def by_vehicle(expr):
+    return {
+        "from": "bms_log",
+        "select": [{"expr": {"col": "vehicle_id"}, "as": "v"}, {"expr": expr, "as": "x"}],
+        "group_by": [{"col": "vehicle_id"}],
+    }
+
+
+def test_calc_column_needs_metric_expression():
+    guarded = Compiler(calc_contract(), metrics=[])
+    for expr in ({"fn": "SUM", "args": [{"col": "uman_time"}]}, {"fn": "AVG", "args": [{"col": "uman_time"}]}, USAGE):
+        with pytest.raises(CalcColumnError) as caught:
+            guarded.compile(by_vehicle(expr))
+        assert (caught.value.table, caught.value.column) == ("bms_log", "uman_time")
+    # 값을 보여 주기만 하는 MAX 하나, 계산 필요가 아닌 컬럼의 SUM 은 된다
+    guarded.compile(by_vehicle({"fn": "MAX", "args": [{"col": "uman_time"}]}))
+    guarded.compile(by_vehicle({"fn": "SUM", "args": [{"col": "eg_time"}]}))
+    # 지표 등록(검사 없음)에서는 그대로 컴파일한다
+    Compiler(calc_contract()).compile(by_vehicle(USAGE))
+
+
+def test_metric_expression_is_allowed_with_or_without_table_prefix():
+    metric = {"ast": DAILY}
+    guarded = Compiler(calc_contract(), metrics=[metric])
+    guarded.compile(by_vehicle(USAGE))
+    qualified = {"fn": "sub", "args": [{"fn": "MAX", "args": [{"col": "bms_log.uman_time"}]}, {"fn": "MIN", "args": [{"col": "bms_log.uman_time"}]}]}
+    guarded.compile(by_vehicle(qualified))
+    # 지표 결과(하위 쿼리 컬럼)를 다시 합치는 것은 계산 필요 컬럼이 아니다
+    guarded.compile(
+        {
+            "from": {"query": DAILY, "as": "d"},
+            "select": [{"expr": {"col": "vehicle_id"}, "as": "v"}, {"expr": {"fn": "SUM", "args": [{"col": "uman_hours"}]}, "as": "total"}],
+            "group_by": [{"col": "vehicle_id"}],
+        }
+    )
+    with pytest.raises(CalcColumnError):
+        guarded.compile(by_vehicle({"fn": "SUM", "args": [{"col": "uman_time"}]}))
+
+
+def test_same_calculation_written_differently_is_allowed():
+    """지표는 a - b - c 로, LLM 은 (a - b) - c 로 적어도 같은 계산이다 (유인 가동시간 = 엔진 가동시간 - 무인 가동시간)"""
+    contract = calc_contract()
+    for col in contract["tables"][0]["columns"]:
+        if col["name"] == "eg_time":
+            col["needs_calc"] = True
+    flat = {"fn": "SUB", "args": [
+        {"fn": "MAX", "args": [{"col": "eg_time"}]}, {"fn": "MIN", "args": [{"col": "eg_time"}]}, USAGE,
+    ]}
+    guarded = Compiler(contract, metrics=[{"ast": by_vehicle(flat)}])
+    nested = {"fn": "SUB", "args": [
+        {"fn": "SUB", "args": [{"fn": "MAX", "args": [{"col": "eg_time"}]}, {"fn": "MIN", "args": [{"col": "eg_time"}]}]}, USAGE,
+    ]}
+    guarded.compile(by_vehicle(nested))
+    # 지표가 MAX, MIN 으로 계산하는 컬럼을 SUM 하면 안 된다
+    with pytest.raises(CalcColumnError, match="MAX, MIN"):
+        guarded.compile(by_vehicle({"fn": "SUM", "args": [{"col": "eg_time"}]}))

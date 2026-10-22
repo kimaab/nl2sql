@@ -199,3 +199,40 @@ def test_clarify_after_failed_attempt_clears_error():
     out = run_question(contract(), "무인 기록", model, now=NOW)
     assert out["clarification"] == "어느 기간인가요?"
     assert out["error"] is None
+
+
+def ast_reply(select, group_by=None):
+    return {"ast": {"from": "bms_log", "select": select, "group_by": group_by or []}, "reason": ""}
+
+
+SUM_UMAN = {"expr": {"fn": "SUM", "args": [{"col": "uman_time"}]}, "as": "uman"}
+VEHICLE = {"expr": {"col": "vehicle_id"}, "as": "vehicle_id"}
+
+
+def test_calc_column_without_metric_turns_into_needs_metric():
+    """테이블 선택이 지표 필요를 놓쳐도, 지표 없이 [계산 필요] 컬럼을 계산하면 SQL 대신 지표 등록으로 끝난다"""
+    model = FakeModel(
+        {"tables": ["bms_log"], "needs_metric": False, "metrics": [], "reason": "", "clarify": ""},
+        ast_reply([VEHICLE, SUM_UMAN], [{"col": "vehicle_id"}]),
+    )
+    out = run_question({**contract(), "metrics": []}, "차량별 무인 가동시간 합계", model, now=NOW)
+    assert out["sql"] is None and out["needs_metric"] is True
+    assert out["missing"] == [{"name": "uman_time", "table": "bms_log", "column": "uman_time"}]
+    assert out["error"].startswith("지표 등록이 필요합니다 — bms_log.uman_time")
+    assert len(model.calls) == 2  # 다시 묻지 않는다
+
+
+def test_calc_column_must_follow_the_chosen_metric():
+    """고른 지표가 그 컬럼을 쓰면, 지표 식이 아닌 계산은 고쳐 쓰게 한다"""
+    metric_expr = METRIC_AST["select"][2]["expr"]
+    model = FakeModel(
+        {"tables": ["bms_log"], "needs_metric": True, "metrics": ["무인 가동시간"], "reason": "", "clarify": ""},
+        ast_reply([VEHICLE, SUM_UMAN], [{"col": "vehicle_id"}]),
+        ast_reply([VEHICLE, {"expr": metric_expr, "as": "uman"}], [{"col": "vehicle_id"}]),
+    )
+    out = run_question(contract(), "차량별 무인 가동시간", model, now=NOW)
+    assert out["sql"] == (
+        'SELECT "vehicle_id" AS "vehicle_id", (MAX("uman_time") - MIN("uman_time")) AS "uman" FROM "bms_log" GROUP BY "vehicle_id"'
+    )
+    assert out["attempts"] == 2
+    assert "[계산 필요] 컬럼" in model.calls[2][-1].content

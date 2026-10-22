@@ -15,7 +15,6 @@ AST 모양
 """
 
 import datetime
-import json
 
 AGGREGATES = {"SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"}
 ARITHMETIC = {"ADD": "+", "SUB": "-", "MUL": "*"}
@@ -143,6 +142,7 @@ class Scope:
     def __init__(self, dialect: Dialect):
         self.dialect = dialect
         self.sources: dict[str, dict[str, int]] = {}
+        self.real: dict[str, str] = {}  # 별칭 → 실제 테이블 (하위 쿼리는 없다)
 
     def add(self, alias: str, columns: dict):
         if alias in self.sources:
@@ -202,36 +202,23 @@ class CalcColumnError(AstError):
         self.column = column
 
 
-def _normalized(node):
-    """지표 식과 비교하려고 모양을 맞춘다: 함수 이름은 대문자, 컬럼의 '테이블.' 은 뺀다"""
-    if isinstance(node, list):
-        out = []
-        for x in node:
-            out.append(_normalized(x))
-        return out
-    if not isinstance(node, dict):
-        return node
-    out = {}
-    for key, value in node.items():
-        if key == "col" and isinstance(value, str):
-            out[key] = value.split(".")[-1]
-        elif key == "fn" and isinstance(value, str):
-            out[key] = value.upper()
-        else:
-            out[key] = _normalized(value)
-    return out
+def _metric_aggregates(node, out: dict):
+    """지표 AST 에서 컬럼마다 쓴 집계 함수. {컬럼: {"MAX", "MIN"}} ('테이블.' 은 뺀다)
 
-
-def _fn_nodes(node, out: set):
-    """AST 안의 모든 함수 식 (정규화한 JSON)"""
+    식을 그대로 비교하지 않는다 — a - b - c 와 (a - b) - c 처럼 같은 계산이 여러 모양으로 적힌다.
+    """
     if isinstance(node, list):
         for x in node:
-            _fn_nodes(x, out)
+            _metric_aggregates(x, out)
     elif isinstance(node, dict):
-        if "fn" in node:
-            out.add(json.dumps(_normalized(node), sort_keys=True, ensure_ascii=False))
+        fn = str(node.get("fn") or "").upper()
+        args = node.get("args")
+        if fn in AGGREGATES and isinstance(args, list) and len(args) == 1 and isinstance(args[0], dict):
+            col = args[0].get("col")
+            if isinstance(col, str):
+                out.setdefault(col.split(".")[-1], set()).add(fn)
         for value in node.values():
-            _fn_nodes(value, out)
+            _metric_aggregates(value, out)
 
 
 def _sqls(parts) -> list[str]:
@@ -260,11 +247,11 @@ class Compiler:
                     calc.add(c["name"])
             self.tables[t["name"]] = cols
             self.calc_columns[t["name"]] = calc
-        self.allowed: set | None = None
+        self.allowed: dict | None = None  # {컬럼: 지표가 그 컬럼에 쓴 집계 함수}
         if metrics is not None:
-            self.allowed = set()
+            self.allowed = {}
             for m in metrics:
-                _fn_nodes(m.get("ast"), self.allowed)
+                _metric_aggregates(m.get("ast"), self.allowed)
 
     def compile(self, ast: dict) -> str:
         sql, _ = self._query(ast, 0)
@@ -393,7 +380,35 @@ class Compiler:
         if not isinstance(name, str) or name not in self.tables:
             raise AstError(f"없는 테이블입니다 -> {name}")
         scope.add(name, self.tables[name])
+        scope.real[name] = name
         return self.dialect.q(name)
+
+    def _check_aggregate(self, fn: str, refs: list):
+        """[계산 필요] 컬럼의 집계. 고른 지표가 그 컬럼에 쓴 집계 함수만 된다.
+        지표가 쓰지 않은 컬럼은 MIN, MAX, COUNT (값을 보여 주거나 세기)만 된다 — 더하거나 평균내면 틀린다."""
+        if self.allowed is None:
+            return
+        for table, column in refs:
+            used = self.allowed.get(column)
+            if used is None and fn in ("SUM", "AVG"):
+                self._calc_error(table, column, fn)
+            if used is not None and fn not in used:
+                self._calc_error(table, column, fn, f"지표처럼 {', '.join(sorted(used))} 로 계산하십시오")
+
+    def _check_arithmetic(self, fn: str, refs: list):
+        """[계산 필요] 컬럼의 집계끼리 계산(예: MAX - MIN = 하루 사용량)은 그 컬럼을 쓰는 지표를 골랐을 때만 된다"""
+        if self.allowed is None:
+            return
+        for table, column in refs:
+            if column not in self.allowed:
+                self._calc_error(table, column, fn)
+
+    def _calc_error(self, table: str, column: str, fn: str, hint: str = "지표의 계산 식을 그대로 쓰십시오"):
+        raise CalcColumnError(
+            f"{table}.{column} 은 [계산 필요] 컬럼이라 지표에 없는 계산({fn})을 할 수 없습니다 — {hint}",
+            table,
+            column,
+        )
 
     def _column(self, alias: str, col: str, scope: Scope) -> str:
         """컬럼 SQL. UTC 컬럼은 현지 시각으로 보정한다."""
@@ -519,7 +534,9 @@ class Compiler:
             if e["col"] == "*":
                 raise AstError('{"col": "*"} 는 select 항목으로만 씁니다 (건수는 {"fn": "COUNT", "args": []})')
             alias, col, _ = scope.resolve(e["col"])
-            return self._column(alias, col, scope), _info(cols=True)
+            table = scope.real.get(alias)
+            raw = [(table, col)] if table and col in self.calc_columns.get(table, ()) else []
+            return self._column(alias, col, scope), _info(cols=True, raw=raw)
         if "num" in e:
             if isinstance(e["num"], bool) or not isinstance(e["num"], (int, float)):
                 raise AstError(f"num 은 숫자입니다 -> {e['num']!r}")
@@ -549,18 +566,26 @@ class Compiler:
             ((sql, info),) = subs(args, inside=True)
             if info["window"]:
                 raise AstError("집계 안에 윈도 함수를 쓸 수 없습니다")
+            if info["raw"]:
+                self._check_aggregate(fn, info["raw"])
             body = f"COUNT(DISTINCT {sql})" if fn == "COUNT_DISTINCT" else f"{fn}({sql})"
-            return body, {**info, "agg": True}
+            return body, {**info, "agg": True, "raw": [], "calc": info["raw"]}
         if fn in ARITHMETIC:
             if len(args) < 2:
                 raise AstError(f"{fn} 은 인자 둘 이상입니다")
             parts = subs(args)
-            return "(" + f" {ARITHMETIC[fn]} ".join(_sqls(parts)) + ")", _merge(parts)
+            merged = _merge(parts)
+            if merged["calc"]:
+                self._check_arithmetic(fn, merged["calc"])
+            return "(" + f" {ARITHMETIC[fn]} ".join(_sqls(parts)) + ")", merged
         if fn == "DIV":
             if len(args) != 2:
                 raise AstError("DIV 는 인자 둘입니다")
             parts = subs(args)
-            return f"({parts[0][0]} * 1.0 / NULLIF({parts[1][0]}, 0))", _merge(parts)
+            merged = _merge(parts)
+            if merged["calc"]:
+                self._check_arithmetic(fn, merged["calc"])
+            return f"({parts[0][0]} * 1.0 / NULLIF({parts[1][0]}, 0))", merged
         if fn in SCALARS:
             lo, hi = SCALARS[fn]
             if not lo <= len(args) <= hi:

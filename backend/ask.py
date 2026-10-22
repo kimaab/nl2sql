@@ -10,7 +10,7 @@ import json
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from compiler import Compiler, temporal_kind
+from compiler import CalcColumnError, Compiler, temporal_kind
 from selector import Step, chat, model_name, parse_json, select_tables
 
 MAX_ATTEMPTS = 3
@@ -147,7 +147,8 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
                 break
     system, user = ast_prompt(contract, selection.tables, metrics, now or datetime.datetime.now())
     messages = [SystemMessage(system), HumanMessage(f"{user}\n\n[질문]\n{question}")]
-    compiler = Compiler(contract)
+    # [계산 필요] 컬럼의 계산은 고른 지표의 식으로만 허용한다 — 지표 없이 LLM 이 만든 계산은 틀리기 쉽다
+    compiler = Compiler(contract, metrics)
     step = Step("sql", model=model_name(model))
     for attempt in range(1, MAX_ATTEMPTS + 1):
         reply = chat(model, messages, step, attempt)
@@ -159,6 +160,16 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
                 step.reason = "모델이 되물음"
                 break
             sql = compiler.compile(parsed.get("ast"))
+        except CalcColumnError as error:
+            if not _covered(metrics, error.column):
+                # 고른 지표 어디에도 이 컬럼의 계산이 없다 — 다시 시켜도 지표 없이 계산할 뿐이라 지표 등록으로 넘긴다
+                _needs_metric_for(outcome, contract, error)
+                step.reason = f"{attempt}번째 시도: {error}"
+                break
+            outcome["error"] = str(error)
+            step.reason = f"{attempt}번째 시도 실패: {error}"
+            messages += [reply, HumanMessage(f"오류: {error}\n고쳐서 JSON 으로 다시 답하십시오.")]
+            continue
         except (ValueError, KeyError, TypeError) as error:
             outcome["error"] = str(error)
             step.reason = f"{attempt}번째 시도 실패: {error}"
@@ -170,6 +181,43 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
         break
     outcome["steps"].append(step.as_dict())
     return _with_tokens(outcome)
+
+
+def _covered(metrics: list, column: str) -> bool:
+    """고른 지표 중 이 컬럼을 쓰는 것이 있나"""
+    for m in metrics:
+        if column in _columns_in(m.get("ast")):
+            return True
+    return False
+
+
+def _columns_in(node, out: set | None = None) -> set:
+    """AST 가 쓰는 컬럼 이름 ('테이블.' 은 뺀다)"""
+    out = set() if out is None else out
+    if isinstance(node, list):
+        for x in node:
+            _columns_in(x, out)
+    elif isinstance(node, dict):
+        if isinstance(node.get("col"), str):
+            out.add(node["col"].split(".")[-1])
+        for value in node.values():
+            _columns_in(value, out)
+    return out
+
+
+def _needs_metric_for(outcome: dict, contract: dict, error) -> None:
+    """지표 없는 [계산 필요] 컬럼 계산 → '지표 등록이 필요합니다' 로 끝낸다 (테이블 선택 단계가 놓친 경우)"""
+    name = error.column
+    for t in contract["tables"]:
+        if t["name"] == error.table:
+            for c in t["columns"]:
+                if c["name"] == error.column and str(c.get("description") or "").strip():
+                    name = " ".join(str(c["description"]).split())
+    outcome["needs_metric"] = True
+    outcome["missing"] = [{"name": name, "table": error.table, "column": error.column}]
+    outcome["error"] = (
+        f"지표 등록이 필요합니다 — {error.table}.{error.column}({name}) 은 계산이 필요한 컬럼인데 이 계산의 지표가 없습니다"
+    )
 
 
 def _with_tokens(outcome: dict) -> dict:

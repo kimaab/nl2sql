@@ -7,6 +7,7 @@ import { SystemForm } from "./pages/systems/SystemForm";
 import { SystemSync } from "./pages/systems/SystemSync";
 import { SyncHistory } from "./pages/systems/SyncHistory";
 import { TablesPage } from "./pages/systems/TablesPage";
+import { TableColumns } from "./pages/systems/TableColumns";
 import { RelationsPage } from "./pages/systems/RelationsPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { MetricList } from "./pages/metrics/MetricList";
@@ -29,6 +30,7 @@ function App() {
           <Route path="/sync" element={<SystemSync />} />
           <Route path="/sync/history" element={<SyncHistory />} />
           <Route path="/tables" element={<TablesPage />} />
+          <Route path="/tables/:sysId/:tableId" element={<TableColumns />} />
           <Route path="/relations" element={<RelationsPage />} />
 
           <Route path="/metrics" element={<MetricList />} />
