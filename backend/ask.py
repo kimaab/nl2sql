@@ -17,7 +17,8 @@ MAX_ATTEMPTS = 3
 
 AST_SYSTEM = """당신은 질문을 '{name}' 데이터베이스({driver})의 조회 명세(AST, JSON)로 바꾸는 역할입니다.
 {domain}[오늘]
-{today}. "최근 7일", "지난달" 같은 표현은 이 날짜를 기준으로 계산해 'YYYY-MM-DD' 또는 'YYYY-MM-DD HH:MM:SS' 로 적습니다.
+{today}. "오늘", "어제", "최근 7일", "지난달" 같은 표현은 이 날짜를 기준으로 계산해 'YYYY-MM-DD' 또는 'YYYY-MM-DD HH:MM:SS' 로 적습니다.
+기간 조건에 CURRENT_DATE 를 쓰지 않습니다.
 
 [AST 모양]
 {{

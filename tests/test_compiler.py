@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 
 from compiler import CalcColumnError, Compiler, ast_tables
@@ -72,6 +74,27 @@ def test_utc_filter_value_written_as_str_expression_is_still_shifted(c):
         }
     )
     assert sql.endswith("WHERE \"collect_datetime\" < (TIMESTAMP '2026-10-15 00:00:00' - INTERVAL '9 hours')")
+
+
+def test_utc_column_against_current_date_uses_local_today_constant():
+    # UTC 10-21 20:00 = 현지(+9) 10-22 05:00 — DB 의 CURRENT_DATE(UTC 면 10-21) 대신 현지 오늘
+    c = Compiler(CONTRACT, utc_now=datetime.datetime(2026, 10, 21, 20, 0))
+    today = {"fn": "DATE", "args": [{"fn": "CURRENT_DATE", "args": []}]}
+    yesterday = {"fn": "ADD_DAYS", "args": [{"fn": "CURRENT_DATE"}, {"num": -1}]}
+    sql = c.compile(
+        {
+            "from": "bms_log",
+            "select": [{"expr": {"col": "vehicle_id"}, "as": "v"}],
+            "where": [
+                {"expr": {"col": "collect_datetime"}, "op": ">=", "value": yesterday},
+                {"expr": {"col": "collect_datetime"}, "op": "<", "value": today},
+            ],
+        }
+    )
+    assert sql.endswith(
+        "WHERE \"collect_datetime\" >= (TIMESTAMP '2026-10-21 00:00:00' - INTERVAL '9 hours') "
+        "AND \"collect_datetime\" < (TIMESTAMP '2026-10-22 00:00:00' - INTERVAL '9 hours')"
+    )
 
 
 def test_add_hours_minus_offset_gives_stored_value(c):

@@ -230,9 +230,11 @@ def _sqls(parts) -> list[str]:
 
 
 class Compiler:
-    def __init__(self, contract: dict, metrics: list | None = None):
+    def __init__(self, contract: dict, metrics: list | None = None, utc_now: datetime.datetime | None = None):
         """metrics 를 주면 [계산 필요] 컬럼의 계산을 그 지표들의 식으로만 허용한다 (질문 처리).
-        주지 않으면 검사하지 않는다 (지표 등록 — 지표가 곧 그 계산이다)."""
+        주지 않으면 검사하지 않는다 (지표 등록 — 지표가 곧 그 계산이다).
+        utc_now 는 UTC 컬럼과 비교한 CURRENT_DATE 를 오늘 날짜로 바꿀 때의 기준 (주지 않으면 지금)."""
+        self.utc_now = utc_now
         self.dialect = Dialect(contract.get("driver") or "postgresql")
         self.tables: dict[str, dict[str, int]] = {}
         self.calc_columns: dict[str, set] = {}
@@ -510,7 +512,7 @@ class Compiler:
         return None
 
     def _utc_values(self, value, hours: int):
-        """현지 시각 상수를 UTC 로. 날짜·시각 상수가 아니면 None (그때는 컬럼을 보정해 비교한다)."""
+        """현지 시각 상수(CURRENT_DATE 는 오늘 날짜로)를 UTC 로. 그 밖의 식이면 None (그때는 컬럼을 보정해 비교한다)."""
         values = value if isinstance(value, list) else [value]
         if not values:
             return None
@@ -518,11 +520,35 @@ class Compiler:
         for v in values:
             if isinstance(v, dict) and set(v) == {"str"}:
                 v = v["str"]  # 값을 {"str": "…"} 식으로 적어도 상수다
-            moment = parse_datetime(v) if isinstance(v, str) else None
+            if isinstance(v, str):
+                moment = parse_datetime(v)
+            else:
+                moment = self._local_day(v, hours)
             if moment is None:
                 return None
             out.append(self.dialect.add_interval(self.dialect.timestamp(moment), -hours, "hours"))
         return out if isinstance(value, list) else out[0]
+
+    def _local_day(self, value, hours: int) -> datetime.datetime | None:
+        """CURRENT_DATE · DATE(CURRENT_DATE) · ADD_DAYS(그것, n) 이면 그 컬럼의 현지 날짜 0시, 아니면 None.
+        DB 의 CURRENT_DATE 는 DB 시간대 날짜라 현지 '오늘' 과 다를 수 있고, 컬럼을 감싸면 인덱스를 못 탄다."""
+        if not isinstance(value, dict):
+            return None
+        fn = str(value.get("fn", "")).upper()
+        args = value.get("args") or []
+        if fn == "CURRENT_DATE" and not args:
+            now = self.utc_now or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            local = now + datetime.timedelta(hours=hours)
+            return datetime.datetime(local.year, local.month, local.day)
+        if fn == "DATE" and len(args) == 1:
+            return self._local_day(args[0], hours)
+        if fn == "ADD_DAYS" and len(args) == 2 and isinstance(args[1], dict):
+            n = args[1].get("num")
+            day = self._local_day(args[0], hours)
+            if day is None or isinstance(n, bool) or not isinstance(n, int):
+                return None
+            return day + datetime.timedelta(days=n)
+        return None
 
     # ── 식 → (SQL, {agg, window, cols}) ──────────────────────────────────
 
