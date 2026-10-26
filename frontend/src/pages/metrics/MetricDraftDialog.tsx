@@ -80,8 +80,8 @@ function DraftNotes({ draft }: { draft: api.MetricDraft }) {
         <Alert tone="warn">예시 기간에 결과가 없습니다. 계산이 맞는지 볼 수 없으니 기간을 바꿔 확인하세요.</Alert>
       )}
       {draft.assumptions.length > 0 && (
-        <Alert tone="warn">
-          <strong>확인할 가정</strong>
+        <Alert tone="danger">
+          <strong>지표생성 근거</strong>
           <ul className="draft-list">
             {draft.assumptions.map((a) => (
               <li key={a}>{a}</li>
