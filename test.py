@@ -1,10 +1,8 @@
-fruits = ["apple", "banana", "cherry"]
+if __name__ == '__main__':
 
-for i, fruit in enumerate(fruits):
-    print(f"{i}  {fruit}")
-
-for attempt in range(1, 3):
-    print(attempt)
-
-selection = 1
-print(selection)
+    while True:
+        num = int(input())
+        if num > 0:
+            print(f"num : {num} num square  {num * num}")
+        else:
+            break

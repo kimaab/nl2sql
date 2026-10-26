@@ -4,6 +4,7 @@ import oracledb
 from psycopg.conninfo import make_conninfo
 import logging
 
+from db import LoggingCursor
 from models import Driver, ApiException
 
 log = logging.getLogger("nl2sql.catalog")
@@ -38,7 +39,7 @@ def read_postgresql(row: dict) -> list[dict]:
         connect_timeout=CONNECT_TIMEOUT,
     )
     try:
-        connection = psycopg.connect(conninfo)
+        connection = psycopg.connect(conninfo, cursor_factory=LoggingCursor)
     except Exception as error:
         raise _unreachable(row, error) from error
 

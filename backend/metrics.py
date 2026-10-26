@@ -114,7 +114,7 @@ def read_only(row: dict, timeout_s: int = VERIFY_TIMEOUT_S):
             conn = psycopg.connect(make_conninfo(
                 host=row["host"], port=row["port"], user=row["username"] or None,
                 password=row["password"] or None, dbname=row["db_name"], connect_timeout=10,
-            ))
+            ), cursor_factory=db.LoggingCursor)
             conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             conn.read_only = True
         elif driver == "mysql":
