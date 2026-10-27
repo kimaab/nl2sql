@@ -400,6 +400,148 @@ class TablePurposeInput(BaseModel):
     purpose: str
 
 
+RunStatus = Literal["running", "done", "error", "interrupted"]
+
+
+class AutoRunRequest(BaseModel):
+    """지표 자동 등록. tables 를 비우면 지표가 없는 테이블 중 관계(FK)가 많은 것부터 max_tables 개를 고른다.
+
+    allow_full_scan: 실행 계획이 큰 테이블 전체를 훑어도 결과 비교를 돌린다 (테스트 DB 용 — 운영 DB 에는 끈다)
+    """
+
+    tables: list[str] = []
+    max_tables: int = 5
+    per_table: int = 3
+    allow_full_scan: bool = False
+
+    @field_validator("tables")
+    @classmethod
+    def _clean_tables(cls, values: list[str]) -> list[str]:
+        return _clean_names(values)
+
+    @field_validator("max_tables")
+    @classmethod
+    def _max_tables(cls, value: int) -> int:
+        if not 1 <= value <= 50:
+            raise ValueError("테이블은 한 번에 1 ~ 50개입니다")
+        return value
+
+    @field_validator("per_table")
+    @classmethod
+    def _per_table(cls, value: int) -> int:
+        if not 1 <= value <= 10:
+            raise ValueError("테이블마다 지표 후보는 1 ~ 10개입니다")
+        return value
+
+
+class AutoTry(BaseModel):
+    """후보 하나의 시도 한 번"""
+
+    sql: str
+    stage: str | None = None
+    error: str | None = None
+
+
+class AutoItem(BaseModel):
+    """자동 등록 후보 하나. status: registered = 지표로 저장, failed = 확인 실패, skipped = 이름 중복 등으로 건너뜀"""
+
+    id: int
+    table_name: str
+    name: str
+    description: str
+    synonyms: list[str]
+    sql: str
+    rationale: str
+    status: Literal["registered", "failed", "skipped"]
+    stage: str | None
+    reason: str
+    attempts: int
+    tries: list[AutoTry]
+    check: MetricCheck | None
+    full_scans: list[str]
+    metric_id: UUID | None
+    created_at: str
+
+
+class AutoRun(BaseModel):
+    id: UUID
+    system_id: UUID
+    status: RunStatus
+    options: dict
+    tables: list[str]
+    tables_done: int
+    proposed: int
+    registered: int
+    failed: int
+    skipped: int
+    prompt_tokens: int
+    completion_tokens: int
+    error: str | None
+    started_at: str
+    finished_at: str | None
+
+
+class AutoRunDetail(AutoRun):
+    items: list[AutoItem]
+
+
+class ValidationRequest(BaseModel):
+    """등록된 지표 검증. metric_ids 에 고른 지표만 검증한다 (비우면 돌리지 않는다).
+
+    run_sql: 대상 DB 에서 결과 비교 · 결과 점검 · 실행 계획을 본다. use_llm: LLM 이 SQL 이 이름 · 설명과 맞는지 검토한다.
+    allow_full_scan: 실행 계획이 큰 테이블 전체를 훑어도 결과 비교 · 결과 점검을 돌린다 (테스트 DB 용)
+    """
+
+    metric_ids: list[UUID] = []
+    run_sql: bool = True
+    use_llm: bool = True
+    allow_full_scan: bool = False
+
+
+class ValidationCheck(BaseModel):
+    """점검 하나. status: pass | warn | fail | skip (앞 단계가 실패했거나 옵션으로 끈 것)"""
+
+    key: str
+    label: str
+    status: Literal["pass", "warn", "fail", "skip"]
+    message: str
+    detail: dict = {}
+
+
+class ValidationItem(BaseModel):
+    id: int
+    run_id: UUID
+    metric_id: UUID
+    metric_name: str
+    metric_version: int
+    verdict: Literal["pass", "warn", "fail"]
+    summary: str
+    checks: list[ValidationCheck]
+    elapsed_ms: int
+    created_at: str
+
+
+class ValidationRun(BaseModel):
+    id: UUID
+    system_id: UUID
+    status: RunStatus
+    options: dict
+    total: int
+    done: int
+    passed: int
+    warned: int
+    failed: int
+    prompt_tokens: int
+    completion_tokens: int
+    error: str | None
+    started_at: str
+    finished_at: str | None
+
+
+class ValidationRunDetail(ValidationRun):
+    items: list[ValidationItem]
+
+
 class ApiException(Exception):
     """API 예외"""
 

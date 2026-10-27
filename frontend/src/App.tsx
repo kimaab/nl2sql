@@ -13,6 +13,11 @@ import { HistoryPage } from "./pages/HistoryPage";
 import { MetricList } from "./pages/metrics/MetricList";
 import { MetricDetail } from "./pages/metrics/MetricDetail";
 import { MetricForm } from "./pages/metrics/MetricForm";
+import { AutoRegisterPage } from "./pages/metrics/auto/AutoRegisterPage";
+import { AutoRunDetail } from "./pages/metrics/auto/AutoRunDetail";
+import { ValidationPage } from "./pages/metrics/validate/ValidationPage";
+import { ValidationRunDetail } from "./pages/metrics/validate/ValidationRunDetail";
+import { MetricValidationHistory } from "./pages/metrics/validate/MetricValidationHistory";
 import "./styles.css";
 
 function App() {
@@ -37,6 +42,11 @@ function App() {
           <Route path="/metrics/new" element={<MetricForm />} />
           <Route path="/metrics/:dsId/:metricId" element={<MetricDetail />} />
           <Route path="/metrics/:dsId/:metricId/edit" element={<MetricForm />} />
+          <Route path="/metrics/auto" element={<AutoRegisterPage />} />
+          <Route path="/metrics/auto/:dsId/:runId" element={<AutoRunDetail />} />
+          <Route path="/metrics/validate" element={<ValidationPage />} />
+          <Route path="/metrics/validate/:dsId/:runId" element={<ValidationRunDetail />} />
+          <Route path="/metrics/validate/:dsId/metric/:metricId" element={<MetricValidationHistory />} />
 
 
           <Route path="*" element={<Navigate to="/ask" replace />} />

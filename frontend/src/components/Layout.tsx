@@ -24,6 +24,8 @@ const GROUPS: { label: string; links: { to: string; text: string; end?: boolean 
     links: [
       { to: "/metrics", text: "목록", end: true },
       { to: "/metrics/new", text: "등록" },
+      { to: "/metrics/auto", text: "자동 등록" },
+      { to: "/metrics/validate", text: "검증" },
     ],
   },
 ];

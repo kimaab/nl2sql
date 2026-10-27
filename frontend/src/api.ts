@@ -331,3 +331,128 @@ export const patchHistory = (id: string, patch: HistoryPatch) =>
 export const deleteHistory = (id: string) => request<void>(`/history/${id}`, { method: "DELETE" });
 export const exportHistory = (sysId: string) =>
   request<{ system: string; cases: unknown[] }>(`/history/export${q({ system_id: sysId })}`);
+
+// 지표 자동 등록 · 지표 검증 (스레드에서 돌고, 실행 기록을 다시 읽어 진행을 본다)
+export type RunStatus = "running" | "done" | "error" | "interrupted";
+
+export interface AutoRunRequest {
+  /** 비우면 지표가 없는 테이블 중 관계(FK)가 많은 것부터 max_tables 개 */
+  tables: string[];
+  max_tables: number;
+  per_table: number;
+  /** 실행 계획이 큰 테이블 전체를 훑어도 결과 비교를 돌린다 (테스트 DB 용) */
+  allow_full_scan: boolean;
+}
+
+export interface AutoTry {
+  sql: string;
+  stage: string | null;
+  error: string | null;
+}
+
+/** 자동 등록 후보 하나. stage: 멈춘 단계 (llm | duplicate | simple | parse | compile | guard | verify | save) */
+export interface AutoItem {
+  id: number;
+  table_name: string;
+  name: string;
+  description: string;
+  synonyms: string[];
+  sql: string;
+  rationale: string;
+  status: "registered" | "failed" | "skipped";
+  stage: string | null;
+  reason: string;
+  attempts: number;
+  tries: AutoTry[];
+  check: MetricCheck | null;
+  full_scans: string[];
+  metric_id: string | null;
+  created_at: string;
+}
+
+export interface AutoRun {
+  id: string;
+  system_id: string;
+  status: RunStatus;
+  options: Record<string, any>;
+  tables: string[];
+  tables_done: number;
+  proposed: number;
+  registered: number;
+  failed: number;
+  skipped: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface AutoRunDetail extends AutoRun {
+  items: AutoItem[];
+}
+
+export interface ValidationRequest {
+  /** 고른 지표만 검증한다 (비우면 서버가 거절한다) */
+  metric_ids: string[];
+  run_sql: boolean;
+  use_llm: boolean;
+  allow_full_scan: boolean;
+}
+
+export type CheckStatus = "pass" | "warn" | "fail" | "skip";
+
+export interface ValidationCheck {
+  key: string;
+  label: string;
+  status: CheckStatus;
+  message: string;
+  detail: Record<string, any>;
+}
+
+export interface ValidationItem {
+  id: number;
+  run_id: string;
+  metric_id: string;
+  metric_name: string;
+  metric_version: number;
+  verdict: "pass" | "warn" | "fail";
+  summary: string;
+  checks: ValidationCheck[];
+  elapsed_ms: number;
+  created_at: string;
+}
+
+export interface ValidationRun {
+  id: string;
+  system_id: string;
+  status: RunStatus;
+  options: Record<string, any>;
+  total: number;
+  done: number;
+  passed: number;
+  warned: number;
+  failed: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface ValidationRunDetail extends ValidationRun {
+  items: ValidationItem[];
+}
+
+export const startAutoRun = (sysId: string, input: AutoRunRequest) =>
+  request<AutoRun>(`/systems/${sysId}/metric-auto/runs`, { method: "POST", body: input });
+export const listAutoRuns = (sysId: string) => request<AutoRun[]>(`/systems/${sysId}/metric-auto/runs`);
+export const getAutoRun = (sysId: string, runId: string) =>
+  request<AutoRunDetail>(`/systems/${sysId}/metric-auto/runs/${runId}`);
+export const startValidation = (sysId: string, input: ValidationRequest) =>
+  request<ValidationRun>(`/systems/${sysId}/metric-validations`, { method: "POST", body: input });
+export const listValidations = (sysId: string) => request<ValidationRun[]>(`/systems/${sysId}/metric-validations`);
+export const getValidation = (sysId: string, runId: string) =>
+  request<ValidationRunDetail>(`/systems/${sysId}/metric-validations/${runId}`);
+export const metricValidations = (sysId: string, metricId: string) =>
+  request<ValidationItem[]>(`/systems/${sysId}/metrics/${metricId}/validations`);

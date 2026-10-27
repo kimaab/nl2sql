@@ -160,3 +160,79 @@ CREATE TABLE IF NOT EXISTS ask_trace (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_ask_trace_ask ON ask_trace (ask_id, stage);
+
+-- 지표 자동 등록 실행. 테이블마다 LLM 이 지표 후보를 쓰고, 등록 확인(AST 변환 → 컴파일 → 결과 비교)을 통과한 것만 지표로 저장한다.
+CREATE TABLE IF NOT EXISTS metric_auto_run (
+    id                UUID PRIMARY KEY,
+    system_id         UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
+    status            TEXT        NOT NULL DEFAULT 'running',  -- running | done | error (running 인데 돌고 있지 않으면 중단)
+    options           JSONB       NOT NULL DEFAULT '{}',
+    tables            JSONB       NOT NULL DEFAULT '[]',       -- 후보를 쓸 테이블
+    tables_done       INTEGER     NOT NULL DEFAULT 0,
+    proposed          INTEGER     NOT NULL DEFAULT 0,
+    registered        INTEGER     NOT NULL DEFAULT 0,
+    failed            INTEGER     NOT NULL DEFAULT 0,
+    skipped           INTEGER     NOT NULL DEFAULT 0,
+    prompt_tokens     INTEGER     NOT NULL DEFAULT 0,
+    completion_tokens INTEGER     NOT NULL DEFAULT 0,
+    error             TEXT,
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at       TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_metric_auto_run_system ON metric_auto_run (system_id, started_at DESC);
+
+-- 자동 등록 후보 하나. 등록됐든 아니든 남는다 — 왜 등록되지 않았는지(stage · reason)와 시도마다의 SQL 을 본다.
+CREATE TABLE IF NOT EXISTS metric_auto_item (
+    id          BIGSERIAL PRIMARY KEY,
+    run_id      UUID        NOT NULL REFERENCES metric_auto_run (id) ON DELETE CASCADE,
+    table_name  TEXT        NOT NULL,
+    name        TEXT        NOT NULL DEFAULT '',
+    description TEXT        NOT NULL DEFAULT '',
+    synonyms    JSONB       NOT NULL DEFAULT '[]',
+    sql         TEXT        NOT NULL DEFAULT '',
+    rationale   TEXT        NOT NULL DEFAULT '',          -- LLM 이 이 지표를 고른 이유
+    status      TEXT        NOT NULL,                     -- registered | failed | skipped
+    stage       TEXT,                                     -- 실패 단계: llm | duplicate | parse | compile | guard | verify | save
+    reason      TEXT        NOT NULL DEFAULT '',
+    attempts    INTEGER     NOT NULL DEFAULT 0,
+    tries       JSONB       NOT NULL DEFAULT '[]',        -- 시도마다 [{sql, stage, error}]
+    check_result JSONB,                                   -- 마지막 등록 확인 결과 (MetricCheck)
+    full_scans  JSONB       NOT NULL DEFAULT '[]',
+    metric_id   UUID,                                     -- 등록된 지표 (지표가 지워져도 기록은 남는다)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_metric_auto_item_run ON metric_auto_item (run_id, id);
+
+-- 등록된 지표 검증 실행. 지표마다 여러 점검을 돌려 통과 · 주의 · 실패를 매긴다.
+CREATE TABLE IF NOT EXISTS metric_validation_run (
+    id                UUID PRIMARY KEY,
+    system_id         UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
+    status            TEXT        NOT NULL DEFAULT 'running',  -- running | done | error
+    options           JSONB       NOT NULL DEFAULT '{}',
+    total             INTEGER     NOT NULL DEFAULT 0,
+    passed            INTEGER     NOT NULL DEFAULT 0,
+    warned            INTEGER     NOT NULL DEFAULT 0,
+    failed            INTEGER     NOT NULL DEFAULT 0,
+    prompt_tokens     INTEGER     NOT NULL DEFAULT 0,
+    completion_tokens INTEGER     NOT NULL DEFAULT 0,
+    error             TEXT,
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at       TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_metric_validation_run_system ON metric_validation_run (system_id, started_at DESC);
+
+-- 지표 하나의 검증 결과. checks 에 점검마다 {key, label, status, message, detail} 이 있다.
+CREATE TABLE IF NOT EXISTS metric_validation_item (
+    id             BIGSERIAL PRIMARY KEY,
+    run_id         UUID        NOT NULL REFERENCES metric_validation_run (id) ON DELETE CASCADE,
+    metric_id      UUID        NOT NULL,
+    metric_name    TEXT        NOT NULL,
+    metric_version INTEGER     NOT NULL,
+    verdict        TEXT        NOT NULL,  -- pass | warn | fail
+    summary        TEXT        NOT NULL DEFAULT '',
+    checks         JSONB       NOT NULL DEFAULT '[]',
+    elapsed_ms     INTEGER     NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_metric_validation_item_run ON metric_validation_item (run_id, id);
+CREATE INDEX IF NOT EXISTS idx_metric_validation_item_metric ON metric_validation_item (metric_id, created_at DESC);

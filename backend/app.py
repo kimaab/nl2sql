@@ -86,6 +86,7 @@ from metric_draft import draft_metric
 from superset_link import create_chart, link_database, sqllab_link
 from llm import make_model
 from scheduler import AutoSync
+from metric_auto_routes import router as metric_auto_router
 
 configure_logging()
 log = logging.getLogger("nl2sql")
@@ -116,6 +117,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 지표 자동 등록 · 지표 검증 (metric_auto_routes.py)
+app.include_router(metric_auto_router)
 
 
 def _init_schema():
