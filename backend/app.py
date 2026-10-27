@@ -22,6 +22,7 @@ from models import (
     AskRequest,
     AskResponse,
     AskStep,
+    ColumnNoteInput,
     CompileRequest,
     CompileResponse,
     HistoryEntry,
@@ -55,6 +56,7 @@ from systems import (
     list_systems,
     connection_row,
     list_tables,
+    set_column_note,
     set_needs_calc,
     set_table_purpose,
     set_utc_offset,
@@ -235,6 +237,11 @@ def put_needs_calc(system_id: UUID, table_id: UUID, req: NeedsCalcInput):
     return set_needs_calc(system_id, table_id, req.column, req.needs_calc)
 
 
+@app.put("/api/systems/{system_id}/tables/{table_id}/column-note", response_model=TableInfo)
+def put_column_note(system_id: UUID, table_id: UUID, req: ColumnNoteInput):
+    return set_column_note(system_id, table_id, req.column, req.note)
+
+
 # ── 관계 ───────────────────────────────────────────────────────────────
 @app.get("/api/systems/{system_id}/relations", response_model=list[Relation])
 def get_relations(system_id: UUID):
@@ -325,7 +332,7 @@ def post_ask(req: AskRequest):
     started = time.monotonic()
     contract = load_contract(req.system_id, active_only=True)
 
-    outcome = run_question(contract, req.question, make_model())
+    outcome = run_question(contract, req.question, make_model(), user_id=req.user_id)
     elapsed_ms = (time.monotonic() - started) * 1000
 
     result = (

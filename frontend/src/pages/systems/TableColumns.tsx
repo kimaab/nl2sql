@@ -1,20 +1,22 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import * as api from "../../api";
-import { Badge, EmptyState, Loading, PageHeader } from "../../components/ui";
+import { Badge, Button, EmptyState, Loading, PageHeader } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { errorMessage } from "../../lib/format";
 
 /** UTC 보정으로 고를 수 있는 시차 (0 은 '보정 없음') */
 const OFFSETS = Array.from({ length: 27 }, (_, i) => i - 12).filter((h) => h !== 0);
 
-/** 테이블 하나의 컬럼 설정: 시각 컬럼 UTC 보정, 계산 필요 표시 */
+/** 테이블 하나의 컬럼 설정: 설명, 시각 컬럼 UTC 보정, 계산 필요 표시 */
 export function TableColumns() {
   const { sysId = "", tableId = "" } = useParams();
   const [table, setTable] = useState<api.TableInfo | null | undefined>(undefined);
   const [filter, setFilter] = useState("");
   const [onlySet, setOnlySet] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
+  /** 설명을 고치는 중인 컬럼과 입력값 */
+  const [editing, setEditing] = useState<{ column: string; text: string } | null>(null);
   const toast = useToast();
 
   useEffect(() => {
@@ -33,6 +35,19 @@ export function TableColumns() {
     try {
       setTable(await api.setUtcOffset(sysId, tableId, column, hours));
       toast(hours ? `${column}: UTC${hours > 0 ? "+" : ""}${hours} 로 보정합니다` : `${column}: 보정하지 않습니다`, "ok");
+    } catch (err) {
+      toast("저장 실패: " + errorMessage(err), "error");
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function saveNote(column: string, note: string) {
+    setSaving(column);
+    try {
+      setTable(await api.setColumnNote(sysId, tableId, column, note));
+      setEditing(null);
+      toast(note.trim() ? `${column}: 설명을 저장했습니다` : `${column}: 적은 설명을 지웠습니다`, "ok");
     } catch (err) {
       toast("저장 실패: " + errorMessage(err), "error");
     } finally {
@@ -78,7 +93,7 @@ export function TableColumns() {
   const word = filter.toLowerCase();
   const shown = table.columns.filter((c) => {
     if (onlySet && !c.needs_calc && !timeColumns.get(c.name)?.utc_offset_hours) return false;
-    return `${c.name} ${c.comment} ${c.ai_comment} ${c.data_type}`.toLowerCase().includes(word);
+    return `${c.name} ${c.note} ${c.comment} ${c.ai_comment} ${c.data_type}`.toLowerCase().includes(word);
   });
 
   return (
@@ -90,6 +105,8 @@ export function TableColumns() {
           <>
             {table.purpose || table.comment || table.ai_comment || "용도가 없습니다 (테이블 목록에서 적습니다)"}
             <br />
+            설명: 직접 적은 설명이 DB 코멘트와 추론한 설명보다 먼저 쓰입니다. 동기화해도 지워지지 않고, 비우면 원래
+            설명으로 돌아갑니다.
             UTC 보정: DB 에 UTC 로 저장된 시각 컬럼이면 현지 시차를 고릅니다. 날짜 묶음, 기간 조건, 표시가 현지 시각 기준이
             됩니다. 계산 필요: 그대로 합치거나 평균내면 틀리는 컬럼 (예: 계속 커지는 누적값)입니다. 이 컬럼을 계산해야
             하는 질문은 지표가 있어야 답합니다.
@@ -132,12 +149,63 @@ export function TableColumns() {
                   <tr key={c.name}>
                     <td className="cell-title">{c.name}</td>
                     <td className="cell-sub">{c.data_type}</td>
-                    <td>
-                      {c.comment || (c.ai_comment ? (
-                        <span title="추론한 설명">{c.ai_comment} <span className="faint">(추론)</span></span>
+                    <td style={{ minWidth: 280 }}>
+                      {editing?.column === c.name ? (
+                        <div className="row" style={{ gap: 6 }}>
+                          <input
+                            className="input"
+                            autoFocus
+                            value={editing.text}
+                            placeholder={c.comment || c.ai_comment || "이 컬럼이 담는 값"}
+                            disabled={saving === c.name}
+                            onChange={(e) => setEditing({ column: c.name, text: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") saveNote(c.name, editing.text);
+                              if (e.key === "Escape") setEditing(null);
+                            }}
+                          />
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            disabled={saving === c.name || editing.text.trim() === (c.note || c.comment || c.ai_comment).trim()}
+                            onClick={() => saveNote(c.name, editing.text)}
+                          >
+                            저장
+                          </Button>
+                          <Button size="sm" onClick={() => setEditing(null)}>
+                            취소
+                          </Button>
+                        </div>
                       ) : (
-                        <span className="muted">—</span>
-                      ))}
+                        <div
+                          className="row"
+                          style={{ gap: 6, cursor: "pointer" }}
+                          title="눌러서 설명을 고칩니다"
+                          onClick={() => setEditing({ column: c.name, text: c.note || c.comment || c.ai_comment })}
+                        >
+                          <span>
+                            {c.note ? (
+                              <>
+                                {c.note} <span className="faint">(직접)</span>
+                              </>
+                            ) : c.comment ? (
+                              c.comment
+                            ) : c.ai_comment ? (
+                              <span title="추론한 설명">
+                                {c.ai_comment} <span className="faint">(추론)</span>
+                              </span>
+                            ) : (
+                              <span className="muted">—</span>
+                            )}
+                          </span>
+                          <span className="faint">✎</span>
+                        </div>
+                      )}
+                      {c.note && c.comment && editing?.column !== c.name && (
+                        <div className="cell-sub" title="대상 DB 코멘트">
+                          DB 코멘트: {c.comment}
+                        </div>
+                      )}
                     </td>
                     <td>
                       {time ? (

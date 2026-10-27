@@ -67,6 +67,8 @@ ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS utc_offset_hours SMALLINT;
 -- 계산이 필요한 컬럼 (예: 누적값 — 그대로 합치면 틀린다). 사람이 표시하고, 동기화는 건드리지 않는다.
 -- 이 컬럼을 계산해야 답할 수 있는 질문은 지표가 필요하다 — 테이블 선택 단계의 LLM 이 판단한다.
 ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS needs_calc BOOLEAN NOT NULL DEFAULT false;
+-- 사람이 적은 컬럼 설명. 동기화와 자동 설명은 건드리지 않는다. 대상 DB 코멘트와 추론한 설명보다 먼저 쓴다 (contract.py).
+ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT '';
 
 -- 테이블 관계. FK 는 동기화가(source='fk'), 나머지는 사람이(source='manual') 관리한다.
 CREATE TABLE IF NOT EXISTS meta_relation (

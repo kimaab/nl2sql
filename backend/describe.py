@@ -16,7 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 import background
 import db
-from compiler import Dialect
+from compiler import Dialect, type_family
 from contract import load_tables
 from metrics import read_only
 from models import ApiException, DescribeRequest, DescribeRun
@@ -143,7 +143,7 @@ def describe_targets(system_id: UUID, table_ids: list[UUID], overwrite: bool) ->
     rows = db.query(
         """
         SELECT t.id AS table_id, t.name AS table_name, t.db_schema, t.comment AS table_comment,
-               t.ai_comment AS table_ai, c.name AS column_name, c.data_type, c.comment, c.ai_comment, c.is_pk
+               t.ai_comment AS table_ai, c.name AS column_name, c.data_type, c.comment, c.ai_comment, c.note, c.is_pk
           FROM meta_table t
           JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
          WHERE t.system_id = %s AND t.deleted_at IS NULL
@@ -174,9 +174,9 @@ def describe_targets(system_id: UUID, table_ids: list[UUID], overwrite: bool) ->
             {
                 "name": r["column_name"],
                 "type": r["data_type"],
-                "comment": r["comment"],
+                "comment": r["note"] or r["comment"],  # 사람이 적은 설명이 있으면 채우지 않는다
                 "is_pk": r["is_pk"],
-                "need": _needs(r["comment"], r["ai_comment"], overwrite),
+                "need": _needs(r["note"] or r["comment"], r["ai_comment"], overwrite),
             }
         )
     if picked:
@@ -410,7 +410,7 @@ def infer_relations(tables: list[dict]) -> list[dict]:
             if own_pk is c and not _names_match(target, _stem(column)):
                 continue
             pk = pk_of[target]
-            if _family(c.get("type", "")) != _family(pk.get("type", "")):
+            if type_family(c.get("type", "")) != type_family(pk.get("type", "")):
                 continue
             key = _pair_key(t["name"], c["name"], target, pk["name"])
             if key in seen:
@@ -457,20 +457,6 @@ def _stem(column: str) -> str:
         if column.endswith(suffix) and len(column) > len(suffix):
             return column[: -len(suffix)]
     return ""
-
-
-def _family(data_type: str) -> str:
-    t = str(data_type or "").lower()
-    for word in ("int", "num", "dec", "float", "double", "real", "serial", "money"):
-        if word in t:
-            return "number"
-    for word in ("char", "text", "string", "clob"):
-        if word in t:
-            return "text"
-    for word in ("timestamp", "date", "time"):
-        if word in t:
-            return "time"
-    return t.split("(")[0].strip()
 
 
 def _pair_key(left_table: str, left_column: str, right_table: str, right_column: str) -> frozenset:

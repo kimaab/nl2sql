@@ -131,7 +131,7 @@ export function TablesPage() {
                             .filter((c) => c.needs_calc)
                             .map((c) => (
                               <Badge key={c.name} tone="warn">
-                                <span title={c.comment || c.ai_comment || c.data_type}>{c.name}</span>
+                                <span title={c.note || c.comment || c.ai_comment || c.data_type}>{c.name}</span>
                               </Badge>
                             ))
                         )}

@@ -236,3 +236,21 @@ def test_calc_column_must_follow_the_chosen_metric():
     )
     assert out["attempts"] == 2
     assert "[계산 필요] 컬럼" in model.calls[2][-1].content
+
+
+def test_user_id_reaches_both_stages():
+    model = FakeModel(
+        {"tables": ["bms_log"], "needs_metric": False, "metrics": [], "reason": "", "clarify": ""},
+        {"ast": {"from": "bms_log", "select": [{"expr": {"col": "vehicle_id"}, "as": "v"}]}, "reason": ""},
+    )
+    out = run_question(contract(), "내 차량 목록", model, now=NOW, user_id="baroness-admin")
+    assert out["sql"]
+    for call in model.calls:
+        assert "로그인한 사용자 아이디: baroness-admin" in call[-1].content
+        assert "[질문]\n내 차량 목록" in call[-1].content
+
+
+def test_no_user_id_keeps_question_as_is():
+    model = FakeModel({"tables": [], "needs_metric": False, "metrics": [], "reason": "", "clarify": "어떤 차량인가요?"})
+    run_question(contract(), "내 차량 목록", model, now=NOW)
+    assert "[현재 사용자]" not in model.calls[0][-1].content

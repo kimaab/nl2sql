@@ -2,7 +2,7 @@ import re
 from enum import Enum
 from uuid import UUID
 from typing import Literal
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 
@@ -242,6 +242,7 @@ class AskRequest(BaseModel):
 
     system_id: UUID
     question: str
+    user_id: str = ""  # 질문한 사용자 (로그인 아이디). 질문의 '나', '내 권한' 이 이 사용자다
 
 
 class AskStep(BaseModel):
@@ -365,6 +366,7 @@ class ColumnInfo(BaseModel):
     data_type: str
     comment: str
     ai_comment: str = ""  # 코멘트가 없을 때 추론한 설명 (describe.py)
+    note: str = ""  # 사람이 적은 설명. 코멘트와 추론한 설명보다 먼저 쓴다
     needs_calc: bool = False
 
 
@@ -403,6 +405,13 @@ class NeedsCalcInput(BaseModel):
 
     column: str
     needs_calc: bool
+
+
+class ColumnNoteInput(BaseModel):
+    """사람이 적는 컬럼 설명. 비우면 대상 DB 코멘트나 추론한 설명으로 돌아간다."""
+
+    column: str
+    note: str = Field(default="", max_length=2000)
 
 
 class TablePurposeInput(BaseModel):

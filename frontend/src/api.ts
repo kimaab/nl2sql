@@ -133,6 +133,8 @@ export interface ColumnInfo {
   comment: string;
   /** 코멘트가 없을 때 추론한 설명 */
   ai_comment: string;
+  /** 사람이 적은 설명. 코멘트와 추론한 설명보다 먼저 쓴다 */
+  note: string;
   needs_calc: boolean;
 }
 
@@ -292,6 +294,8 @@ export const setUtcOffset = (id: string, tableId: string, column: string, hours:
     method: "PUT",
     body: { column, utc_offset_hours: hours },
   });
+export const setColumnNote = (id: string, tableId: string, column: string, note: string) =>
+  request<TableInfo>(`/systems/${id}/tables/${tableId}/column-note`, { method: "PUT", body: { column, note } });
 export const setNeedsCalc = (id: string, tableId: string, column: string, needsCalc: boolean) =>
   request<TableInfo>(`/systems/${id}/tables/${tableId}/needs-calc`, {
     method: "PUT",
@@ -322,8 +326,9 @@ export const metricHistory = (sysId: string, id: string) =>
   request<MetricHistoryEntry[]>(`/systems/${sysId}/metrics/${id}/history`);
 
 // 질문
-export const ask = (systemId: string, question: string) =>
-  request<AskResponse>("/ask", { method: "POST", body: { system_id: systemId, question } });
+/** userId: 질문한 사용자. 질문의 '나', '내 권한' 이 이 사용자다 (비우면 사용자 없이 묻는다) */
+export const ask = (systemId: string, question: string, userId = "") =>
+  request<AskResponse>("/ask", { method: "POST", body: { system_id: systemId, question, user_id: userId } });
 
 // 질문 기록
 export const listHistory = (params: { systemId?: string; favorite?: boolean; feedback?: Feedback; limit?: number; offset?: number }) =>

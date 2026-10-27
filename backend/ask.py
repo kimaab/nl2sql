@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from compiler import CalcColumnError, Compiler, temporal_kind
 from selector import Step, chat, model_name, parse_json, select_tables
 
-MAX_ATTEMPTS = 13
+MAX_ATTEMPTS = 5
 
 AST_SYSTEM = """당신은 질문을 '{name}' 데이터베이스({driver})의 조회 명세(AST, JSON)로 바꾸는 역할입니다.
 {domain}[오늘]
@@ -22,7 +22,8 @@ AST_SYSTEM = """당신은 질문을 '{name}' 데이터베이스({driver})의 조
 
 [AST 모양]
 {{
-  "from": "테이블" 또는 {{"table": "테이블", "as": "별칭"}} 또는 {{"query": 하위 AST, "as": "별칭"}},
+  "with": [{{"name": "이름", "query": 하위 AST}}],   (같은 하위 쿼리를 두 곳 이상에서 쓸 때만. 맨 바깥에만 둡니다)
+  "from": "테이블" 또는 {{"table": "테이블", "as": "별칭"}} 또는 {{"query": 하위 AST, "as": "별칭"}} 또는 {{"tree": 계층, "as": "별칭"}},
   "joins": [{{"table": "테이블" 또는 "query": 하위 AST, "as": "별칭", "type": "inner|left", "on": [["a.컬럼", "b.컬럼"]]}}],   (필요할 때만)
   "select": [{{"expr": 식, "as": "결과 이름"}}],   모든 컬럼은 {{"expr": {{"col": "*"}}}}
   "distinct": true,   (중복을 뺄 때만)
@@ -34,19 +35,27 @@ AST_SYSTEM = """당신은 질문을 '{name}' 데이터베이스({driver})의 조
   계산: ADD SUB MUL DIV(0 으로 나누면 NULL)
   함수: ABS ROUND COALESCE NULLIF GREATEST LEAST
   날짜: DATE(날짜만), {{"fn": "DATE_TRUNC", "unit": "hour|day|week|month|year", "args": [식]}},
-        ADD_MINUTES · ADD_HOURS · ADD_DAYS [식, {{"num": n}}], NOW, CURRENT_DATE
+        ADD_SECONDS · ADD_MINUTES · ADD_HOURS · ADD_DAYS [식, {{"num": n}}], NOW, CURRENT_DATE
   순위: {{"fn": "ROW_NUMBER", "partition_by": [식], "order_by": [{{"expr": 식, "dir": "desc"}}]}}
   분기: {{"fn": "CASE", "when": [{{"if": [조건], "then": 식}}], "else": 식}}
 조건: {{"expr": 식, "op": "= != > >= < <= in not_in between like not_like is_null is_not_null", "value": 값 또는 식}}
+  in · not_in 의 value 는 {{"query": 하위 AST}} (select 하나) 도 됩니다
+계층: {{"table": "테이블", "key": "id 컬럼", "parent": "부모 id 컬럼", "start": [조건], "direction": "down|up"}}
+  start 조건에 맞는 행에서 시작해 자식 쪽(down) 또는 부모 쪽(up)으로 따라간 행 전부입니다. 테이블의 컬럼에 depth(시작 = 0)가 더해집니다.
       목록은 모두 AND. OR 은 {{"or": [조건, ...]}}, 그 안의 AND 묶음은 {{"and": [조건, ...]}}
 
 [규칙]
 - 아래 [테이블] 에 없는 테이블·컬럼은 쓰지 않습니다. 여러 테이블을 쓰면 컬럼을 '테이블.컬럼' 으로 적습니다.
 - 집계 안에 집계는 쓸 수 없습니다. 두 단계 집계(예: 장비·일별로 먼저 구한 뒤 일별 합계)는 from 에 하위 쿼리를 둡니다.
+- 상위·하위 관계(그룹 계층, 조직도, 메뉴 트리)를 따라가야 하면 tree 를 씁니다. 시작이 다른 테이블의 값이면
+  (예: 사용자의 그룹) start 에 {{"expr": {{"col": "id"}}, "op": "in", "value": {{"query": 하위 AST}}}} 로 적습니다.
+  타입이 다른 컬럼끼리(정수 id 와 문자 parent_id) 비교해도 컴파일러가 맞춰 주므로 변환하지 않습니다.
 - 하위 쿼리 바깥에서는 하위 쿼리 select 의 "as" 이름을 컬럼으로 씁니다.
 - 순위로 거르려면(예: 단위별 마지막 건) 하위 쿼리에서 ROW_NUMBER 를 구하고 바깥 where 에서 거릅니다.
-- 기간 합계로 고른 상위 N개 묶음의 상세(예: 50일 합계 상위 5대 차량의 일별 값)는, 상위 N개 묶음을 구하는 하위 쿼리
-  (묶음별 합계, order_by, limit)를 joins 에 {{"query": …, "as": "top", "type": "inner"}} 로 두고 묶음 컬럼으로 조인합니다.
+- with 에 정의한 이름은 from · joins 에서 테이블처럼 씁니다 ("from": "daily"). 컬럼은 그 하위 쿼리 select 의 "as" 이름입니다.
+- 기간 합계로 고른 상위 N개 묶음의 상세(예: 50일 합계 상위 5대 차량의 일별 값)는, 상세 집계(예: 차량·일별)를 with 에
+  한 번 정의하고, from 은 그 이름, joins 에는 그 이름을 묶음별로 합쳐 상위 N개를 고르는 하위 쿼리(묶음별 합계, order_by, limit)를
+  {{"query": …, "as": "top", "type": "inner"}} 로 두어 묶음 컬럼으로 조인합니다. 원본 테이블을 두 번 읽지 않습니다.
   상세 쪽을 order_by 와 limit 으로 자르면 묶음이 아니라 행이 잘립니다.
 - 집계하지 않은 select 항목은 group_by 에 같은 식으로 넣습니다.
 - 컬럼 뒤의 [UTC 보정] 은 DB 에 UTC 로 저장됐지만 자동으로 현지 시각으로 바뀌는 컬럼입니다. 날짜·시각은 현지 기준 그대로 적고, ADD_HOURS 로 직접 바꾸지 마십시오.
@@ -105,7 +114,19 @@ def ast_prompt(contract: dict, tables: list, metrics: list, now: datetime.dateti
     return system, user
 
 
-def run_question(contract: dict, question: str, model, now: datetime.datetime | None = None) -> dict:
+def with_user(question: str, user_id: str) -> str:
+    """질문에 질문한 사용자를 붙인다. '나', '내 권한', '로그인한 사용자' 를 LLM 이 이 아이디로 풀게 한다."""
+    user_id = " ".join(str(user_id or "").split())
+    if not user_id:
+        return question
+    return (
+        f"[현재 사용자]\n로그인한 사용자 아이디: {user_id}\n"
+        f"질문의 '나', '내', '현재 로그인한 사용자' 는 이 사용자입니다. 조건에 이 아이디를 그대로 씁니다.\n\n"
+        f"[질문]\n{question}"
+    )
+
+
+def run_question(contract: dict, question: str, model, now: datetime.datetime | None = None, user_id: str = "") -> dict:
     """질문 하나를 처리한다. 상태는 이 호출 안에서만 산다.
 
     돌려주는 것: {sql, error, attempts, ast, clarification, needs_metric, missing, tables, metrics, steps, total_tokens}
@@ -123,6 +144,7 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
         "steps": [],
         "total_tokens": 0,
     }
+    question = with_user(question, user_id)
     try:
         selection = select_tables(model, contract, question)
     except ValueError as error:

@@ -53,6 +53,14 @@ export function AskPage() {
   const [systems, setSystems] = useState<api.System[] | null>(null);
   const [systemId, setSystemId] = useState(params.get("ds") ?? "");
   const [question, setQuestion] = useState(params.get("q") ?? "");
+  // 질문한 사용자 ('나', '내 권한' 을 풀 때 쓴다). 이 브라우저에만 기억한다
+  const [userId, setUserId] = useState(() => {
+    try {
+      return localStorage.getItem("ask.userId") ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [history, setHistory] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
@@ -142,7 +150,7 @@ export function AskPage() {
     setQuestion("");
     try {
       // 서버는 이전 질문을 모른다 — body 에는 이번 질문 하나만 싣는다.
-      const res = await api.ask(askedSystem, asked);
+      const res = await api.ask(askedSystem, asked, userId.trim());
       setHistory((prev) => [
         ...prev,
         { question: asked, systemId: askedSystem, ...res, favorite: false, feedback: null },
@@ -198,6 +206,22 @@ export function AskPage() {
         <Link to={systemId ? `/history?ds=${systemId}` : "/history"} className="muted">
           질문 기록 →
         </Link>
+        <input
+          className="input"
+          style={{ width: 160 }}
+          value={userId}
+          onChange={(e) => {
+            setUserId(e.target.value);
+            try {
+              localStorage.setItem("ask.userId", e.target.value);
+            } catch {
+              // 저장하지 못해도 이번 화면에서는 쓴다
+            }
+          }}
+          placeholder="사용자 ID (선택)"
+          title="질문의 '나', '내 권한' 이 이 사용자입니다"
+          disabled={loading}
+        />
         <select
           className="select"
           value={systemId}

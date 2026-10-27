@@ -1,0 +1,1353 @@
+{
+  "info": {
+    "name": "DATA_PLATFORM",
+    "description": "데이터 플랫폼 백엔드 API. 먼저 컬렉션 Variables 에 baseUrl 과 system_id 를 넣으십시오.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. 시스템",
+      "item": [
+        {
+          "name": "시스템 목록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems"
+              ]
+            },
+            "description": "등록된 시스템(대상 DB) 목록입니다. 다른 요청에 쓸 system_id 를 여기서 찾습니다."
+          },
+          "response": []
+        },
+        {
+          "name": "시스템 등록",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems"
+              ]
+            },
+            "description": "대상 DB 접속 정보를 등록합니다.\n\n- code: 영문 짧은 이름\n- name: 화면에 보일 이름\n- domain_desc: 업무 설명 (LLM 이 참고)\n- driver: mysql, postgresql, oracle 중 하나\n- port: 0 이면 드라이버 기본 포트\n- db_schemas: 읽을 스키마 목록. 첫 스키마가 기본 스키마이고, 나머지 스키마의 테이블은 '스키마.테이블' 이름이 됩니다. 비우면 PostgreSQL 은 public, Oracle 은 접속 계정 (MySQL 은 db_name 하나만 읽습니다)",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"shop\",\n  \"name\": \"쇼핑몰\",\n  \"domain_desc\": \"주문과 회원을 다루는 쇼핑몰 DB\",\n  \"driver\": \"postgresql\",\n  \"host\": \"localhost\",\n  \"port\": 0,\n  \"db_name\": \"shop\",\n  \"db_schemas\": [\n    \"public\"\n  ],\n  \"username\": \"\",\n  \"password\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "시스템 조회",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}"
+              ]
+            },
+            "description": "시스템 하나의 정보입니다."
+          },
+          "response": []
+        },
+        {
+          "name": "시스템 수정",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}"
+              ]
+            },
+            "description": "시스템 정보를 고칩니다. password 를 비워 보내면 기존 비밀번호를 그대로 둡니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"shop\",\n  \"name\": \"쇼핑몰\",\n  \"domain_desc\": \"주문과 회원을 다루는 쇼핑몰 DB\",\n  \"driver\": \"postgresql\",\n  \"host\": \"localhost\",\n  \"port\": 0,\n  \"db_name\": \"shop\",\n  \"db_schemas\": [\n    \"public\"\n  ],\n  \"username\": \"\",\n  \"password\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "시스템 삭제",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}"
+              ]
+            },
+            "description": "시스템을 지웁니다."
+          },
+          "response": []
+        },
+        {
+          "name": "스키마 동기화",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/sync",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "sync"
+              ]
+            },
+            "description": "대상 DB 에서 테이블과 컬럼 정보를 읽어 저장된 스키마에 합칩니다. 결과로 추가, 변경, 삭제 건수가 옵니다."
+          },
+          "response": []
+        },
+        {
+          "name": "동기화 기록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/sync-logs?limit=100",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "sync-logs"
+              ],
+              "query": [
+                {
+                  "key": "system_id",
+                  "value": "",
+                  "description": "이 시스템 것만 봅니다. 비우면 전체",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "최대 건수",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "스키마 동기화를 언제 했고 무엇이 바뀌었는지 봅니다."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. 테이블 설정",
+      "item": [
+        {
+          "name": "저장된 스키마",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/schema",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "schema"
+              ]
+            },
+            "description": "저장된 테이블과 컬럼, 설명입니다. 대상 DB 에서 사라진 것은 빠집니다."
+          },
+          "response": []
+        },
+        {
+          "name": "테이블 목록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/tables",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "tables"
+              ]
+            },
+            "description": "테이블마다 용도, 컬럼 설명, UTC 보정, 계산 필요 표시 같은 설정을 함께 돌려줍니다. table_id 를 여기서 찾습니다.\n\n컬럼 설명은 셋입니다. note 는 사람이 적은 설명, comment 는 대상 DB 코멘트, ai_comment 는 LLM 이 추론한 설명이며 LLM 에는 이 순서로 앞의 것을 넘깁니다."
+          },
+          "response": []
+        },
+        {
+          "name": "테이블 용도 저장",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/tables/{{table_id}}/purpose",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "tables",
+                "{{table_id}}",
+                "purpose"
+              ]
+            },
+            "description": "사람이 적는 테이블 용도입니다. 질문에 맞는 테이블을 고를 때 LLM 이 참고합니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"purpose\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "컬럼 설명 저장",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/tables/{{table_id}}/column-note",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "tables",
+                "{{table_id}}",
+                "column-note"
+              ]
+            },
+            "description": "사람이 적는 컬럼 설명입니다. 대상 DB 코멘트와 추론한 설명보다 먼저 쓰이고, 동기화나 자동 설명이 지우지 않습니다. note 를 빈 문자열로 보내면 원래 설명(DB 코멘트나 추론한 설명)으로 돌아갑니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"column\": \"user_id\",\n  \"note\": \"로그인 아이디\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "시각 컬럼 UTC 보정",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/tables/{{table_id}}/utc-offset",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "tables",
+                "{{table_id}}",
+                "utc-offset"
+              ]
+            },
+            "description": "DB 가 시각을 UTC 로 저장할 때 현지 시차를 적습니다 (한국은 9). utc_offset_hours 를 0 이나 null 로 보내면 보정을 끕니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"column\": \"created_at\",\n  \"utc_offset_hours\": 9\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "계산 필요 컬럼 표시",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/tables/{{table_id}}/needs-calc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "tables",
+                "{{table_id}}",
+                "needs-calc"
+              ]
+            },
+            "description": "누적값처럼 그대로 더하면 틀리는 컬럼에 표시합니다. 질문 처리와 지표 자동 등록이 이 표시를 참고합니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"column\": \"odometer\",\n  \"needs_calc\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "설명 자동 채우기 시작",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/describe/runs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "describe",
+                "runs"
+              ]
+            },
+            "description": "설명이 빈 테이블과 컬럼을 LLM 이 이름, 타입, 샘플 값 몇 행을 보고 채우고(ai_comment), 컬럼 이름, 타입, PK 로 관계도 추론합니다(source 가 auto 인 관계). 뒤에서 돌고 바로 실행 id 를 돌려줍니다.\n\n- table_ids: 비우면 설명이 빈 테이블 모두\n- descriptions: 빈 설명을 채웁니다\n- overwrite: 전에 추론한 설명도 다시 채웁니다. DB 코멘트와 사람이 적은 설명은 언제나 그대로 둡니다\n- relations: 관계를 추론합니다",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"table_ids\": [],\n  \"descriptions\": true,\n  \"overwrite\": false,\n  \"relations\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "설명 자동 채우기 기록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/describe/runs?limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "describe",
+                "runs"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "최대 건수",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "설명 자동 채우기를 돌린 기록입니다."
+          },
+          "response": []
+        },
+        {
+          "name": "설명 자동 채우기 결과",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/describe/runs/{{run_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "describe",
+                "runs",
+                "{{run_id}}"
+              ]
+            },
+            "description": "진행 상황과 채운 건수, 실패한 테이블입니다. status 가 running 이면 아직 도는 중이니 다시 불러 보십시오."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. 테이블 관계",
+      "item": [
+        {
+          "name": "관계 목록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/relations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "relations"
+              ]
+            },
+            "description": "테이블 사이 관계(JOIN 조건) 목록입니다."
+          },
+          "response": []
+        },
+        {
+          "name": "관계 추가",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/relations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "relations"
+              ]
+            },
+            "description": "DB 에 FK 가 없는 관계를 직접 넣습니다. left 가 참조하는 쪽, right 가 참조되는 쪽입니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"left_table\": \"\",\n  \"left_column\": \"\",\n  \"right_table\": \"\",\n  \"right_column\": \"\",\n  \"constraint_name\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "관계 삭제",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/relations/{{relation_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "relations",
+                "{{relation_id}}"
+              ]
+            },
+            "description": "관계를 지웁니다."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. 지표",
+      "item": [
+        {
+          "name": "지표 목록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metrics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metrics"
+              ]
+            },
+            "description": "등록된 지표 목록입니다. metric_id 를 여기서 찾습니다."
+          },
+          "response": []
+        },
+        {
+          "name": "지표 등록",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metrics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metrics"
+              ]
+            },
+            "description": "지표를 SQL 로 등록합니다. SQL 을 구조(AST)로 바꾸고, 다시 SQL 로 만들어 대상 DB 에서 결과가 같은지 확인한 뒤 저장합니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"주문 건수\",\n  \"description\": \"취소를 뺀 주문 수\",\n  \"synonyms\": [\n    \"주문수\"\n  ],\n  \"sql\": \"SELECT COUNT(*) AS order_count FROM orders WHERE status <> 'canceled'\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "지표 수정",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metrics/{{metric_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metrics",
+                "{{metric_id}}"
+              ]
+            },
+            "description": "지표를 고칩니다. 등록과 같은 확인을 거칩니다. 이전 정의는 이력에 남습니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"주문 건수\",\n  \"description\": \"취소를 뺀 주문 수\",\n  \"synonyms\": [\n    \"주문수\"\n  ],\n  \"sql\": \"SELECT COUNT(*) AS order_count FROM orders WHERE status <> 'canceled'\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "지표 삭제",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metrics/{{metric_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metrics",
+                "{{metric_id}}"
+              ]
+            },
+            "description": "지표를 지웁니다. 정의는 이력에 남습니다."
+          },
+          "response": []
+        },
+        {
+          "name": "지표 SQL 미리 확인",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metrics/check",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metrics",
+                "check"
+              ]
+            },
+            "description": "저장하지 않고 등록 절차만 밟아 봅니다. 실패하면 stage 에 어느 단계에서 막혔는지 나옵니다 (parse 변환, compile 컴파일, guard 실행 전 확인, verify 결과 비교).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sql\": \"SELECT COUNT(*) AS order_count FROM orders WHERE status <> 'canceled'\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "지표 초안 만들기",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metrics/draft",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metrics",
+                "draft"
+              ]
+            },
+            "description": "지표가 없어 멈춘 질문에서 지표 SQL 초안을 LLM 이 씁니다. 저장하지 않습니다. missing 에는 '질문하기' 응답의 missing 하나를 그대로 넣습니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"\",\n  \"missing\": {\n    \"name\": \"\",\n    \"table\": \"\",\n    \"column\": \"\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "지표 변경 이력",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metrics/{{metric_id}}/history",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metrics",
+                "{{metric_id}}",
+                "history"
+              ]
+            },
+            "description": "지표가 언제 어떻게 바뀌었는지 봅니다. 지운 지표도 이력은 남습니다."
+          },
+          "response": []
+        },
+        {
+          "name": "AST 를 SQL 로 바꾸기",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/compile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "compile"
+              ]
+            },
+            "description": "LLM 없이 조회 구조(AST)를 SQL 로 바꿔 봅니다. 실행하지 않습니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ast\": {}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. 지표 자동 등록",
+      "item": [
+        {
+          "name": "자동 등록 시작",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metric-auto/runs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metric-auto",
+                "runs"
+              ]
+            },
+            "description": "LLM 이 테이블마다 지표 후보를 만들고, 확인을 통과한 것만 등록합니다. 뒤에서 돌고 바로 실행 id 를 돌려줍니다.\n\n- tables: 비우면 지표가 없는 테이블 중 관계가 많은 것부터 고릅니다\n- max_tables: 고를 테이블 수 (1~50)\n- per_table: 테이블마다 만들 후보 수 (1~10)\n- allow_full_scan: 테이블 전체를 훑는 확인도 돌립니다. 테스트 DB 에서만 켜십시오",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tables\": [],\n  \"max_tables\": 5,\n  \"per_table\": 3,\n  \"allow_full_scan\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "자동 등록 기록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metric-auto/runs?limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metric-auto",
+                "runs"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "최대 건수",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "자동 등록을 돌린 기록입니다."
+          },
+          "response": []
+        },
+        {
+          "name": "자동 등록 결과",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metric-auto/runs/{{run_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metric-auto",
+                "runs",
+                "{{run_id}}"
+              ]
+            },
+            "description": "진행 상황과 후보별 결과입니다. status 가 running 이면 아직 도는 중이니 다시 불러 보십시오."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6. 지표 검증",
+      "item": [
+        {
+          "name": "검증 시작",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metric-validations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metric-validations"
+              ]
+            },
+            "description": "고른 지표를 검증합니다. 뒤에서 돌고 바로 실행 id 를 돌려줍니다.\n\n- metric_ids: 검증할 지표 id. 비우면 400 오류\n- run_sql: 대상 DB 에서 실행 계획과 결과를 봅니다\n- use_llm: SQL 이 이름, 설명과 맞는지 LLM 이 봅니다\n- allow_full_scan: 테이블 전체를 훑는 지표도 결과를 봅니다. 테스트 DB 에서만 켜십시오",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"metric_ids\": [\n    \"{{metric_id}}\"\n  ],\n  \"run_sql\": true,\n  \"use_llm\": true,\n  \"allow_full_scan\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "검증 기록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metric-validations?limit=50",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metric-validations"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "최대 건수",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "검증을 돌린 기록입니다."
+          },
+          "response": []
+        },
+        {
+          "name": "검증 결과",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metric-validations/{{run_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metric-validations",
+                "{{run_id}}"
+              ]
+            },
+            "description": "지표마다 통과, 주의, 실패와 그 이유입니다. status 가 running 이면 다시 불러 보십시오."
+          },
+          "response": []
+        },
+        {
+          "name": "지표별 검증 이력",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/metrics/{{metric_id}}/validations?limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "metrics",
+                "{{metric_id}}",
+                "validations"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "최대 건수",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "지표 하나가 지금까지 받은 검증 결과입니다."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "7. 질문",
+      "item": [
+        {
+          "name": "질문하기",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/ask",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "ask"
+              ]
+            },
+            "description": "자연어 질문을 SQL 로 바꿉니다. 테이블 고르기, 지표 판단, SQL 만들기 순서로 돌고 결과는 질문 기록에 남습니다. SQL 은 실행하지 않습니다. 지표가 없으면 needs_metric 과 missing 이 옵니다.\n\n- user_id: 질문한 사용자의 로그인 아이디 (선택). 질문의 '나', '내 권한' 이 이 사용자가 됩니다",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"system_id\": \"{{system_id}}\",\n  \"question\": \"지난주 일자별 주문 건수\",\n  \"user_id\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "8. 질문 기록",
+      "item": [
+        {
+          "name": "질문 기록 목록",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/history?limit=50&offset=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "history"
+              ],
+              "query": [
+                {
+                  "key": "system_id",
+                  "value": "",
+                  "description": "이 시스템 것만 봅니다. 비우면 전체",
+                  "disabled": true
+                },
+                {
+                  "key": "favorite",
+                  "value": "",
+                  "description": "true 면 즐겨찾기한 것만",
+                  "disabled": true
+                },
+                {
+                  "key": "feedback",
+                  "value": "",
+                  "description": "up(맞음) 또는 down(틀림) 피드백을 받은 것만",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "최대 건수",
+                  "disabled": false
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "앞에서 건너뛸 건수 (페이지 넘김)",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "지금까지 한 질문과 만든 SQL 입니다."
+          },
+          "response": []
+        },
+        {
+          "name": "평가셋 내보내기",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/history/export?system_id={{system_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "history",
+                "export"
+              ],
+              "query": [
+                {
+                  "key": "system_id",
+                  "value": "{{system_id}}",
+                  "description": "이 시스템 것만 봅니다. 비우면 전체",
+                  "disabled": false
+                }
+              ]
+            },
+            "description": "'맞음' 피드백을 받은 기록을 평가셋 파일 형식으로 내보냅니다."
+          },
+          "response": []
+        },
+        {
+          "name": "질문 처리 단계",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/history/{{entry_id}}/trace",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "history",
+                "{{entry_id}}",
+                "trace"
+              ]
+            },
+            "description": "질문을 처리하며 어떤 테이블과 지표를 왜 골랐는지 단계별로 봅니다."
+          },
+          "response": []
+        },
+        {
+          "name": "즐겨찾기, 피드백 저장",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/history/{{entry_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "history",
+                "{{entry_id}}"
+              ]
+            },
+            "description": "바꿀 것만 보냅니다. feedback 은 up(맞음) 또는 down(틀림)이고, 지우려면 빈 문자열을 보냅니다.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"favorite\": true,\n  \"feedback\": \"up\",\n  \"feedback_note\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "질문 기록 삭제",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/history/{{entry_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "history",
+                "{{entry_id}}"
+              ]
+            },
+            "description": "질문 기록을 지웁니다."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "9. Superset 연동",
+      "item": [
+        {
+          "name": "Superset 에 DB 연결 등록",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/systems/{{system_id}}/superset",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "systems",
+                "{{system_id}}",
+                "superset"
+              ]
+            },
+            "description": "시스템을 Superset 의 DB 연결로 등록합니다. 이미 있으면 접속 정보를 고칩니다. 데이터는 옮기지 않습니다."
+          },
+          "response": []
+        },
+        {
+          "name": "SQL Lab 링크 만들기",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/history/{{entry_id}}/superset/sqllab",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "history",
+                "{{entry_id}}",
+                "superset",
+                "sqllab"
+              ]
+            },
+            "description": "질문에서 만든 SQL 을 Superset SQL Lab 에 열어 두는 링크입니다."
+          },
+          "response": []
+        },
+        {
+          "name": "Superset 차트 만들기",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/history/{{entry_id}}/superset/chart",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "history",
+                "{{entry_id}}",
+                "superset",
+                "chart"
+              ]
+            },
+            "description": "질문에서 만든 SQL 로 차트를 만듭니다. 같은 SQL 이면 전에 만든 차트를 엽니다."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "기타",
+      "item": [
+        {
+          "name": "서버 상태 확인",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "서버가 떠 있으면 {\"status\": \"ok\"} 를 돌려줍니다."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "description": "백엔드 주소"
+    },
+    {
+      "key": "system_id",
+      "value": "",
+      "description": "시스템 id. '시스템 목록' 응답의 id"
+    },
+    {
+      "key": "table_id",
+      "value": "",
+      "description": "테이블 id. '테이블 목록' 응답의 id"
+    },
+    {
+      "key": "relation_id",
+      "value": "",
+      "description": "관계 id. '관계 목록' 응답의 id"
+    },
+    {
+      "key": "metric_id",
+      "value": "",
+      "description": "지표 id. '지표 목록' 응답의 id"
+    },
+    {
+      "key": "run_id",
+      "value": "",
+      "description": "실행 id. 자동 등록, 검증, 설명 자동 채우기를 시작한 응답의 id"
+    },
+    {
+      "key": "entry_id",
+      "value": "",
+      "description": "질문 기록 id. '질문하기' 응답이나 '질문 기록 목록' 의 id"
+    }
+  ]
+}

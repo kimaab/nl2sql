@@ -15,7 +15,7 @@ def load_tables(system_id: UUID) -> dict:
     rows = db.query(
         """
         SELECT t.id AS table_id, t.name AS table_name, t.db_schema AS table_schema, t.comment AS table_note, t.ai_comment AS table_ai, t.purpose,
-               c.name AS column_name, c.data_type, c.comment AS column_note, c.ai_comment AS column_ai, c.is_pk,
+               c.name AS column_name, c.data_type, c.comment AS column_note, c.ai_comment AS column_ai, c.note AS column_human, c.is_pk,
                c.utc_offset_hours, c.needs_calc
           FROM meta_table t
           LEFT JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
@@ -43,7 +43,8 @@ def load_tables(system_id: UUID) -> dict:
             column = {
                 "name": r["column_name"],
                 "type": r["data_type"] or "",
-                "description": r["column_note"] or r["column_ai"] or "",
+                # 사람이 적은 설명, 대상 DB 코멘트, 추론한 설명 (describe.py) 순
+                "description": r["column_human"] or r["column_note"] or r["column_ai"] or "",
             }
             if r["is_pk"]:
                 column["is_pk"] = True

@@ -90,7 +90,6 @@ def test_star_from_table_keeps_stored_utc_value():
         ("select vehicle_id from bms_log limit 5 offset 10", "OFFSET"),
         ("select vehicle_id from bms_log union select vehicle_id from vehicle", "SELECT 문만"),
         ("select distinct on (vehicle_id) vehicle_id from bms_log", "DISTINCT ON"),
-        ("select vehicle_id from bms_log where vehicle_id in (select vehicle_id from vehicle)", "서브쿼리"),
         ("select x from nowhere", "메타데이터에 없는 테이블"),
     ],
 )
@@ -216,3 +215,60 @@ def test_table_aliases_from_log():
     aliased = Compiler(contract).compile({**ast, "from": {"table": "violet.tb_users", "as": "u"},
                                           "select": [{"expr": {"col": "u.user_nm"}, "as": "n"}], "where": []})
     assert 'FROM "violet"."tb_users" "u"' in aliased
+
+
+def test_seconds_interval_roundtrip():
+    ast, sql, _ = roundtrip("select vehicle_id from bms_log where collect_datetime >= now() - interval '10 seconds'")
+    assert ast["where"][0]["value"] == {"fn": "ADD_SECONDS", "args": [{"fn": "NOW", "args": []}, {"num": -10}]}
+    assert "(CURRENT_TIMESTAMP - INTERVAL '10 seconds')" in sql
+
+
+TOP_N_SQL = """with d as (
+    select date(collect_datetime + interval '9 hours') as day, vehicle_id, max(uman_time) - min(uman_time) as uman
+      from bms_log where collect_datetime >= timestamp '2026-10-21 00:00:00' - interval '9 hours'
+     group by 1, 2)
+select d.day, d.vehicle_id, d.uman
+  from d join (select vehicle_id, sum(uman) as total from d group by vehicle_id order by total desc limit 10) top
+    on top.vehicle_id = d.vehicle_id"""
+
+
+def test_shared_with_stays_with():
+    ast, sql, _ = roundtrip(TOP_N_SQL)
+    assert [w["name"] for w in ast["with"]] == ["d"]
+    assert ast["from"] == "d"
+    assert ast["joins"][0]["table"]["query"]["from"] == "d"
+    assert sql.startswith('WITH "d" AS (SELECT CAST(')
+    assert sql.count('FROM "bms_log"') == 1  # 원본은 한 번만 읽는다
+    assert ast_tables(ast) == ["bms_log"]
+
+
+def test_single_use_with_is_inlined():
+    ast, _, _ = roundtrip("with x as (select vehicle_id from bms_log) select vehicle_id from x")
+    assert "with" not in ast and ast["from"]["as"] == "x"
+
+
+def test_with_used_in_join_and_aliased():
+    ast, sql, _ = roundtrip(
+        "with v as (select vehicle_id, vehicle_name from vehicle) "
+        "select b.vehicle_id, w.vehicle_name from bms_log b join v w on w.vehicle_id = b.vehicle_id"
+    )
+    assert ast["joins"][0]["table"] == "v" and ast["joins"][0]["as"] == "w"
+    assert 'JOIN "v" "w" ON' in sql
+
+
+def test_with_errors():
+    with pytest.raises(Exception, match="겹칩니다"):
+        Compiler(CONTRACT).compile({"with": [{"name": "bms_log", "query": {"from": "vehicle", "select": [
+            {"expr": {"col": "vehicle_id"}, "as": "v"}]}}], "from": "bms_log", "select": [{"expr": {"col": "v"}, "as": "v"}]})
+    with pytest.raises(Exception, match="모르는 키"):
+        Compiler(CONTRACT).compile({"from": {"query": {"with": [], "from": "vehicle", "select": [
+            {"expr": {"col": "vehicle_id"}, "as": "v"}]}, "as": "s"}, "select": [{"expr": {"col": "v"}, "as": "v"}]})
+
+
+def test_in_subquery_roundtrip():
+    ast, sql, _ = roundtrip(
+        "select vehicle_id from bms_log where vehicle_id in (select vehicle_id from vehicle where vehicle_name like 'A%')"
+    )
+    value = ast["where"][0]["value"]
+    assert ast["where"][0]["op"] == "in" and value["query"]["from"] == "vehicle"
+    assert '"vehicle_id" IN (SELECT "vehicle_id" AS "vehicle_id" FROM "vehicle" WHERE' in sql

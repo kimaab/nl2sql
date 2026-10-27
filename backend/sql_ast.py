@@ -22,7 +22,7 @@ _ARITHMETIC = {exp.Add: "ADD", exp.Sub: "SUB", exp.Mul: "MUL", exp.Div: "DIV"}
 _SCALARS = {exp.Coalesce: "COALESCE", exp.Greatest: "GREATEST", exp.Least: "LEAST"}
 _COMPARE = {exp.EQ: "=", exp.NEQ: "!=", exp.GT: ">", exp.GTE: ">=", exp.LT: "<", exp.LTE: "<="}
 _FLIP = {"=": "=", "!=": "!=", ">": "<", ">=": "<=", "<": ">", "<=": ">="}
-_INTERVAL_FN = {"minutes": "ADD_MINUTES", "hours": "ADD_HOURS", "days": "ADD_DAYS"}
+_INTERVAL_FN = {"seconds": "ADD_SECONDS", "minutes": "ADD_MINUTES", "hours": "ADD_HOURS", "days": "ADD_DAYS"}
 _TRUNC = {"hour": "hour", "hours": "hour", "hh24": "hour", "day": "day", "dd": "day", "week": "week", "iw": "week",
           "month": "month", "mm": "month", "year": "year", "yyyy": "year"}
 
@@ -51,7 +51,19 @@ def parse_sql(sql: str, contract: dict) -> dict:
     if with_ is not None:
         for cte in with_.expressions:
             parser.ctes[cte.alias] = cte.this
+            if with_.args.get("recursive") and isinstance(cte.this, exp.Union):
+                parser.recursive[cte.alias] = cte  # 계층 — AST 의 tree 로 옮긴다
+        # 두 번 이상 쓰는 WITH 는 AST 의 with 로 둔다 — 펼치면 같은 집계를 두 번 한다
+        counts: dict = {}
+        for table in tree.find_all(exp.Table):
+            if not table.db and table.name in parser.ctes and table.name not in parser.recursive:
+                counts[table.name] = counts.get(table.name, 0) + 1
+        for name, n in counts.items():
+            if n > 1:
+                parser.shared.add(name)
     ast = parser.select(tree)
+    if parser.withs:
+        ast = {"with": parser.withs, **ast}
     return {"ast": ast, "warnings": list(dict.fromkeys(parser.warnings))}
 
 
@@ -115,6 +127,11 @@ class _Parser:
                 cols[c["name"]] = int(hours)
             self.tables[t["name"].lower()] = (t["name"], cols)
         self.ctes: dict = {}
+        self.shared: set = set()  # AST 의 with 로 둘 WITH 이름 (JOIN 에 쓰거나 두 번 이상 쓴다)
+        self.withs: list[dict] = []  # [{"name", "query"}] — 먼저 필요한 것이 앞에 온다
+        self.with_columns: dict = {}
+        self.opening: set = set()
+        self.recursive: dict = {}  # 맨 바깥 WITH RECURSIVE 이름 → CTE 식
         self.warnings: list[str] = []
 
     # ── SELECT 한 단계 ───────────────────────────────────────────────────
@@ -195,22 +212,17 @@ class _Parser:
 
     def _source(self, node, scope: _Scope, first=False):
         if isinstance(node, exp.Table):  # 스키마 이름(public.bms_log)은 떼고 테이블 이름으로 찾는다
+            if node.name in self.recursive and not node.db:
+                return self._tree_source(self.recursive[node.name], node.alias or node.name, scope, own_columns=True)
             if node.name in self.ctes and not node.db:
-                if not first:
-                    raise ValueError(f"WITH 로 만든 {node.name} 은(는) FROM 에만 쓸 수 있습니다 (JOIN 은 지원하지 않습니다)")
                 alias = node.alias or node.name
-                inner = self.select(self.ctes[node.name])
-                scope.sources[alias] = {"name": alias, "columns": _subquery_columns(inner), "table": False}
-                return {"query": inner, "as": alias}
-            written = f"{node.db}.{node.name}" if node.db else node.name
-            found = None
-            if node.db:  # 기본 스키마가 아닌 테이블은 '스키마.테이블' 이름으로 등록돼 있다
-                found = self.tables.get(written.lower())
-            if found is None:
-                found = self.tables.get(node.name.lower())
-            if found is None:
-                raise ValueError(f"메타데이터에 없는 테이블입니다 -> {written} (동기화했는지 확인하십시오)")
-            real, columns = found
+                if first and node.name not in self.shared:  # 한 번만 쓰면 그 자리의 하위 쿼리로 펼친다
+                    inner = self.select(self.ctes[node.name])
+                    scope.sources[alias] = {"name": alias, "columns": _subquery_columns(inner), "table": False}
+                    return {"query": inner, "as": alias}
+                scope.sources[alias] = {"name": alias, "columns": self._with(node.name), "table": False}
+                return node.name if alias == node.name else {"table": node.name, "as": alias}
+            real, columns = self._lookup(node)
             # 별칭이 없으면 SQL 처럼 스키마를 뗀 테이블 이름으로 가리킨다 (sales.orders → orders.amount)
             alias = node.alias or (node.name if "." in real else real)
             for s in scope.sources.values():
@@ -219,13 +231,135 @@ class _Parser:
             scope.sources[alias] = {"name": real, "columns": columns, "table": True}
             return real
         if isinstance(node, exp.Subquery):
-            if not first:
-                raise ValueError("JOIN 에는 테이블만 쓸 수 있습니다 (하위 쿼리 JOIN 은 지원하지 않습니다)")
+            if not first and not node.alias:
+                raise ValueError("JOIN 하는 하위 쿼리에는 별칭이 있어야 합니다 (예: JOIN (…) top ON …)")
             alias = node.alias or "sub"
+            with_ = node.this.args.get("with_") or node.this.args.get("with") if isinstance(node.this, exp.Select) else None
+            if with_ is not None and with_.args.get("recursive"):
+                return self._wrapped_tree(node, with_, alias, scope)
             inner = self.select(node.this)
             scope.sources[alias] = {"name": alias, "columns": _subquery_columns(inner), "table": False}
             return {"query": inner, "as": alias}
         raise ValueError(f"FROM 에 쓸 수 없는 것입니다 -> {node.sql()}")
+
+    def _lookup(self, node: exp.Table) -> tuple[str, dict]:
+        """SQL 의 테이블 → (메타데이터 이름, {컬럼: 시차})"""
+        written = f"{node.db}.{node.name}" if node.db else node.name
+        found = None
+        if node.db:  # 기본 스키마가 아닌 테이블은 '스키마.테이블' 이름으로 등록돼 있다
+            found = self.tables.get(written.lower())
+        if found is None:
+            found = self.tables.get(node.name.lower())
+        if found is None:
+            raise ValueError(f"메타데이터에 없는 테이블입니다 -> {written} (동기화했는지 확인하십시오)")
+        return found
+
+    # ── 계층 (재귀 WITH → tree) ──────────────────────────────────────────
+
+    def _wrapped_tree(self, node: exp.Subquery, with_, alias: str, scope: _Scope) -> dict:
+        """(WITH RECURSIVE t AS (…) SELECT 테이블 컬럼 … FROM 테이블 JOIN t …) 별칭 — 질문 처리가 만든 계층 SQL 모양"""
+        found = []
+        for cte in with_.expressions:
+            if isinstance(cte.this, exp.Union):
+                found.append(cte)
+        if len(found) != 1:
+            raise ValueError(f"하위 쿼리 {alias} 의 재귀 WITH 는 계층 하나만 받습니다")
+        body_from = node.this.args.get("from_") or node.this.args.get("from")
+        spec = self._tree_spec(found[0])
+        if body_from is None or not isinstance(body_from.this, exp.Table) or self._lookup(body_from.this)[0] != spec["table"]:
+            raise ValueError(
+                f"하위 쿼리 {alias} 는 재귀 WITH 결과를 {spec['table']} 에 붙인 모양이어야 합니다 "
+                f"(WITH RECURSIVE 를 맨 앞에 두고 그 이름을 FROM 에 쓰는 모양도 됩니다)"
+            )
+        return self._tree_source(found[0], alias, scope, own_columns=False, spec=spec)
+
+    def _tree_source(self, cte, alias: str, scope: _Scope, own_columns: bool, spec: dict | None = None) -> dict:
+        """계층을 FROM 소스로. 컬럼은 계층 테이블의 컬럼 + depth 다."""
+        spec = spec or self._tree_spec(cte)
+        columns = dict(self.tables[spec["table"].lower()][1])
+        columns["depth" if "depth" not in columns else "tree_depth"] = 0
+        if own_columns:  # WITH 이름을 그대로 쓴다 — 그 컬럼이 테이블 컬럼 이름이어야 tree 로 옮길 수 있다
+            for name in _cte_names(cte):
+                if _find(columns, name) is None:
+                    raise ValueError(
+                        f"재귀 WITH {cte.alias} 의 컬럼은 {spec['table']} 의 컬럼 이름 그대로 적어야 합니다 -> {name} "
+                        f"(단계 수는 depth)"
+                    )
+        scope.sources[alias] = {"name": alias, "columns": columns, "table": False}
+        return {"tree": spec, "as": alias}
+
+    def _tree_spec(self, cte) -> dict:
+        """재귀 WITH → {"table", "key", "parent", "start", "direction"}
+
+        시작 SELECT: 테이블 하나에서 키 컬럼(첫 항목)을 WHERE 로 고른다.
+        다음 단계 SELECT: 같은 테이블을 WITH 이름과 조인한다 — 테이블.parent = WITH.키 이면 아래로(down),
+        테이블.키 = WITH.parent 이면 위로(up). 단계 수 제한(WHERE depth < n)은 컴파일러가 둔다.
+        """
+        name = cte.alias
+        union = cte.this
+        shape = f"재귀 WITH {name} 은 '시작 SELECT UNION ALL 다음 단계 SELECT' 모양이어야 합니다"
+        if not isinstance(union, exp.Union) or not isinstance(union.this, exp.Select) or not isinstance(union.expression, exp.Select):
+            raise ValueError(shape)
+        anchor, step = union.this, union.expression
+        anchor_from = anchor.args.get("from_") or anchor.args.get("from")
+        if anchor_from is None or not isinstance(anchor_from.this, exp.Table) or anchor.args.get("joins"):
+            raise ValueError(
+                f"재귀 WITH {name} 의 시작 SELECT 는 테이블 하나에서 WHERE 로 고릅니다 "
+                f"(다른 테이블의 값은 WHERE 키 IN (SELECT …) 로 적으십시오)"
+            )
+        real, columns = self._lookup(anchor_from.this)
+        anchor_cols = []
+        for e in anchor.expressions:
+            col = _strip_text_cast(e.this if isinstance(e, exp.Alias) else e)
+            anchor_cols.append(_find(columns, col.name) if isinstance(col, exp.Column) else None)
+        key = anchor_cols[0] if anchor_cols else None
+        if key is None:
+            raise ValueError(f"재귀 WITH {name} 의 시작 SELECT 첫 항목은 {real} 의 키 컬럼이어야 합니다")
+
+        step_from = step.args.get("from_") or step.args.get("from")
+        joins = step.args.get("joins") or []
+        if step_from is None or not isinstance(step_from.this, exp.Table) or self._lookup(step_from.this)[0] != real or len(joins) != 1:
+            raise ValueError(f"재귀 WITH {name} 의 다음 단계 SELECT 는 {real} 를 {name} 과 조인한 모양이어야 합니다")
+        join = joins[0]
+        if not isinstance(join.this, exp.Table) or join.this.name != name:
+            raise ValueError(f"재귀 WITH {name} 의 다음 단계 SELECT 는 {real} 를 {name} 과 조인한 모양이어야 합니다")
+        cte_alias = join.this.alias or name
+        on = join.args.get("on")
+        if not isinstance(on, exp.EQ):
+            raise ValueError(f"재귀 WITH {name} 의 조인 조건은 컬럼 = 컬럼 하나입니다")
+        own = prev = None
+        for side in (_strip_text_cast(on.this), _strip_text_cast(on.expression)):
+            if not isinstance(side, exp.Column):
+                raise ValueError(f"재귀 WITH {name} 의 조인 조건은 컬럼 = 컬럼 하나입니다")
+            if side.table in (cte_alias, name):
+                prev = side
+            else:
+                own = side
+        if own is None or prev is None:
+            raise ValueError(f"재귀 WITH {name} 의 조인 조건은 {real} 컬럼 = {name} 컬럼 이어야 합니다")
+        own_col = _find(columns, own.name)
+        names = _cte_names(cte)
+        prev_col = None
+        for i, n in enumerate(names):
+            if n.lower() == prev.name.lower() and i < len(anchor_cols):
+                prev_col = anchor_cols[i]
+        if own_col is None or prev_col is None:
+            raise ValueError(f"재귀 WITH {name} 의 조인 컬럼을 {real} 의 컬럼으로 읽지 못했습니다 -> {on.sql()}")
+        if prev_col == key and own_col != key:
+            direction, parent = "down", own_col
+        elif own_col == key and prev_col != key:
+            direction, parent = "up", prev_col
+        else:
+            raise ValueError(f"재귀 WITH {name} 의 조인은 부모 = 키 모양이어야 합니다 -> {on.sql()}")
+
+        where = anchor.args.get("where")
+        if where is None:
+            raise ValueError(f"재귀 WITH {name} 의 시작 SELECT 에 WHERE(시작 행 조건)가 없습니다")
+        start_scope = _Scope()
+        start_alias = anchor_from.this.alias or (anchor_from.this.name if "." in real else real)
+        start_scope.sources[start_alias] = {"name": real, "columns": columns, "table": True}
+        start = self.conditions(where.this, start_scope)
+        return {"table": real, "key": key, "parent": parent, "start": start, "direction": direction}
 
     def _join(self, join: exp.Join, scope: _Scope) -> dict:
         side = (join.side or "").upper()
@@ -239,15 +373,38 @@ class _Parser:
         if join.args.get("using"):
             raise ValueError("JOIN … USING 은 지원하지 않습니다 — ON a.x = b.x 로 적으십시오")
         table = self._source(join.this, scope)
+        alias = None
+        if isinstance(table, dict) and "table" in table:  # 별칭을 붙인 WITH 이름
+            table, alias = table["table"], table["as"]
         on = join.args.get("on")
         if on is None:
             raise ValueError(f"{table} JOIN 에 ON 이 없습니다")
         pairs = []
         for part in _split(on, exp.And):
-            if not (isinstance(part, exp.EQ) and isinstance(part.this, exp.Column) and isinstance(part.expression, exp.Column)):
+            left = _strip_text_cast(part.this) if isinstance(part, exp.EQ) else None
+            right = _strip_text_cast(part.expression) if isinstance(part, exp.EQ) else None
+            if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
                 raise ValueError(f"JOIN 조건은 컬럼 = 컬럼 만 받습니다 -> {part.sql()}")
-            pairs.append([self._qualified(part.this, scope), self._qualified(part.expression, scope)])
-        return {"table": table, "type": how, "on": pairs}
+            # 타입이 다른 컬럼끼리의 CAST(… AS VARCHAR) 는 벗긴다 — 컴파일러가 다시 맞춘다
+            pairs.append([self._qualified(left, scope), self._qualified(right, scope)])
+        if isinstance(table, dict) and "tree" in table:  # 계층은 {"tree", "as"} 로 둔다
+            return {"tree": table["tree"], "as": table["as"], "type": how, "on": pairs}
+        out = {"table": table, "type": how, "on": pairs}
+        if alias:
+            out["as"] = alias
+        return out
+
+    def _with(self, name: str) -> dict:
+        """WITH 하나를 AST 의 with 로 옮기고 그 결과 컬럼을 돌려준다 (한 번만 옮긴다)"""
+        if name not in self.with_columns:
+            if name in self.opening:
+                raise ValueError(f"재귀 WITH 는 지원하지 않습니다 -> {name} (계층은 질문으로 물으십시오)")
+            self.opening.add(name)
+            inner = self.select(self.ctes[name])
+            self.opening.discard(name)
+            self.withs.append({"name": name, "query": inner})
+            self.with_columns[name] = _subquery_columns(inner)
+        return self.with_columns[name]
 
     def _qualified(self, column: exp.Column, scope: _Scope) -> str:
         _, src = scope.owner(column)
@@ -329,7 +486,11 @@ class _Parser:
             return [{"expr": self.node(node.this, scope, aliases), "op": "is_not_null" if null else "is_null"}]
         if isinstance(node, exp.In):
             if node.args.get("query") is not None:
-                raise ValueError("IN (서브쿼리) 는 지원하지 않습니다")
+                inner = self.select(_unwrap_text_select(node.args["query"]))
+                if len(inner["select"]) != 1:
+                    raise ValueError(f"IN 의 하위 쿼리는 SELECT 항목이 하나여야 합니다 -> {node.sql()}")
+                left = self.node(_strip_text_cast(node.this), scope, aliases)
+                return [{"expr": left, "op": "not_in" if negate else "in", "value": {"query": inner}}]
             values = []
             for v in node.expressions:
                 literal = self._literal(v)
@@ -581,7 +742,9 @@ def _interval(node: exp.Interval) -> tuple[float, str]:
         return n, "days"
     if word == "minute":
         return n, "minutes"
-    raise ValueError(f"INTERVAL 은 분(minute)·시간(hour)·일(day) 단위만 받습니다 -> {node.sql()}")
+    if word == "second":
+        return n, "seconds"
+    raise ValueError(f"INTERVAL 은 초(second)·분(minute)·시간(hour)·일(day) 단위만 받습니다 -> {node.sql()}")
 
 
 def _moment(node) -> datetime.datetime | None:
@@ -602,6 +765,61 @@ def _moment(node) -> datetime.datetime | None:
     if isinstance(node, exp.Literal) and node.is_string:
         return parse_datetime(node.this)
     return None
+
+
+_TEXT_TYPES = (
+    exp.DataType.Type.VARCHAR,
+    exp.DataType.Type.CHAR,
+    exp.DataType.Type.TEXT,
+    exp.DataType.Type.NVARCHAR,
+    exp.DataType.Type.NCHAR,
+)
+
+
+def _strip_text_cast(node):
+    """문자로 바꾸는 형 변환(CAST … AS VARCHAR, ::text, TO_CHAR)을 벗긴다.
+    타입이 다른 컬럼끼리의 비교에 붙는 것이라 AST 에는 두지 않는다 — 컴파일러가 다시 맞춘다."""
+    while True:
+        if isinstance(node, exp.Paren):
+            node = node.this
+        elif isinstance(node, exp.Cast) and node.to.this in _TEXT_TYPES:
+            node = node.this
+        elif type(node).__name__ == "ToChar" and not node.args.get("format"):
+            node = node.this
+        else:
+            return node
+
+
+def _unwrap_text_select(query):
+    """컴파일러가 만든 SELECT CAST(x.c AS VARCHAR) FROM (안쪽 SELECT) x 를 안쪽 SELECT 로 되돌린다"""
+    select = query.this if isinstance(query, exp.Subquery) else query
+    if not isinstance(select, exp.Select) or len(select.expressions) != 1:
+        return select
+    expr = select.expressions[0]
+    col = _strip_text_cast(expr.this if isinstance(expr, exp.Alias) else expr)
+    source = select.args.get("from_") or select.args.get("from")
+    if col is expr or not isinstance(col, exp.Column) or source is None or not isinstance(source.this, exp.Subquery):
+        return select
+    if select.args.get("joins") or select.args.get("where") or select.args.get("group"):
+        return select
+    if source.this.alias != col.table:
+        return select
+    return source.this.this
+
+
+def _cte_names(cte) -> list[str]:
+    """WITH 의 결과 컬럼 이름 (컬럼 목록이 있으면 그것, 없으면 첫 SELECT 의 이름)"""
+    names = []
+    alias = cte.args.get("alias")
+    columns = alias.columns if alias is not None else []
+    if columns:
+        for c in columns:
+            names.append(c.name)
+        return names
+    first = cte.this.this if isinstance(cte.this, exp.Union) else cte.this
+    for e in first.expressions:
+        names.append(e.alias_or_name)
+    return names
 
 
 def _split(node, cls) -> list:

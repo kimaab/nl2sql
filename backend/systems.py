@@ -367,7 +367,7 @@ def get_schema(system_id: UUID) -> dict:
     rows = db.query(
         """
         SELECT t.name AS table_name, t.comment AS table_note, t.purpose,
-               c.name AS column_name, c.data_type, c.comment AS column_note
+               c.name AS column_name, c.data_type, c.comment AS column_note, c.note AS column_human
           FROM meta_table t
           LEFT JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
          WHERE t.system_id = %s AND t.deleted_at IS NULL
@@ -391,7 +391,7 @@ def get_schema(system_id: UUID) -> dict:
                 {
                     "name": r["column_name"],
                     "type": r["data_type"],
-                    "description": r["column_note"],
+                    "description": r["column_human"] or r["column_note"],
                 }
             )
     return {"tables": list(tables.values())}
@@ -445,7 +445,7 @@ def _columns(system_id: UUID) -> dict:
     """테이블별 컬럼과 '계산 필요' 표시"""
     rows = db.query(
         """
-        SELECT c.table_id, c.name, c.data_type, c.comment, c.ai_comment, c.needs_calc
+        SELECT c.table_id, c.name, c.data_type, c.comment, c.ai_comment, c.note, c.needs_calc
           FROM meta_column c JOIN meta_table t ON t.id = c.table_id
          WHERE t.system_id = %s AND t.deleted_at IS NULL AND c.deleted_at IS NULL
          ORDER BY c.table_id, c.ordinal
@@ -457,7 +457,7 @@ def _columns(system_id: UUID) -> dict:
         out.setdefault(r["table_id"], []).append(
             ColumnInfo(
                 name=r["name"], data_type=r["data_type"], comment=r["comment"], ai_comment=r["ai_comment"],
-                needs_calc=r["needs_calc"],
+                note=r["note"], needs_calc=r["needs_calc"],
             )
         )
     return out
@@ -522,6 +522,22 @@ def set_needs_calc(system_id: UUID, table_id: UUID, column: str, needs_calc: boo
             (needs_calc, str(table_id), column),
         )
     log.info("needs_calc %s.%s = %s", found.name, column, needs_calc)
+    return _find_table(system_id, table_id)
+
+
+def set_column_note(system_id: UUID, table_id: UUID, column: str, note: str) -> TableInfo:
+    found = _find_table(system_id, table_id)
+    if not _has_column(found.columns, column):
+        raise ApiException(400, f"{found.name} 에 없는 컬럼입니다 -> {column}")
+    with db.connection() as conn:
+        conn.execute(
+            """
+            UPDATE meta_column SET note = %s, updated_at = now()
+             WHERE table_id = %s AND name = %s AND deleted_at IS NULL
+        """,
+            (note.strip(), str(table_id), column),
+        )
+    log.info("column note %s.%s", found.name, column)
     return _find_table(system_id, table_id)
 
 
