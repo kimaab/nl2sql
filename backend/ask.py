@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from compiler import CalcColumnError, Compiler, temporal_kind
 from selector import Step, chat, model_name, parse_json, select_tables
 
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 13
 
 AST_SYSTEM = """당신은 질문을 '{name}' 데이터베이스({driver})의 조회 명세(AST, JSON)로 바꾸는 역할입니다.
 {domain}[오늘]
@@ -22,7 +22,7 @@ AST_SYSTEM = """당신은 질문을 '{name}' 데이터베이스({driver})의 조
 
 [AST 모양]
 {{
-  "from": "테이블" 또는 {{"query": 하위 AST, "as": "별칭"}},
+  "from": "테이블" 또는 {{"table": "테이블", "as": "별칭"}} 또는 {{"query": 하위 AST, "as": "별칭"}},
   "joins": [{{"table": "테이블" 또는 "query": 하위 AST, "as": "별칭", "type": "inner|left", "on": [["a.컬럼", "b.컬럼"]]}}],   (필요할 때만)
   "select": [{{"expr": 식, "as": "결과 이름"}}],   모든 컬럼은 {{"expr": {{"col": "*"}}}}
   "distinct": true,   (중복을 뺄 때만)

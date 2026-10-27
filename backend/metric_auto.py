@@ -444,7 +444,7 @@ def _indexes(row: dict, table: dict) -> list:
         names.add(c["name"])
     try:
         with read_only(row, PLAN_TIMEOUT_S) as cur:
-            return read_indexes(cur, row, table["name"], names)
+            return read_indexes(cur, row, table, names)
     except Exception as error:
         log.warning("%s 인덱스를 읽지 못했습니다: %s", table["name"], _first_line(error))
         return []
@@ -472,7 +472,7 @@ def period_example(row: dict, table: dict, indexes: list) -> dict | None:
         with read_only(row, PLAN_TIMEOUT_S) as cur:
             for column in heads:
                 sql = (
-                    f"SELECT {d.q(column)} FROM {d.q(table['name'])} WHERE {d.q(column)} IS NOT NULL "
+                    f"SELECT {d.q(column)} FROM {d.table(table['name'], table.get('schema', ''))} WHERE {d.q(column)} IS NOT NULL "
                     f"ORDER BY {d.q(column)} DESC {d.limit(1)}"
                 )
                 if full_scans(cur, d, sql):

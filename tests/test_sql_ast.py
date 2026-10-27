@@ -1,6 +1,6 @@
 import pytest
 
-from compiler import Compiler
+from compiler import Compiler, ast_tables
 from sql_ast import parse_sql
 from test_compiler import CONTRACT
 
@@ -118,3 +118,101 @@ def test_case_and_minute_interval():
     assert ast["select"][2]["expr"]["args"][0]["when"][0]["if"] == [{"expr": {"col": "vehicle_id"}, "op": "=", "value": "A"}]
     assert "SUM((CASE WHEN \"vehicle_id\" = 'A' THEN 0 ELSE 1 END)) AS \"others\"" in sql
     assert not warnings
+
+
+# 스키마를 여러 개 읽는 시스템 — 기본 스키마가 아닌 테이블은 '스키마.테이블' 이름이다
+MULTI = {
+    "driver": "postgresql",
+    "tables": CONTRACT["tables"]
+    + [
+        {
+            "name": "sales.orders",
+            "schema": "sales",
+            "columns": [{"name": "vehicle_id", "type": "varchar"}, {"name": "amount", "type": "numeric"}],
+        }
+    ],
+}
+
+
+def test_other_schema_table_roundtrip():
+    parsed = parse_sql(
+        """select v.vehicle_name, sum(orders.amount) as total
+             from sales.orders join vehicle v on v.vehicle_id = orders.vehicle_id
+            group by v.vehicle_name""",
+        MULTI,
+    )
+    ast = parsed["ast"]
+    assert ast["from"] == "sales.orders"
+    assert ast["joins"][0]["on"] == [["vehicle.vehicle_id", "sales.orders.vehicle_id"]]
+    sql = Compiler(MULTI).compile(ast)
+    assert 'FROM "sales"."orders" "sales.orders" JOIN "vehicle"' in sql
+    assert 'SUM("sales.orders"."amount")' in sql
+
+
+def test_other_schema_table_needs_schema():
+    with pytest.raises(ValueError, match="메타데이터에 없는 테이블"):
+        parse_sql("select amount from orders", MULTI)
+
+
+def test_default_schema_prefix_is_still_dropped():
+    ast = parse_sql("select vehicle_id from public.bms_log", MULTI)["ast"]
+    assert ast["from"] == "bms_log"
+
+
+def test_join_on_accepts_col_objects():
+    ast = {
+        "from": "sales.orders",
+        "joins": [{"table": "vehicle", "type": "inner",
+                   "on": [[{"col": "sales.orders.vehicle_id"}, {"col": "vehicle.vehicle_id"}]]}],
+        "select": [{"expr": {"col": "vehicle.vehicle_name"}, "as": "name"}],
+    }
+    sql = Compiler(MULTI).compile(ast)
+    assert 'ON "sales.orders"."vehicle_id" = "vehicle"."vehicle_id"' in sql
+
+
+def test_non_string_column_ref_has_clear_error():
+    ast = {"from": "bms_log", "select": [{"expr": {"col": {"col": "vehicle_id", "x": 1}}, "as": "v"}]}
+    with pytest.raises(Exception, match="문자열로 적습니다"):
+        Compiler(MULTI).compile(ast)
+
+
+def test_table_aliases_from_log():
+    """질문 로그에서 그대로 가져온 AST — 조인 테이블에 별칭(as)을 붙이고 on 을 {"col"} 로 적었다"""
+    contract = {
+        "driver": "postgresql",
+        "tables": [
+            {"name": "violet.tb_users", "schema": "violet",
+             "columns": [{"name": "user_id", "type": "varchar"}, {"name": "user_nm", "type": "varchar"}]},
+            {"name": "violet.tb_device_user", "schema": "violet",
+             "columns": [{"name": "user_id", "type": "varchar"}, {"name": "sensor_id", "type": "varchar"}]},
+            {"name": "vehicle_info",
+             "columns": [{"name": "vehicle_id", "type": "varchar"}, {"name": "model", "type": "varchar"}]},
+        ],
+    }
+    ast = {
+        "from": "violet.tb_users",
+        "joins": [
+            {"table": "violet.tb_device_user", "as": "du", "type": "inner",
+             "on": [[{"col": "violet.tb_users.user_id"}, {"col": "du.user_id"}]]},
+            {"table": "vehicle_info", "as": "vi", "type": "inner",
+             "on": [[{"col": "du.sensor_id"}, {"col": "vi.vehicle_id"}]]},
+        ],
+        "select": [
+            {"expr": {"col": "violet.tb_users.user_nm"}, "as": "userName"},
+            {"expr": {"col": "vi.vehicle_id"}, "as": "vehicleId"},
+            {"expr": {"col": "vi.model"}, "as": "model"},
+        ],
+        "where": [{"expr": {"col": "violet.tb_users.user_id"}, "op": "=", "value": {"str": "baroness-admin"}}],
+    }
+    sql = Compiler(contract).compile(ast)
+    assert sql == (
+        'SELECT "violet.tb_users"."user_nm" AS "userName", "vi"."vehicle_id" AS "vehicleId", "vi"."model" AS "model" '
+        'FROM "violet"."tb_users" "violet.tb_users" '
+        'JOIN "violet"."tb_device_user" "du" ON "violet.tb_users"."user_id" = "du"."user_id" '
+        'JOIN "vehicle_info" "vi" ON "du"."sensor_id" = "vi"."vehicle_id" '
+        "WHERE \"violet.tb_users\".\"user_id\" = 'baroness-admin'"
+    )
+    assert ast_tables(ast) == ["violet.tb_users", "violet.tb_device_user", "vehicle_info"]
+    aliased = Compiler(contract).compile({**ast, "from": {"table": "violet.tb_users", "as": "u"},
+                                          "select": [{"expr": {"col": "u.user_nm"}, "as": "n"}], "where": []})
+    assert 'FROM "violet"."tb_users" "u"' in aliased

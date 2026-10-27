@@ -166,3 +166,15 @@ def replace_fk_relations(cur, system_id: UUID, relations: list[dict]) -> None:
     """,
         rows,
     )
+    # FK 가 생기면 같은 관계를 추론해 둔 auto 관계는 지운다 (describe.py)
+    cur.execute(
+        """
+        DELETE FROM meta_relation a USING meta_relation f
+         WHERE a.system_id = %s AND a.source = 'auto' AND f.system_id = a.system_id AND f.source = 'fk'
+           AND ((a.left_table_id = f.left_table_id AND a.left_column = f.left_column
+                 AND a.right_table_id = f.right_table_id AND a.right_column = f.right_column)
+             OR (a.left_table_id = f.right_table_id AND a.left_column = f.right_column
+                 AND a.right_table_id = f.left_table_id AND a.right_column = f.left_column))
+    """,
+        (str(system_id),),
+    )

@@ -5,7 +5,7 @@
   - 컬럼을 상수와 비교하면 반대로 상수를 UTC 로 바꾼다 — 컬럼을 감싸지 않아야 인덱스를 탄다.
 
 AST 모양
-  {"from": "테이블" | {"query": AST, "as": "별칭"},
+  {"from": "테이블" | {"table": "테이블", "as": "별칭"} | {"query": AST, "as": "별칭"},
    "joins": [{"table": "테이블" | "query": AST, "as": "별칭", "type": "inner|left", "on": [["a.컬럼", "b.컬럼"]]}],
    "select": [{"expr": 식, "as": "이름"}],        {"expr": {"col": "*"}} 는 모든 컬럼
    "distinct": true, "where": [조건], "group_by": [식], "having": [조건],
@@ -15,6 +15,7 @@ AST 모양
 """
 
 import datetime
+import json
 
 AGGREGATES = {"SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"}
 ARITHMETIC = {"ADD": "+", "SUB": "-", "MUL": "*"}
@@ -80,6 +81,12 @@ class Dialect:
         if self.quote_char in text or "\x00" in text:
             raise AstError(f"이름에 {self.quote_char} 나 NUL 을 쓸 수 없습니다 -> {name!r}")
         return f"{self.quote_char}{text}{self.quote_char}"
+
+    def table(self, name: str, schema: str = "") -> str:
+        """테이블 이름. 기본 스키마가 아닌 테이블(이름이 '스키마.테이블')은 스키마와 테이블을 따로 감싼다."""
+        if schema and name.startswith(schema + "."):
+            return f"{self.q(schema)}.{self.q(name[len(schema) + 1:])}"
+        return self.q(name)
 
     def literal(self, value) -> str:
         if value is None:
@@ -151,11 +158,34 @@ class Scope:
 
     def resolve(self, ref) -> tuple[str, str, int]:
         """→ (별칭, 컬럼, 시차)"""
-        ref = str(ref).strip()
+        if isinstance(ref, dict) and set(ref) == {"col"}:  # on 에 {"col": "a.컬럼"} 으로 적어도 받는다
+            ref = ref["col"]
+        if not isinstance(ref, str):
+            raise AstError(f"컬럼은 '테이블.컬럼' 문자열로 적습니다 -> {json.dumps(ref, ensure_ascii=False)}")
+        ref = ref.strip()
         if "." in ref:
-            alias, col = ref.split(".", 1)
+            # 별칭에도 점이 있을 수 있다 ('스키마.테이블') — 가장 길게 맞는 별칭을 고른다
+            alias = ref.split(".", 1)[0]
+            for name in self.sources:
+                if ref.startswith(name + ".") and len(name) > len(alias):
+                    alias = name
             if alias not in self.sources:
-                raise AstError(f"FROM 에 없는 테이블입니다 -> {alias} (있는 것: {', '.join(self.sources)})")
+                # 별칭을 붙인 테이블을 실제 이름으로 가리켰다 — 그 테이블의 별칭이 하나뿐이면 그 별칭으로 본다
+                table = ""
+                for real in self.real.values():
+                    if ref.startswith(real + ".") and len(real) > len(table):
+                        table = real
+                aliases = []
+                for name, real in self.real.items():
+                    if table and real == table:
+                        aliases.append(name)
+                if len(aliases) == 1:
+                    return self.resolve(f"{aliases[0]}.{ref[len(table) + 1:]}")
+                known = []
+                for name in self.sources:
+                    known.append(name if self.real.get(name, name) == name else f"{name}({self.real[name]})")
+                raise AstError(f"FROM 에 없는 테이블입니다 -> {alias} (있는 것: {', '.join(known)})")
+            col = ref[len(alias) + 1:]
             if col not in self.sources[alias]:
                 raise AstError(f"{alias} 에 없는 컬럼입니다 -> {col}")
             return alias, col, self.sources[alias][col]
@@ -237,6 +267,7 @@ class Compiler:
         self.utc_now = utc_now
         self.dialect = Dialect(contract.get("driver") or "postgresql")
         self.tables: dict[str, dict[str, int]] = {}
+        self.schemas: dict[str, str] = {}  # 기본 스키마가 아닌 테이블 → 스키마
         self.calc_columns: dict[str, set] = {}
         for t in contract.get("tables", []):
             cols, calc = {}, set()
@@ -248,6 +279,7 @@ class Compiler:
                 if c.get("needs_calc"):
                     calc.add(c["name"])
             self.tables[t["name"]] = cols
+            self.schemas[t["name"]] = t.get("schema") or ""
             self.calc_columns[t["name"]] = calc
         self.allowed: dict | None = None  # {컬럼: 지표가 그 컬럼에 쓴 집계 함수}
         if metrics is not None:
@@ -277,8 +309,10 @@ class Compiler:
             from_sql = self._table(source, scope)
         elif isinstance(source, dict) and "query" in source:
             from_sql = self._subquery(source["query"], str(source.get("as") or "sub").strip(), scope, depth)
+        elif isinstance(source, dict) and "table" in source:
+            from_sql = self._table(source["table"], scope, source.get("as"))
         else:
-            raise AstError('from 은 테이블 이름이나 {"query": AST, "as": "별칭"} 입니다')
+            raise AstError('from 은 테이블 이름이나 {"table": "테이블", "as": "별칭"}, {"query": AST, "as": "별칭"} 입니다')
 
         for join in ast.get("joins") or []:
             if not isinstance(join, dict):
@@ -295,7 +329,7 @@ class Compiler:
                 table_sql = self._subquery(target["query"], alias, scope, depth)
                 label = alias
             else:
-                table_sql = self._table(join.get("table"), scope)
+                table_sql = self._table(join.get("table"), scope, join.get("as"))
                 label = join.get("table")
             pairs = join.get("on") or []
             if not pairs:
@@ -378,11 +412,17 @@ class Compiler:
         scope.add(alias, dict.fromkeys(names, 0))
         return f"({inner_sql}) {self.dialect.q(alias)}"
 
-    def _table(self, name, scope: Scope) -> str:
+    def _table(self, name, scope: Scope, alias=None) -> str:
+        """테이블 하나. 별칭(as)이 없으면 테이블 이름이 곧 별칭이라 컬럼을 '테이블.컬럼' 으로 가리킨다."""
         if not isinstance(name, str) or name not in self.tables:
             raise AstError(f"없는 테이블입니다 -> {name}")
-        scope.add(name, self.tables[name])
-        scope.real[name] = name
+        alias = str(alias or "").strip() or name
+        scope.add(alias, self.tables[name])
+        scope.real[alias] = name
+        schema = self.schemas[name]
+        # 다른 스키마의 테이블은 '스키마.테이블' 이름 그대로를 별칭으로 둔다 — 컬럼을 그 이름으로 가리킨다
+        if schema or alias != name:
+            return f"{self.dialect.table(name, schema)} {self.dialect.q(alias)}"
         return self.dialect.q(name)
 
     def _check_aggregate(self, fn: str, refs: list):
@@ -711,6 +751,8 @@ def ast_tables(ast: dict) -> list[str]:
         source = node.get("from")
         if isinstance(source, str):
             out.append(source)
+        elif isinstance(source, dict) and isinstance(source.get("table"), str):
+            out.append(source["table"])
         elif isinstance(source, dict):
             walk(source.get("query"))
         for j in node.get("joins") or []:

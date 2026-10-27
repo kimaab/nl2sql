@@ -146,7 +146,7 @@ def test_sqllab_link_saves_permalink_under_superset_url(monkeypatch):
     monkeypatch.setattr(
         superset_link.db,
         "one",
-        lambda sql, *args: {"name": "baroness개발서버", "db_schema": "public", "superset_database_id": 1},
+        lambda sql, *args: {"name": "baroness개발서버", "db_schemas": ["public"], "superset_database_id": 1},
     )
     url = superset_link.sqllab_link("sid", "SELECT 1", "어제 수집된 차량 수")
     assert url == "http://superset:8088/sqllab/p/abc"
@@ -158,7 +158,7 @@ def test_sqllab_link_saves_permalink_under_superset_url(monkeypatch):
 def test_sqllab_link_needs_superset_connection(monkeypatch):
     setup(monkeypatch, {})
     monkeypatch.setattr(
-        superset_link.db, "one", lambda sql, *args: {"name": "A", "db_schema": "", "superset_database_id": None}
+        superset_link.db, "one", lambda sql, *args: {"name": "A", "db_schemas": [], "superset_database_id": None}
     )
     with pytest.raises(ApiException) as caught:
         superset_link.sqllab_link("sid", "SELECT 1")
@@ -204,7 +204,7 @@ def test_create_chart_reuses_dataset_and_chart_of_same_sql(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        superset_link.db, "one", lambda sql, *args: {"name": "A", "db_schema": "public", "superset_database_id": 1}
+        superset_link.db, "one", lambda sql, *args: {"name": "A", "db_schemas": ["public"], "superset_database_id": 1}
     )
     out = superset_link.create_chart("sid", "SELECT count(*) AS vehicles FROM t;", "차량 수")
     assert out == {"url": "http://superset:8088/explore/?slice_id=10", "viz_type": "big_number_total", "dataset_id": 11, "chart_id": 10}
@@ -224,7 +224,7 @@ def test_create_chart_makes_dataset_and_chart(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        superset_link.db, "one", lambda sql, *args: {"name": "A", "db_schema": "public", "superset_database_id": 1}
+        superset_link.db, "one", lambda sql, *args: {"name": "A", "db_schemas": ["public"], "superset_database_id": 1}
     )
     out = superset_link.create_chart("sid", "SELECT k, v FROM t;", "it's 차트!")
     assert out["chart_id"] == 20 and out["viz_type"] == "echarts_timeseries_bar"

@@ -12,7 +12,7 @@ export interface System {
   host: string;
   port: number;
   db_name: string;
-  db_schema: string;
+  db_schemas: string[];
   username: string;
   synced_at: string | null;
   table_count: number;
@@ -30,7 +30,7 @@ export interface SystemInput {
   host: string;
   port: number;
   db_name: string;
-  db_schema: string;
+  db_schemas: string[];
   username: string;
   password: string;
 }
@@ -131,6 +131,8 @@ export interface ColumnInfo {
   name: string;
   data_type: string;
   comment: string;
+  /** 코멘트가 없을 때 추론한 설명 */
+  ai_comment: string;
   needs_calc: boolean;
 }
 
@@ -138,6 +140,8 @@ export interface TableInfo {
   id: string;
   name: string;
   comment: string;
+  /** 코멘트가 없을 때 추론한 설명 */
+  ai_comment: string;
   purpose: string;
   column_count: number;
   metric_count: number;
@@ -155,7 +159,8 @@ export interface RelationInput {
 
 export interface Relation extends RelationInput {
   id: string;
-  source: "fk" | "manual";
+  /** auto: 컬럼 이름, 타입, PK 로 추론한 관계 (설명 자동 채우기가 만든다) */
+  source: "fk" | "manual" | "auto";
 }
 
 export interface AskStep {

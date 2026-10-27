@@ -13,15 +13,26 @@ const EMPTY: api.SystemInput = {
   host: "",
   port: 0,
   db_name: "",
-  db_schema: "",
+  db_schemas: [],
   username: "",
   password: "",
 };
+
+/** "app, sales" → ["app", "sales"]. 입력칸은 글자 그대로 두고 저장할 때만 나눈다 (쉼표를 치는 중에 지워지지 않게). */
+function splitSchemas(text: string): string[] {
+  const out: string[] = [];
+  for (const part of text.split(",")) {
+    const name = part.trim();
+    if (name) out.push(name);
+  }
+  return out;
+}
 
 export function SystemForm() {
   const { id } = useParams();
   const editing = Boolean(id);
   const [form, setForm] = useState<api.SystemInput>(EMPTY);
+  const [schemaText, setSchemaText] = useState("");
   const [loading, setLoading] = useState(editing);
   const [saving, setSaving] = useState(false);
   const toast = useToast();
@@ -31,7 +42,7 @@ export function SystemForm() {
     if (!id) return;
     api
       .getSystem(id)
-      .then((ds) =>
+      .then((ds) => {
         setForm({
           code: ds.code,
           name: ds.name,
@@ -40,11 +51,12 @@ export function SystemForm() {
           host: ds.host,
           port: ds.port,
           db_name: ds.db_name,
-          db_schema: ds.db_schema,
+          db_schemas: ds.db_schemas,
           username: ds.username,
           password: "",
-        })
-      )
+        });
+        setSchemaText(ds.db_schemas.join(", "));
+      })
       .catch((err) => {
         toast("시스템을 불러오지 못했습니다: " + errorMessage(err), "error");
         navigate("/systems");
@@ -59,12 +71,13 @@ export function SystemForm() {
     e.preventDefault();
     try {
       setSaving(true);
+      const data = { ...form, db_schemas: splitSchemas(schemaText) };
       if (id) {
-        await api.updateSystem(id, form);
+        await api.updateSystem(id, data);
         toast("수정했습니다", "ok");
         navigate("/systems");
       } else {
-        const created = await api.createSystem(form);
+        const created = await api.createSystem(data);
         toast("등록했습니다. 이어서 스키마를 동기화하세요", "ok");
         navigate(`/sync?ds=${created.id}`);
       }
@@ -158,12 +171,16 @@ export function SystemForm() {
             {form.driver !== "mysql" && (
               <Field
                 label="스키마"
-                hint={form.driver === "postgresql" ? "기본값: public" : "기본값: 계정명"}
+                hint={
+                  "쉼표로 여러 개. 첫 스키마가 기본 스키마이고, 나머지 스키마의 테이블은 '스키마.테이블' 이름이 됩니다. " +
+                  (form.driver === "postgresql" ? "비우면 public" : "비우면 계정명")
+                }
               >
                 <input
                   className="input"
-                  value={form.db_schema}
-                  onChange={(e) => set("db_schema", e.target.value)}
+                  value={schemaText}
+                  onChange={(e) => setSchemaText(e.target.value)}
+                  placeholder={form.driver === "postgresql" ? "예: public, sales" : "예: APP, SALES"}
                 />
               </Field>
             )}

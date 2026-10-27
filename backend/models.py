@@ -29,7 +29,7 @@ class SystemInput(BaseModel):
     host: str
     port: int = 0
     db_name: str
-    db_schema: str = ""
+    db_schemas: list[str] = []  # 첫 스키마가 기본 스키마. 비우면 PostgreSQL 은 public, Oracle 은 계정
     username: str = ""
     password: str = ""
 
@@ -56,6 +56,15 @@ class SystemInput(BaseModel):
             raise ValueError("must not be blank")
         return value.strip()
 
+    @field_validator("db_schemas")
+    @classmethod
+    def _schemas_usable(cls, values: list[str]) -> list[str]:
+        cleaned = _clean_names(values)
+        for name in cleaned:
+            if re.search(r'[.,"`\x00]', name):
+                raise ValueError(f"스키마 이름에 . , \" ` 를 쓸 수 없습니다 -> {name}")
+        return cleaned
+
     @model_validator(mode="after")
     def _port_defaulted(self):
         if self.port == 0:
@@ -76,7 +85,7 @@ class System(BaseModel):
     host: str
     port: int
     db_name: str
-    db_schema: str
+    db_schemas: list[str]
     username: str
     synced_at: str | None
     table_count: int
@@ -225,7 +234,7 @@ class RelationInput(BaseModel):
 
 class Relation(RelationInput):
     id: UUID
-    source: Literal["fk", "manual"]
+    source: Literal["fk", "manual", "auto"]  # auto: 컬럼 이름 · 타입 · PK 로 추론 (describe.py)
 
 
 class AskRequest(BaseModel):
@@ -355,6 +364,7 @@ class ColumnInfo(BaseModel):
     name: str
     data_type: str
     comment: str
+    ai_comment: str = ""  # 코멘트가 없을 때 추론한 설명 (describe.py)
     needs_calc: bool = False
 
 
@@ -364,6 +374,7 @@ class TableInfo(BaseModel):
     id: UUID
     name: str
     comment: str
+    ai_comment: str = ""  # 코멘트가 없을 때 추론한 설명 (describe.py)
     purpose: str
     column_count: int
     metric_count: int
@@ -548,3 +559,28 @@ class ApiException(Exception):
     def __init__(self, status_code: int, detail: str):
         self.status_code = status_code
         self.detail = detail
+
+
+class DescribeRequest(BaseModel):
+    """테이블 · 컬럼 설명 자동 채우기와 관계 추론 (describe.py)"""
+
+    table_ids: list[UUID] = []  # 비우면 설명이 빈 테이블 모두
+    descriptions: bool = True  # 비어 있는 설명을 LLM 으로 추론한다
+    overwrite: bool = False  # 전에 추론한 설명도 다시 추론한다 (대상 DB 코멘트는 언제나 그대로 둔다)
+    relations: bool = True  # 컬럼 이름 · 타입 · PK 로 관계를 추론한다
+
+
+class DescribeRun(BaseModel):
+    id: UUID
+    system_id: UUID
+    status: RunStatus
+    options: dict
+    tables_total: int
+    tables_done: int
+    tables_filled: int
+    columns_filled: int
+    relations_added: int | None
+    failures: list[dict]
+    error: str | None
+    started_at: str
+    finished_at: str | None

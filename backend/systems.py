@@ -64,7 +64,7 @@ def create_system(data: SystemInput) -> System:
     with db.connection() as conn:
         conn.execute(
             """
-            INSERT INTO meta_system (id, code, name, domain_desc, driver, host, port, db_name, db_schema,
+            INSERT INTO meta_system (id, code, name, domain_desc, driver, host, port, db_name, db_schemas,
                                      username, password_enc)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
@@ -77,7 +77,7 @@ def create_system(data: SystemInput) -> System:
                 data.host,
                 data.port,
                 data.db_name,
-                data.db_schema,
+                data.db_schemas,
                 data.username,
                 secret.encrypt(data.password),
             ),
@@ -93,7 +93,7 @@ def update_system(system_id: UUID, data: SystemInput) -> System:
         conn.execute(
             """
             UPDATE meta_system SET code = %s, name = %s, domain_desc = %s, driver = %s, host = %s, port = %s,
-                   db_name = %s, db_schema = %s, username = %s,
+                   db_name = %s, db_schemas = %s, username = %s,
                    password_enc = COALESCE(%s, password_enc), updated_at = now()
              WHERE id = %s
         """,
@@ -105,7 +105,7 @@ def update_system(system_id: UUID, data: SystemInput) -> System:
                 data.host,
                 data.port,
                 data.db_name,
-                data.db_schema,
+                data.db_schemas,
                 data.username,
                 secret.encrypt(data.password) if data.password else None,
                 str(system_id),
@@ -212,10 +212,11 @@ def _merge_schema(
                     tid, deleted = existing[table["name"]]
                     cur.execute(
                         """
-                        UPDATE meta_table SET comment = %s, deleted_at = NULL, synced_at = now(), updated_at = now()
+                        UPDATE meta_table SET comment = %s, db_schema = %s, deleted_at = NULL, synced_at = now(),
+                                              updated_at = now()
                          WHERE id = %s
                     """,
-                        (table["description"], tid),
+                        (table["description"], table["schema"], tid),
                     )
                     now_cols = set()
                     for c in table["columns"]:
@@ -227,8 +228,8 @@ def _merge_schema(
                 else:
                     tid = uuid4()
                     cur.execute(
-                        "INSERT INTO meta_table (id, system_id, name, comment) VALUES (%s, %s, %s, %s)",
-                        (str(tid), sid, table["name"], table["description"]),
+                        "INSERT INTO meta_table (id, system_id, name, db_schema, comment) VALUES (%s, %s, %s, %s, %s)",
+                        (str(tid), sid, table["name"], table["schema"], table["description"]),
                     )
                     added.append(tid)
 
@@ -415,6 +416,7 @@ def list_tables(system_id: UUID) -> list[TableInfo]:
                 id=r["id"],
                 name=r["name"],
                 comment=r["comment"],
+                ai_comment=r["ai_comment"],
                 purpose=r["purpose"],
                 column_count=r["column_count"],
                 metric_count=r["metric_count"],
@@ -443,7 +445,7 @@ def _columns(system_id: UUID) -> dict:
     """테이블별 컬럼과 '계산 필요' 표시"""
     rows = db.query(
         """
-        SELECT c.table_id, c.name, c.data_type, c.comment, c.needs_calc
+        SELECT c.table_id, c.name, c.data_type, c.comment, c.ai_comment, c.needs_calc
           FROM meta_column c JOIN meta_table t ON t.id = c.table_id
          WHERE t.system_id = %s AND t.deleted_at IS NULL AND c.deleted_at IS NULL
          ORDER BY c.table_id, c.ordinal
@@ -453,7 +455,10 @@ def _columns(system_id: UUID) -> dict:
     out: dict = {}
     for r in rows:
         out.setdefault(r["table_id"], []).append(
-            ColumnInfo(name=r["name"], data_type=r["data_type"], comment=r["comment"], needs_calc=r["needs_calc"])
+            ColumnInfo(
+                name=r["name"], data_type=r["data_type"], comment=r["comment"], ai_comment=r["ai_comment"],
+                needs_calc=r["needs_calc"],
+            )
         )
     return out
 
@@ -542,7 +547,7 @@ def _row_to_system(row: dict) -> System:
         host=row["host"],
         port=row["port"],
         db_name=row["db_name"],
-        db_schema=row["db_schema"],
+        db_schemas=row["db_schemas"],
         username=row["username"],
         synced_at=row["synced_at"].isoformat() if row["synced_at"] else None,
         table_count=row["table_count"],

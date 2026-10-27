@@ -110,7 +110,7 @@ export function SystemSync() {
                 <dd>
                   <code>
                     {selected.host}:{selected.port || "기본"}/{selected.db_name}
-                    {selected.db_schema ? `.${selected.db_schema}` : ""}
+                    {selected.db_schemas.length ? ` (${selected.db_schemas.join(", ")})` : ""}
                   </code>
                 </dd>
                 <dt>현재 상태</dt>

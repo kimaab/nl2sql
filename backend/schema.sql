@@ -11,8 +11,8 @@ CREATE TABLE IF NOT EXISTS meta_system (
     host         TEXT        NOT NULL,
     port         INTEGER     NOT NULL,
     db_name      TEXT        NOT NULL,
-    db_schema    TEXT        NOT NULL DEFAULT '',
-    username     TEXT        NOT NULL DEFAULT '',
+    db_schemas   TEXT[]      NOT NULL DEFAULT '{}', -- 읽을 스키마. 첫 스키마가 기본 스키마다 (catalog.py)
+    username    TEXT        NOT NULL DEFAULT '',
     password_enc BYTEA       NOT NULL,             -- AES-256-GCM (secret.py). API 로 나가지 않는다
     synced_at    TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -21,6 +21,16 @@ CREATE TABLE IF NOT EXISTS meta_system (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_system_name ON meta_system (lower(name));
 -- Superset 에 등록한 DB 연결 id (superset_link.py 가 채운다). 비어 있으면 아직 Superset 에 연결하지 않은 것이다.
 ALTER TABLE meta_system ADD COLUMN IF NOT EXISTS superset_database_id INTEGER;
+-- 스키마를 여러 개 읽는다. 예전 db_schema(하나)는 db_schemas 의 첫 스키마로 옮기고 지운다.
+ALTER TABLE meta_system ADD COLUMN IF NOT EXISTS db_schemas TEXT[] NOT NULL DEFAULT '{}';
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'meta_system' AND column_name = 'db_schema') THEN
+        UPDATE meta_system SET db_schemas = ARRAY[db_schema] WHERE db_schema <> '' AND db_schemas = '{}';
+        ALTER TABLE meta_system DROP COLUMN db_schema;
+    END IF;
+END $$;
 
 -- 테이블. 동기화는 이름 기준 병합이라 id 가 유지된다 — 지표 연결(metric_table)이 id 를 가리킨다.
 CREATE TABLE IF NOT EXISTS meta_table (
@@ -35,6 +45,8 @@ CREATE TABLE IF NOT EXISTS meta_table (
     UNIQUE (system_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_meta_table_live ON meta_table (system_id) WHERE deleted_at IS NULL;
+-- 기본 스키마가 아닌 테이블의 스키마 (기본 스키마면 빈 값). 그 테이블의 name 은 '스키마.테이블' 이다.
+ALTER TABLE meta_table ADD COLUMN IF NOT EXISTS db_schema TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS meta_column (
     id         BIGSERIAL PRIMARY KEY,
@@ -236,3 +248,27 @@ CREATE TABLE IF NOT EXISTS metric_validation_item (
 );
 CREATE INDEX IF NOT EXISTS idx_metric_validation_item_run ON metric_validation_item (run_id, id);
 CREATE INDEX IF NOT EXISTS idx_metric_validation_item_metric ON metric_validation_item (metric_id, created_at DESC);
+
+-- 자동 설명. 대상 DB 코멘트가 비었을 때 LLM 이 이름 · 타입 · 샘플 값을 보고 추론한 설명 (describe.py).
+-- 동기화는 건드리지 않는다. 코멘트가 있으면 코멘트가 먼저다 (contract.py).
+ALTER TABLE meta_table ADD COLUMN IF NOT EXISTS ai_comment TEXT NOT NULL DEFAULT '';
+ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS ai_comment TEXT NOT NULL DEFAULT '';
+-- meta_relation.source 에 'auto' 가 더해진다 — 컬럼 이름 · 타입 · PK 로 추론한 관계 (describe.py). 사람이 지울 수 있다.
+
+-- 자동 설명 · 관계 추론 실행. 화면은 이 기록을 다시 읽어 진행을 본다.
+CREATE TABLE IF NOT EXISTS meta_describe_run (
+    id              UUID PRIMARY KEY,
+    system_id       UUID        NOT NULL REFERENCES meta_system (id) ON DELETE CASCADE,
+    status          TEXT        NOT NULL DEFAULT 'running',  -- running | done | error (running 인데 돌고 있지 않으면 중단)
+    options         JSONB       NOT NULL DEFAULT '{}',
+    tables_total    INTEGER     NOT NULL DEFAULT 0,          -- 설명을 채울 테이블 수
+    tables_done     INTEGER     NOT NULL DEFAULT 0,
+    tables_filled   INTEGER     NOT NULL DEFAULT 0,          -- 테이블 설명을 채운 수
+    columns_filled  INTEGER     NOT NULL DEFAULT 0,          -- 컬럼 설명을 채운 수
+    relations_added INTEGER,                                 -- 추론한 관계 수 (관계를 돌리지 않았으면 NULL)
+    failures        JSONB       NOT NULL DEFAULT '[]',       -- [{table, error}]
+    error           TEXT,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_meta_describe_run_system ON meta_describe_run (system_id, started_at DESC);

@@ -78,7 +78,7 @@ export function TableColumns() {
   const word = filter.toLowerCase();
   const shown = table.columns.filter((c) => {
     if (onlySet && !c.needs_calc && !timeColumns.get(c.name)?.utc_offset_hours) return false;
-    return `${c.name} ${c.comment} ${c.data_type}`.toLowerCase().includes(word);
+    return `${c.name} ${c.comment} ${c.ai_comment} ${c.data_type}`.toLowerCase().includes(word);
   });
 
   return (
@@ -88,7 +88,7 @@ export function TableColumns() {
         title={table.name}
         desc={
           <>
-            {table.purpose || table.comment || "용도가 없습니다 (테이블 목록에서 적습니다)"}
+            {table.purpose || table.comment || table.ai_comment || "용도가 없습니다 (테이블 목록에서 적습니다)"}
             <br />
             UTC 보정: DB 에 UTC 로 저장된 시각 컬럼이면 현지 시차를 고릅니다. 날짜 묶음, 기간 조건, 표시가 현지 시각 기준이
             됩니다. 계산 필요: 그대로 합치거나 평균내면 틀리는 컬럼 (예: 계속 커지는 누적값)입니다. 이 컬럼을 계산해야
@@ -132,7 +132,13 @@ export function TableColumns() {
                   <tr key={c.name}>
                     <td className="cell-title">{c.name}</td>
                     <td className="cell-sub">{c.data_type}</td>
-                    <td>{c.comment || <span className="muted">—</span>}</td>
+                    <td>
+                      {c.comment || (c.ai_comment ? (
+                        <span title="추론한 설명">{c.ai_comment} <span className="faint">(추론)</span></span>
+                      ) : (
+                        <span className="muted">—</span>
+                      ))}
+                    </td>
                     <td>
                       {time ? (
                         <select

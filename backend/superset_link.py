@@ -67,8 +67,8 @@ def sqllab_link(system_id: UUID, sql: str, name: str = "") -> str:
         "name": (name or row["name"])[:100],
         "autorun": False,
     }
-    if row["db_schema"]:
-        state["schema"] = row["db_schema"]
+    if row["db_schemas"]:  # 기본 스키마. 다른 스키마의 테이블은 SQL 에 '스키마.테이블' 로 적혀 있다
+        state["schema"] = row["db_schemas"][0]
     api = _Api()
     key = api.call("POST", "/api/v1/sqllab/permalink", json=state)["key"]
     # 응답의 url 은 Superset 이 요청받은 호스트로 만든다 — 브라우저가 여는 주소는 SUPERSET_URL 로 맞춘다
@@ -209,8 +209,8 @@ def _dataset(api: "_Api", row: dict, sql: str, title: str) -> int:
     for d in found.get("result") or []:
         return d["id"]
     body = {"database": row["superset_database_id"], "table_name": table_name, "sql": sql}
-    if row["db_schema"]:
-        body["schema"] = row["db_schema"]
+    if row["db_schemas"]:
+        body["schema"] = row["db_schemas"][0]
     dataset_id = api.call("POST", "/api/v1/dataset/", json=body)["id"]
     log.info("superset dataset created: %s → #%s", table_name, dataset_id)
     return dataset_id
@@ -244,7 +244,7 @@ def _rison(text: str) -> str:
 
 def _linked(system_id: UUID) -> dict:
     """Superset 에 연결한 시스템 행. 연결하지 않았으면 400."""
-    row = db.one("SELECT name, db_schema, superset_database_id FROM meta_system WHERE id = %s", str(system_id))
+    row = db.one("SELECT name, db_schemas, superset_database_id FROM meta_system WHERE id = %s", str(system_id))
     if row is None:
         raise ApiException(404, "시스템을 찾을 수 없습니다")
     if not row["superset_database_id"]:

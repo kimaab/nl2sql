@@ -40,7 +40,7 @@ export function TablesPage() {
   }
 
   const shown = (tables ?? []).filter((t) =>
-    `${t.name} ${t.purpose} ${t.comment}`.toLowerCase().includes(filter.toLowerCase())
+    `${t.name} ${t.purpose} ${t.comment} ${t.ai_comment}`.toLowerCase().includes(filter.toLowerCase())
   );
 
   return (
@@ -86,7 +86,11 @@ export function TablesPage() {
                   <tr key={t.id}>
                     <td>
                       <div className="cell-title">{t.name}</div>
-                      {t.comment && <div className="cell-sub">{t.comment}</div>}
+                      {t.comment ? (
+                        <div className="cell-sub">{t.comment}</div>
+                      ) : (
+                        t.ai_comment && <div className="cell-sub" title="추론한 설명">{t.ai_comment} (추론)</div>
+                      )}
                       <div className="cell-sub">컬럼 {t.column_count}개</div>
                     </td>
                     <td style={{ minWidth: 260 }}>
@@ -127,7 +131,7 @@ export function TablesPage() {
                             .filter((c) => c.needs_calc)
                             .map((c) => (
                               <Badge key={c.name} tone="warn">
-                                <span title={c.comment || c.data_type}>{c.name}</span>
+                                <span title={c.comment || c.ai_comment || c.data_type}>{c.name}</span>
                               </Badge>
                             ))
                         )}

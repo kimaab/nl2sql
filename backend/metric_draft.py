@@ -246,7 +246,7 @@ def collect(row: dict, table: dict, column: str) -> tuple[list, ValueSample]:
         kinds[c["name"]] = temporal_kind(c.get("type", ""), row["driver"])
     try:
         with read_only(row, SAMPLE_TIMEOUT_S) as cur:
-            indexes = read_indexes(cur, row, table["name"], names)
+            indexes = read_indexes(cur, row, table, names)
             if column not in names:
                 return indexes, ValueSample(note="계산할 컬럼을 몰라 값 샘플을 건너뛰었습니다")
             sampler = _Sampler(cur, Dialect(row["driver"]), table, kinds, column)
@@ -309,7 +309,7 @@ class _Sampler:
         return ValueSample(note=f"{self.table['name']} 에 B-tree 인덱스가 없어 값 샘플을 건너뛰었습니다 (전체를 훑게 됩니다)")
 
     def series(self, ix: dict, group: str, time: str, indexes: list) -> ValueSample:
-        q, t = self.d.q, self.d.q(self.table["name"])
+        q, t = self.d.q, self.d.table(self.table["name"], self.table.get("schema", ""))
         by_time = False
         for other in indexes:
             if other["columns"][0] == time:
@@ -391,7 +391,7 @@ class _Sampler:
         )
 
     def recent(self, ix: dict, order: str, indexes: list) -> ValueSample:
-        q, t = self.d.q, self.d.q(self.table["name"])
+        q, t = self.d.q, self.d.table(self.table["name"], self.table.get("schema", ""))
         time = order if self.kinds[order] else None
         if time is None:
             for kind in ("datetime", "date"):
@@ -504,14 +504,18 @@ def full_scans(cur, dialect: Dialect, sql: str, params: list | None = None) -> l
     """
     found = []
     if dialect.driver == "postgresql":
-        cur.execute(f"EXPLAIN (FORMAT JSON) {sql}", params or None)
+        # VERBOSE 라야 계획에 스키마가 나온다 — 기본 스키마가 아닌 테이블도 통계를 찾는다
+        cur.execute(f"EXPLAIN (FORMAT JSON, VERBOSE) {sql}", params or None)
         plan = cur.fetchone()[0]
         if isinstance(plan, str):
             plan = json.loads(plan)
         scanned = []
         _seq_scans(plan[0]["Plan"], scanned)
-        for name in scanned:
-            cur.execute("SELECT reltuples FROM pg_class WHERE oid = to_regclass(%s)", [dialect.q(name)])
+        cur.execute("SELECT current_schema()")
+        default = cur.fetchone()[0]
+        for schema, relation in scanned:
+            name = relation if not schema or schema == default else f"{schema}.{relation}"
+            cur.execute("SELECT reltuples FROM pg_class WHERE oid = to_regclass(%s)", [dialect.table(name, schema)])
             rows = cur.fetchone()
             # 통계가 없으면(-1) 큰 테이블로 본다
             if (not rows or rows[0] is None or rows[0] < 0 or rows[0] >= SMALL_TABLE_ROWS) and name not in found:
@@ -530,7 +534,7 @@ def full_scans(cur, dialect: Dialect, sql: str, params: list | None = None) -> l
 
 def _seq_scans(node: dict, out: list) -> None:
     if node.get("Node Type") == "Seq Scan" and node.get("Relation Name"):
-        out.append(node["Relation Name"])
+        out.append((node.get("Schema") or "", node["Relation Name"]))
     for child in node.get("Plans") or []:
         _seq_scans(child, out)
 

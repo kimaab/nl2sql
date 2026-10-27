@@ -27,9 +27,44 @@ def read_catalog(row: dict) -> tuple[list[dict], list[dict] | None]:
         return read_postgresql(row)
 
 
+def schemas(row: dict) -> list[str]:
+    """읽을 스키마. 첫 스키마가 기본 스키마다 — 그 테이블은 이름만, 나머지 스키마의 테이블은 '스키마.테이블' 로 쓴다.
+
+    비우면 PostgreSQL 은 public, Oracle 은 접속 계정이다. MySQL 은 접속한 데이터베이스 하나만 읽는다.
+    """
+    driver = Driver(row["driver"])
+    if driver is Driver.MYSQL:
+        return [row["db_name"]]
+    listed = []
+    for s in row.get("db_schemas") or []:
+        listed.append(s.strip().upper() if driver is Driver.ORACLE else s.strip())
+    if listed:
+        return listed
+    if driver is Driver.ORACLE:
+        owner = (row["username"] or "").strip().upper()
+        if not owner:
+            raise ApiException(400, "Oracle 시스템은 스키마나 계정 중 하나가 필요합니다")
+        return [owner]
+    return ["public"]
+
+
+def table_parts(row: dict, table: dict) -> tuple[str, str]:
+    """메타데이터 테이블 → (스키마, 대상 DB 의 테이블 이름)"""
+    schema = table.get("schema") or ""
+    if schema and table["name"].startswith(schema + "."):
+        return schema, table["name"][len(schema) + 1:]
+    return schemas(row)[0], table["name"]
+
+
+def _qualified(schema: str, name: str, default: str) -> str:
+    """기본 스키마의 테이블은 이름만, 나머지는 '스키마.테이블'"""
+    return name if schema == default else f"{schema}.{name}"
+
+
 def read_postgresql(row: dict) -> list[dict]:
     """PostgreSQL 스키마 읽기"""
-    schema = row["db_schema"] or "public"
+    names = schemas(row)
+    default = names[0]
     conninfo = make_conninfo(
         host=row["host"],
         port=row["port"],
@@ -47,33 +82,34 @@ def read_postgresql(row: dict) -> list[dict]:
         with connection.cursor() as cur:
             cur.execute(
                 """
-                SELECT c.relname, coalesce(obj_description(c.oid, 'pg_class'), '')
+                SELECT n.nspname, c.relname, coalesce(obj_description(c.oid, 'pg_class'), '')
                   FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                 WHERE n.nspname = %s AND c.relkind IN ('r','v','m','p','f')
-                 ORDER BY c.relname
+                 WHERE n.nspname = ANY(%s) AND c.relkind IN ('r','v','m','p','f')
+                 ORDER BY n.nspname, c.relname
             """,
-                (schema,),
+                (names,),
             )
-            tables = _table_map(cur.fetchall())
+            tables = _table_map(cur.fetchall(), default)
 
             cur.execute(
                 """
-                SELECT c.relname, a.attname,
+                SELECT n.nspname, c.relname, a.attname,
                        format_type(a.atttypid, a.atttypmod),
                        coalesce(col_description(c.oid, a.attnum), '')
                   FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
                   JOIN pg_attribute a ON a.attrelid = c.oid
-                 WHERE n.nspname = %s AND c.relkind IN ('r','v','m','p','f')
+                 WHERE n.nspname = ANY(%s) AND c.relkind IN ('r','v','m','p','f')
                    AND a.attnum > 0 AND NOT a.attisdropped
-                 ORDER BY c.relname, a.attnum
+                 ORDER BY n.nspname, c.relname, a.attnum
             """,
-                (schema,),
+                (names,),
             )
-            for table_name, column, data_type, comment in cur.fetchall():
-                if table_name in tables:
-                    tables[table_name]["columns"].append(
+            for schema, table_name, column, data_type, comment in cur.fetchall():
+                table = tables.get(_qualified(schema, table_name, default))
+                if table is not None:
+                    table["columns"].append(
                         {
                             "name": column,
                             "type": _text(data_type),
@@ -82,33 +118,35 @@ def read_postgresql(row: dict) -> list[dict]:
                     )
             cur.execute(
                 """
-                SELECT c.relname, a.attname
+                SELECT n.nspname, c.relname, a.attname
                   FROM pg_index i
                   JOIN pg_class c ON c.oid = i.indrelid
                   JOIN pg_namespace n ON n.oid = c.relnamespace
                   JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
-                 WHERE i.indisprimary AND n.nspname = %s
+                 WHERE i.indisprimary AND n.nspname = ANY(%s)
             """,
-                (schema,),
+                (names,),
             )
-            _mark_keys(tables, cur.fetchall())
+            _mark_keys(tables, cur.fetchall(), default)
         relations = _read_relations(
             row,
             connection,
             """
-            SELECT con.conname, cl.relname, att.attname, rcl.relname, ratt.attname
+            SELECT con.conname, n.nspname, cl.relname, att.attname, rn.nspname, rcl.relname, ratt.attname
               FROM pg_constraint con
               JOIN pg_class cl ON cl.oid = con.conrelid
               JOIN pg_namespace n ON n.oid = cl.relnamespace
               JOIN pg_class rcl ON rcl.oid = con.confrelid
+              JOIN pg_namespace rn ON rn.oid = rcl.relnamespace
               JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(attnum, refnum, ord) ON true
               JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
               JOIN pg_attribute ratt ON ratt.attrelid = con.confrelid AND ratt.attnum = k.refnum
-             WHERE con.contype = 'f' AND n.nspname = %s
-             ORDER BY con.conname, k.ord
+             WHERE con.contype = 'f' AND n.nspname = ANY(%s)
+             ORDER BY n.nspname, con.conname, k.ord
         """,
-            (schema,),
+            (names,),
             tables,
+            default,
         )
     finally:
         connection.close()
@@ -134,12 +172,12 @@ def read_mysql(row: dict) -> list[dict]:
     try:
         with connection.cursor() as cur:
             cur.execute(
-                "SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES"
+                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES"
                 " WHERE TABLE_SCHEMA = %s AND TABLE_TYPE IN ('BASE TABLE','VIEW')"
                 " ORDER BY TABLE_NAME",
                 (row["db_name"],),
             )
-            tables = _table_map(cur.fetchall())
+            tables = _table_map(cur.fetchall(), row["db_name"])
 
             cur.execute(
                 "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT, COLUMN_KEY"
@@ -162,13 +200,15 @@ def read_mysql(row: dict) -> list[dict]:
             row,
             connection,
             """
-            SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+            SELECT CONSTRAINT_NAME, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME,
+                   REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
               FROM information_schema.KEY_COLUMN_USAGE
              WHERE TABLE_SCHEMA = %s AND REFERENCED_TABLE_SCHEMA = %s AND REFERENCED_TABLE_NAME IS NOT NULL
              ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
         """,
             (row["db_name"], row["db_name"]),
             tables,
+            row["db_name"],
         )
     finally:
         connection.close()
@@ -177,9 +217,13 @@ def read_mysql(row: dict) -> list[dict]:
 
 def read_oracle(row: dict) -> list[dict]:
     """Oracle 스키마 읽기"""
-    owner = (row["db_schema"] or row["username"] or "").strip().upper()
-    if not owner:
-        raise ApiException(400, "Oracle 시스템은 스키마나 계정 중 하나가 필요합니다")
+    names = schemas(row)
+    default = names[0]
+    binds, marks = {}, []
+    for i, name in enumerate(names):
+        binds[f"s{i}"] = name
+        marks.append(f":s{i}")
+    owners = f"({', '.join(marks)})"
 
     try:
         connection = oracledb.connect(
@@ -196,29 +240,30 @@ def read_oracle(row: dict) -> list[dict]:
     try:
         with connection.cursor() as cur:
             cur.execute(
-                """
-                SELECT table_name, comments FROM all_tab_comments
-                 WHERE owner = :owner AND table_type IN ('TABLE','VIEW')
-                 ORDER BY table_name
+                f"""
+                SELECT owner, table_name, comments FROM all_tab_comments
+                 WHERE owner IN {owners} AND table_type IN ('TABLE','VIEW')
+                 ORDER BY owner, table_name
             """,
-                owner=owner,
+                binds,
             )
-            tables = _table_map(cur.fetchall())
+            tables = _table_map(cur.fetchall(), default)
 
             cur.execute(
-                """
-                SELECT c.table_name, c.column_name, c.data_type, c.data_length,
+                f"""
+                SELECT c.owner, c.table_name, c.column_name, c.data_type, c.data_length,
                        c.data_precision, c.data_scale, cc.comments
                   FROM all_tab_columns c
                   LEFT JOIN all_col_comments cc
                     ON cc.owner = c.owner AND cc.table_name = c.table_name
                    AND cc.column_name = c.column_name
-                 WHERE c.owner = :owner
-                 ORDER BY c.table_name, c.column_id
+                 WHERE c.owner IN {owners}
+                 ORDER BY c.owner, c.table_name, c.column_id
             """,
-                owner=owner,
+                binds,
             )
             for (
+                towner,
                 tname,
                 column,
                 type_name,
@@ -227,7 +272,7 @@ def read_oracle(row: dict) -> list[dict]:
                 scale,
                 comment,
             ) in cur.fetchall():
-                table = tables.get(_text(tname))
+                table = tables.get(_qualified(_text(towner), _text(tname), default))
                 if table is not None:
                     table["columns"].append(
                         {
@@ -237,55 +282,56 @@ def read_oracle(row: dict) -> list[dict]:
                         }
                     )
             cur.execute(
-                """
-                SELECT cc.table_name, cc.column_name
+                f"""
+                SELECT cc.owner, cc.table_name, cc.column_name
                   FROM all_constraints c
                   JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
-                 WHERE c.owner = :owner AND c.constraint_type = 'P'
+                 WHERE c.owner IN {owners} AND c.constraint_type = 'P'
             """,
-                owner=owner,
+                binds,
             )
-            _mark_keys(tables, cur.fetchall())
+            _mark_keys(tables, cur.fetchall(), default)
         relations = _read_relations(
             row,
             connection,
-            """
-            SELECT c.constraint_name, cc.table_name, cc.column_name, rc.table_name, rcc.column_name
+            f"""
+            SELECT c.constraint_name, cc.owner, cc.table_name, cc.column_name, rc.owner, rc.table_name, rcc.column_name
               FROM all_constraints c
               JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
               JOIN all_constraints rc ON rc.owner = c.r_owner AND rc.constraint_name = c.r_constraint_name
               JOIN all_cons_columns rcc ON rcc.owner = rc.owner AND rcc.constraint_name = rc.constraint_name
                                        AND rcc.position = cc.position
-             WHERE c.owner = :owner AND c.constraint_type = 'R'
-             ORDER BY c.constraint_name, cc.position
+             WHERE c.owner IN {owners} AND c.constraint_type = 'R'
+             ORDER BY c.owner, c.constraint_name, cc.position
         """,
-            {"owner": owner},
+            binds,
             tables,
+            default,
         )
     finally:
         connection.close()
     return list(tables.values()), relations
 
 
-def read_indexes(cur, row: dict, table: str, columns: set) -> list[dict]:
-    """테이블의 B-tree 인덱스 [{name, columns}] (columns 는 인덱스 순서).
+def read_indexes(cur, row: dict, table: dict, columns: set) -> list[dict]:
+    """메타데이터 테이블의 B-tree 인덱스 [{name, columns}] (columns 는 인덱스 순서).
 
     식·함수 인덱스 칸, 앞부분만 거는 칸(MySQL prefix), 모르는 컬럼이 나오면 그 앞까지만 남긴다 —
     인덱스는 앞 칸부터 쓰이므로 그 뒤 칸은 조회에 쓸 수 없다. 부분 인덱스(PostgreSQL WHERE)는 뺀다.
     """
     driver = Driver(row["driver"])
+    schema, name = table_parts(row, table)
     if driver is Driver.MYSQL:
         cur.execute(
             "SELECT INDEX_NAME, COLUMN_NAME, SUB_PART FROM information_schema.STATISTICS"
             " WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND INDEX_TYPE = 'BTREE'"
             " ORDER BY INDEX_NAME = 'PRIMARY' DESC, INDEX_NAME, SEQ_IN_INDEX",
-            (row["db_name"], table),
+            (schema, name),
         )
         fetched = []
         for name, column, sub_part in cur.fetchall():
             fetched.append((name, None if sub_part is not None else column))
     elif driver is Driver.ORACLE:
-        owner = (row["db_schema"] or row["username"] or "").strip().upper()
         cur.execute(
             """
             SELECT ic.index_name, ic.column_name
@@ -295,7 +341,7 @@ def read_indexes(cur, row: dict, table: str, columns: set) -> list[dict]:
                AND i.status IN ('VALID', 'N/A')
              ORDER BY ic.index_name, ic.column_position
         """,
-            [owner, table],
+            [schema, name],
         )
         fetched = cur.fetchall()
     else:
@@ -313,19 +359,19 @@ def read_indexes(cur, row: dict, table: str, columns: set) -> list[dict]:
                AND x.indisvalid AND x.indpred IS NULL AND am.amname = 'btree'
              ORDER BY x.indisprimary DESC, ic.relname, k.ord
         """,
-            (row["db_schema"] or "public", table),
+            (schema, name),
         )
         fetched = cur.fetchall()
 
     indexes, cut = [], set()
-    for name, column in fetched:
-        name, column = _text(name), _text(column) if column is not None else None
-        if name in cut:
+    for index_name, column in fetched:
+        index_name, column = _text(index_name), _text(column) if column is not None else None
+        if index_name in cut:
             continue
-        if not indexes or indexes[-1]["name"] != name:
-            indexes.append({"name": name, "columns": []})
+        if not indexes or indexes[-1]["name"] != index_name:
+            indexes.append({"name": index_name, "columns": []})
         if column is None or column not in columns:
-            cut.add(name)
+            cut.add(index_name)
             continue
         indexes[-1]["columns"].append(column)
     usable = []
@@ -336,7 +382,7 @@ def read_indexes(cur, row: dict, table: str, columns: set) -> list[dict]:
 
 
 def _read_relations(
-    row: dict, connection, sql: str, params, tables: dict
+    row: dict, connection, sql: str, params, tables: dict, default: str
 ) -> list[dict] | None:
     """FK 를 관계 목록으로. 두 테이블이 모두 읽은 범위에 있을 때만 남긴다.
 
@@ -357,8 +403,9 @@ def _read_relations(
             rollback()
         return None
     out = []
-    for name, table, column, ref_table, ref_column in fetched:
-        table, ref_table = _text(table), _text(ref_table)
+    for name, schema, table, column, ref_schema, ref_table, ref_column in fetched:
+        table = _qualified(_text(schema), _text(table), default)
+        ref_table = _qualified(_text(ref_schema), _text(ref_table), default)
         if table in tables and ref_table in tables:
             out.append(
                 {
@@ -372,22 +419,31 @@ def _read_relations(
     return out
 
 
-def _mark_keys(tables: dict, pairs) -> None:
+def _mark_keys(tables: dict, rows, default: str) -> None:
     """기본키 컬럼 표시. SQL 생성 단계에서 컬럼을 골라 실을 때 항상 포함한다."""
     keys = set()
-    for t, c in pairs:
-        keys.add((_text(t), _text(c)))
+    for schema, t, c in rows:
+        keys.add((_qualified(_text(schema), _text(t), default), _text(c)))
     for table in tables.values():
         for column in table["columns"]:
             column["is_pk"] = (table["name"], column["name"]) in keys
 
 
-def _table_map(rows) -> dict:
-    """(테이블 이름, 코멘트) 행 → {이름: 빈 컬럼 목록을 가진 테이블}"""
+def _table_map(rows, default: str) -> dict:
+    """(스키마, 테이블 이름, 코멘트) 행 → {이름: 빈 컬럼 목록을 가진 테이블}
+
+    schema 는 기본 스키마가 아닌 테이블만 채운다 (meta_table.db_schema).
+    """
     tables = {}
-    for name, comment in rows:
-        name = _text(name)
-        tables[name] = {"name": name, "description": _text(comment), "columns": []}
+    for schema, name, comment in rows:
+        schema = _text(schema)
+        name = _qualified(schema, _text(name), default)
+        tables[name] = {
+            "name": name,
+            "schema": "" if schema == default else schema,
+            "description": _text(comment),
+            "columns": [],
+        }
     return tables
 
 

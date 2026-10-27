@@ -202,11 +202,17 @@ class _Parser:
                 inner = self.select(self.ctes[node.name])
                 scope.sources[alias] = {"name": alias, "columns": _subquery_columns(inner), "table": False}
                 return {"query": inner, "as": alias}
-            found = self.tables.get(node.name.lower())
+            written = f"{node.db}.{node.name}" if node.db else node.name
+            found = None
+            if node.db:  # 기본 스키마가 아닌 테이블은 '스키마.테이블' 이름으로 등록돼 있다
+                found = self.tables.get(written.lower())
             if found is None:
-                raise ValueError(f"메타데이터에 없는 테이블입니다 -> {node.name} (동기화했는지 확인하십시오)")
+                found = self.tables.get(node.name.lower())
+            if found is None:
+                raise ValueError(f"메타데이터에 없는 테이블입니다 -> {written} (동기화했는지 확인하십시오)")
             real, columns = found
-            alias = node.alias or real
+            # 별칭이 없으면 SQL 처럼 스키마를 뗀 테이블 이름으로 가리킨다 (sales.orders → orders.amount)
+            alias = node.alias or (node.name if "." in real else real)
             for s in scope.sources.values():
                 if s["name"] == real:
                     raise ValueError(f"같은 테이블을 두 번 쓸 수 없습니다 (셀프 조인) -> {real}")

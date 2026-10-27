@@ -7,7 +7,7 @@ from metric_draft import collect, draft_metric
 from models import MetricCheck, MetricDraftRequest, MissingMetric, ValueSample
 from test_ask import FakeModel as _FakeModel
 
-PG = {"name": "dev", "driver": "postgresql", "db_name": "dev", "db_schema": "", "username": ""}
+PG = {"name": "dev", "driver": "postgresql", "db_name": "dev", "db_schemas": [], "username": ""}
 
 TABLE = {
     "name": "bms_log",
@@ -69,7 +69,7 @@ def test_read_indexes_keeps_usable_leading_columns():
         ("ix_c", "vehicle_id"),
     ]
     cur = FakeCursor(lambda sql, params: rows)
-    out = read_indexes(cur, PG, "bms_log", {"vehicle_id", "collect_datetime"})
+    out = read_indexes(cur, PG, {"name": "bms_log"}, {"vehicle_id", "collect_datetime"})
     assert out == [{"name": "ix_a", "columns": ["collect_datetime"]}, {"name": "ix_b", "columns": ["vehicle_id"]}]
     assert cur.executed[0][1] == ("public", "bms_log")
 
@@ -77,7 +77,7 @@ def test_read_indexes_keeps_usable_leading_columns():
 def test_read_indexes_mysql_drops_prefix_columns():
     rows = [("PRIMARY", "id", None), ("ix_name", "vehicle_id", 10)]
     cur = FakeCursor(lambda sql, params: rows)
-    out = read_indexes(cur, {**PG, "driver": "mysql"}, "bms_log", {"id", "vehicle_id"})
+    out = read_indexes(cur, {**PG, "driver": "mysql"}, {"name": "bms_log"}, {"id", "vehicle_id"})
     assert out == [{"name": "PRIMARY", "columns": ["id"]}]
 
 
@@ -87,6 +87,8 @@ def series_answer(indexes, plan=INDEX_PLAN, reltuples=16_000_000):
             return indexes
         if sql.startswith("EXPLAIN"):
             return plan
+        if "current_schema()" in sql:
+            return [("public",)]
         if "reltuples" in sql:
             return [(reltuples,)]
         if sql.startswith('SELECT "vehicle_id" FROM'):
@@ -112,7 +114,7 @@ def test_sample_reads_one_vehicle_per_local_day_through_time_vehicle_index(monke
     assert len(sample.queries) == 8
     ran = []
     for sql, params in cur.executed:
-        if sql.startswith("SELECT") and "pg_" not in sql:
+        if sql.startswith("SELECT") and "pg_" not in sql and "current_schema()" not in sql:
             ran.append((sql, params))
     # 날짜 경계는 현지(UTC+9) 자정을 UTC 로 옮긴 것
     assert ran[2][1] == ["V1", datetime.datetime(2026, 10, 17, 15), datetime.datetime(2026, 10, 18, 15)]

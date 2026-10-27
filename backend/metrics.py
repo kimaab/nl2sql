@@ -15,6 +15,7 @@ import pymysql
 from psycopg.conninfo import make_conninfo
 
 import db
+from catalog import schemas
 from compiler import Compiler, ast_tables
 from contract import load_contract, load_metric_rows, load_tables
 from models import ApiException, Metric, MetricCheck, MetricHistoryEntry, MetricInput
@@ -135,11 +136,14 @@ def read_only(row: dict, timeout_s: int = VERIFY_TIMEOUT_S):
     try:
         if driver == "postgresql":
             cur.execute(f"SET LOCAL statement_timeout = '{int(timeout_s)}s'")
-            if row.get("db_schema"):
-                cur.execute("SELECT set_config('search_path', %s, true)", (row["db_schema"],))
+            # 기본 스키마의 테이블은 이름만 쓴다. 다른 스키마의 테이블은 '스키마.테이블' 로 감싸 나간다
+            if row.get("db_schemas"):
+                cur.execute("SELECT set_config('search_path', %s, true)", (schemas(row)[0],))
         elif driver == "mysql":
             cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
         else:
+            if row.get("db_schemas"):  # 스키마 이름은 SystemInput 이 따옴표를 막는다
+                cur.execute(f'ALTER SESSION SET CURRENT_SCHEMA = "{schemas(row)[0]}"')
             cur.execute("SET TRANSACTION READ ONLY")
     except Exception as error:
         conn.close()

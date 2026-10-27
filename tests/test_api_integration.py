@@ -71,7 +71,7 @@ def ds(client):
             "host": url.hostname,
             "port": url.port or 5432,
             "db_name": url.path.lstrip("/") or "postgres",
-            "db_schema": TARGET_SCHEMA,
+            "db_schemas": [TARGET_SCHEMA],
             "username": unquote(url.username or ""),
             "password": unquote(url.password or ""),
         },

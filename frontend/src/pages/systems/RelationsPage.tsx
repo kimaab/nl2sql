@@ -131,10 +131,12 @@ export function RelationsPage() {
                         </td>
                         <td className="faint">{r.constraint_name}</td>
                         <td>
-                          <Badge tone={r.source === "fk" ? "info" : "primary"}>{r.source === "fk" ? "FK" : "수동"}</Badge>
+                          <Badge tone={r.source === "fk" ? "info" : r.source === "auto" ? "warn" : "primary"}>
+                            {r.source === "fk" ? "FK" : r.source === "auto" ? "추론" : "수동"}
+                          </Badge>
                         </td>
                         <td style={{ textAlign: "right" }}>
-                          {r.source === "manual" && (
+                          {r.source !== "fk" && (
                             <Button size="sm" variant="danger" onClick={() => remove(r)}>
                               삭제
                             </Button>

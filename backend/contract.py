@@ -14,8 +14,8 @@ def load_tables(system_id: UUID) -> dict:
     """
     rows = db.query(
         """
-        SELECT t.id AS table_id, t.name AS table_name, t.comment AS table_note, t.purpose,
-               c.name AS column_name, c.data_type, c.comment AS column_note, c.is_pk,
+        SELECT t.id AS table_id, t.name AS table_name, t.db_schema AS table_schema, t.comment AS table_note, t.ai_comment AS table_ai, t.purpose,
+               c.name AS column_name, c.data_type, c.comment AS column_note, c.ai_comment AS column_ai, c.is_pk,
                c.utc_offset_hours, c.needs_calc
           FROM meta_table t
           LEFT JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
@@ -32,16 +32,18 @@ def load_tables(system_id: UUID) -> dict:
             {
                 "id": str(r["table_id"]),
                 "name": r["table_name"],
-                "description": r["table_note"] or "",
+                "description": r["table_note"] or r["table_ai"] or "",  # 코멘트가 없으면 추론한 설명 (describe.py)
                 "purpose": r["purpose"] or "",
                 "columns": [],
             },
         )
+        if r["table_schema"]:  # 기본 스키마가 아닌 테이블만 (이름이 '스키마.테이블')
+            table["schema"] = r["table_schema"]
         if r["column_name"] is not None:
             column = {
                 "name": r["column_name"],
                 "type": r["data_type"] or "",
-                "description": r["column_note"] or "",
+                "description": r["column_note"] or r["column_ai"] or "",
             }
             if r["is_pk"]:
                 column["is_pk"] = True
