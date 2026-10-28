@@ -16,6 +16,10 @@ public class LlmFactory {
 
     private static final Logger log = LoggerFactory.getLogger("nl2sql.llm");
 
+    /** 응답 하나를 기다리는 시간과 재시도 수 — 파이썬 ChatOpenAI(openai SDK) 기본값과 같다. 생각이 긴 모델은 몇 분 걸린다. */
+    static final java.time.Duration TIMEOUT = java.time.Duration.ofMinutes(10);
+    static final int MAX_RETRIES = 2;
+
     private final Env env;
 
     public LlmFactory(Env env) {

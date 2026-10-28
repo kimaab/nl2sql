@@ -6,10 +6,10 @@ spring:
   application:
     name: nl2sql-backend
   config:
-    # java_backend 에서 띄우면 ../backend/.env 를, 그 밖에서는 지금 폴더의 .env 를 읽는다. 환경변수가 먼저다.
     import:
-      - optional:file:./.env[.properties]
       - optional:file:../backend/.env[.properties]
+      - optional:file:../.env[.properties]
+      - optional:file:./.env[.properties]
   jackson:
     property-naming-strategy: SNAKE_CASE
   main:

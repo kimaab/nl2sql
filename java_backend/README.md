@@ -6,7 +6,8 @@
 ## 실행
 
 - Java 25, Maven 3.9
-- 설정은 파이썬과 같은 `.env` 를 읽는다. `java_backend` 에서 띄우면 `../backend/.env` 를 읽고, 환경변수가 먼저다.
+- 설정은 `../backend/.env`, `../.env`(프로젝트 루트), `./.env` 순으로 읽고 뒤의 파일이 앞의 값을 덮는다. 환경변수가 가장 먼저다.
+  PyCharm 의 파이썬 실행 설정이 루트 `.env` 를 넣으므로, 이 순서면 IDE 에서 띄운 파이썬과 같은 LLM 을 부른다.
 
 ```
 mvn package -DskipTests

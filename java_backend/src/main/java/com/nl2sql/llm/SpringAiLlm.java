@@ -22,7 +22,9 @@ public class SpringAiLlm implements Llm {
         OpenAiChatOptions.Builder options = OpenAiChatOptions.builder()
                 .apiKey(apiKey)
                 .model(modelName)
-                .temperature(temperature);
+                .temperature(temperature)
+                .timeout(LlmFactory.TIMEOUT)
+                .maxRetries(LlmFactory.MAX_RETRIES);
         if (baseUrl != null && !baseUrl.isEmpty()) {
             options.baseUrl(baseUrl);
         }

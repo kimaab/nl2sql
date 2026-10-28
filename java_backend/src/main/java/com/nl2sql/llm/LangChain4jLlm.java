@@ -1,6 +1,5 @@
 package com.nl2sql.llm;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -23,7 +22,8 @@ public class LangChain4jLlm implements Llm {
                 .apiKey(apiKey)
                 .modelName(modelName)
                 .temperature(temperature)
-                .timeout(Duration.ofMinutes(5));
+                .timeout(LlmFactory.TIMEOUT)
+                .maxRetries(LlmFactory.MAX_RETRIES);
         if (baseUrl != null && !baseUrl.isEmpty()) {
             builder.baseUrl(baseUrl);
         }
