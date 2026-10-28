@@ -1,0 +1,29 @@
+# nl2sql 백엔드 (backend/ 의 파이썬 API 를 옮긴 것). 설정 값은 파이썬과 같은 .env 를 읽는다.
+#   DB_URL, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, NL2SQL_SECRET_KEY, AUTO_SYNC_MINUTES, SQL_LOG,
+#   SUPERSET_URL, SUPERSET_USERNAME, SUPERSET_PASSWORD, SUPERSET_CA_BUNDLE
+#   LLM_PROVIDER: spring-ai (기본) | langchain4j
+spring:
+  application:
+    name: nl2sql-backend
+  config:
+    # java_backend 에서 띄우면 ../backend/.env 를, 그 밖에서는 지금 폴더의 .env 를 읽는다. 환경변수가 먼저다.
+    import:
+      - optional:file:./.env[.properties]
+      - optional:file:../backend/.env[.properties]
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+  main:
+    banner-mode: off
+
+server:
+  port: ${PORT:8000}
+
+logging:
+  level:
+    nl2sql: INFO
+  file:
+    name: logs/nl2sql.log
+  logback:
+    rollingpolicy:
+      max-file-size: 5MB
+      max-history: 3
