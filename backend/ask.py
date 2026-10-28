@@ -5,6 +5,7 @@
 질문에 맞게 조건만 바꾸거나 지표들의 계산 식을 한 AST 로 합치게 한다.
 """
 
+import copy
 import datetime
 import json
 
@@ -70,6 +71,14 @@ METRIC_GUIDE = """[지표] {name} — {description}
 {ast}
 이 지표의 AST 를 바탕으로 질문에 맞게 기간·조건·묶음·정렬·개수만 바꾸십시오. 계산 부분(select 의 식)은 그대로 둡니다."""
 
+# 지표 하나를 그대로 쓰거나 값만 바꾸는 질문에서 LLM 이 긴 AST 를 베껴 쓰다 틀리는 일을 막는다
+AS_IS_RULE = """[그대로 쓰기]
+- 질문에 맞게 바꿀 것이 하나도 없어 등록된 AST 가 그대로 답이면, AST 를 다시 적지 말고 {"as_is": true, "reason": "설명"} 으로만 답합니다.
+- 조건의 값만 바뀌면 (예: 아이디, 임계치, 코드값) AST 를 다시 적지 말고
+  {"replace": [{"from": "등록된 AST 의 값", "to": "질문의 값"}], "reason": "설명"} 으로만 답합니다.
+  from 은 등록된 AST 에 있는 값 그대로입니다. 같은 값은 모든 곳에서 바뀝니다.
+- 기간·묶음·정렬·개수처럼 값 말고 다른 것이 바뀌면 AST 를 적습니다."""
+
 METRICS_RULE = """[지표 여러 개]
 위 지표들의 계산 식을 한 AST 에 합칩니다.
 - 묶음(group_by)과 기간이 같으면 각 지표의 select 계산 식을 그대로 옮겨 나란히 둡니다.
@@ -111,6 +120,8 @@ def ast_prompt(contract: dict, tables: list, metrics: list, now: datetime.dateti
         )
     if len(metrics) > 1:
         user += "\n\n" + METRICS_RULE
+    elif metrics:
+        user += "\n\n" + AS_IS_RULE
     return system, user
 
 
@@ -182,7 +193,15 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
                 outcome.update(clarification=str(parsed["clarify"]).strip(), error=None)
                 step.reason = "모델이 되물음"
                 break
-            sql = compiler.compile(parsed.get("ast"))
+            ast = parsed.get("ast")
+            if not ast and (parsed.get("as_is") is True or parsed.get("replace")):
+                if len(metrics) != 1:
+                    raise ValueError("as_is · replace 는 지표 하나를 쓸 때만 답합니다. AST 를 적으십시오")
+                # 등록된 AST 를 그대로 쓰거나 값만 바꿔 쓴다 — 지표 원본은 건드리지 않는다
+                ast = copy.deepcopy(metrics[0]["ast"])
+                if parsed.get("replace"):
+                    _apply_replace(ast, parsed["replace"])
+            sql = compiler.compile(ast)
         except CalcColumnError as error:
             if not _covered(metrics, error.column):
                 # 고른 지표 어디에도 이 컬럼의 계산이 없다 — 다시 시켜도 지표 없이 계산할 뿐이라 지표 등록으로 넘긴다
@@ -198,12 +217,54 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
             step.reason = f"{attempt}번째 시도 실패: {error}"
             messages += [reply, HumanMessage(f"오류: {error}\n고쳐서 JSON 으로 다시 답하십시오.")]
             continue
-        outcome.update(sql=sql, ast=parsed["ast"], error=None)
-        step.selected = [json.dumps(parsed["ast"], ensure_ascii=False)]
+        outcome.update(sql=sql, ast=ast, error=None)
+        step.selected = [json.dumps(ast, ensure_ascii=False)]
         step.reason = str(parsed.get("reason") or f"{attempt}번째 시도에서 컴파일 성공")
         break
     outcome["steps"].append(step.as_dict())
     return _with_tokens(outcome)
+
+
+def _apply_replace(ast: dict, pairs) -> None:
+    """replace 의 [{from, to}] 를 AST 의 조건 값에 적용한다. 등록된 AST 에 없는 값이면 ValueError"""
+    if not isinstance(pairs, list):
+        raise ValueError('replace 는 [{"from": 값, "to": 값}] 모양입니다')
+    for pair in pairs:
+        if not isinstance(pair, dict) or "from" not in pair or "to" not in pair:
+            raise ValueError('replace 는 [{"from": 값, "to": 값}] 모양입니다')
+        if _replace_values(ast, pair["from"], pair["to"]) == 0:
+            raise ValueError(f"replace 의 from 값 {pair['from']!r} 이 등록된 AST 에 없습니다. AST 에 있는 값 그대로 적으십시오")
+
+
+def _replace_values(node, old, new) -> int:
+    """조건 값(value · str · num) 중 old 와 같은 것을 new 로 바꾼다. 컬럼 · 테이블 이름은 건드리지 않는다. 바꾼 수를 돌려준다"""
+    count = 0
+    if isinstance(node, list):
+        for x in node:
+            count += _replace_values(x, old, new)
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("value", "str", "num") and _same_value(value, old):
+                node[key] = new
+                count += 1
+            elif key == "value" and isinstance(value, list):  # in · between 의 값 목록
+                for i, x in enumerate(value):
+                    if _same_value(x, old):
+                        value[i] = new
+                        count += 1
+                    else:
+                        count += _replace_values(x, old, new)
+            else:
+                count += _replace_values(value, old, new)
+    return count
+
+
+def _same_value(a, b) -> bool:
+    """값 하나끼리 같은가. LLM 이 숫자를 문자로 적어도("90") 같은 값으로 본다"""
+    for x in (a, b):
+        if isinstance(x, (dict, list, bool)) or x is None:
+            return False
+    return str(a) == str(b)
 
 
 def _covered(metrics: list, column: str) -> bool:

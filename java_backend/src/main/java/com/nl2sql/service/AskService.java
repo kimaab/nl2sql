@@ -95,6 +95,15 @@ public class AskService {
             - 질문이 지표끼리의 계산(차이, 합, 비율)을 물으면 각 지표의 계산 식을 그대로 SUB, ADD, DIV 의 인자로 씁니다.
             - 지표에 없는 새 계산([계산 필요] 컬럼의 집계)은 만들지 않습니다. 결과 이름("as")은 그 지표가 뜻하는 값으로 붙입니다.""";
 
+    // 지표 하나를 그대로 쓰거나 값만 바꾸는 질문에서 LLM 이 긴 AST 를 베껴 쓰다 틀리는 일을 막는다
+    static final String AS_IS_RULE = """
+            [그대로 쓰기]
+            - 질문에 맞게 바꿀 것이 하나도 없어 등록된 AST 가 그대로 답이면, AST 를 다시 적지 말고 {"as_is": true, "reason": "설명"} 으로만 답합니다.
+            - 조건의 값만 바뀌면 (예: 아이디, 임계치, 코드값) AST 를 다시 적지 말고
+              {"replace": [{"from": "등록된 AST 의 값", "to": "질문의 값"}], "reason": "설명"} 으로만 답합니다.
+              from 은 등록된 AST 에 있는 값 그대로입니다. 같은 값은 모든 곳에서 바뀝니다.
+            - 기간·묶음·정렬·개수처럼 값 말고 다른 것이 바뀌면 AST 를 적습니다.""";
+
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
     private static final String WEEKDAYS = "월화수목금토일";
@@ -144,6 +153,8 @@ public class AskService {
         }
         if (metrics.size() > 1) {
             user.append("\n\n").append(METRICS_RULE);
+        } else if (!metrics.isEmpty()) {
+            user.append("\n\n").append(AS_IS_RULE);
         }
         return new String[] {system, user.toString()};
     }
@@ -216,6 +227,7 @@ public class AskService {
             Llm.Reply reply = LlmCalls.chat(model, messages, step, attempt);
             outcome.put("attempts", attempt);
             Map<String, Object> parsed;
+            Object ast;
             String sql;
             try {
                 parsed = LlmCalls.parseJson(reply.content());
@@ -225,7 +237,18 @@ public class AskService {
                     step.reason = "모델이 되물음";
                     break;
                 }
-                sql = compiler.compile(parsed.get("ast"));
+                ast = parsed.get("ast");
+                if (!Py.truthy(ast) && (Boolean.TRUE.equals(parsed.get("as_is")) || Py.truthy(parsed.get("replace")))) {
+                    if (metrics.size() != 1) {
+                        throw new IllegalArgumentException("as_is · replace 는 지표 하나를 쓸 때만 답합니다. AST 를 적으십시오");
+                    }
+                    // 등록된 AST 를 그대로 쓰거나 값만 바꿔 쓴다 — 지표 원본은 건드리지 않는다
+                    ast = Json.copy(metrics.get(0).get("ast"));
+                    if (Py.truthy(parsed.get("replace"))) {
+                        applyReplace(ast, parsed.get("replace"));
+                    }
+                }
+                sql = compiler.compile(ast);
             } catch (CalcColumnError error) {
                 if (!covered(metrics, error.column())) {
                     // 고른 지표 어디에도 이 컬럼의 계산이 없다 — 다시 시켜도 지표 없이 계산할 뿐이라 지표 등록으로 넘긴다
@@ -240,9 +263,9 @@ public class AskService {
                 continue;
             }
             outcome.put("sql", sql);
-            outcome.put("ast", parsed.get("ast"));
+            outcome.put("ast", ast);
             outcome.put("error", null);
-            step.selected = new ArrayList<>(List.of(Json.dumps(parsed.get("ast"))));
+            step.selected = new ArrayList<>(List.of(Json.dumps(ast)));
             step.reason = Py.truthy(parsed.get("reason")) ? Py.text(parsed.get("reason")) : attempt + "번째 시도에서 컴파일 성공";
             break;
         }
@@ -256,6 +279,66 @@ public class AskService {
         step.reason = attempt + "번째 시도 실패: " + error;
         messages.add(Llm.Message.assistant(reply.content()));
         messages.add(Llm.Message.user("오류: " + error + "\n고쳐서 JSON 으로 다시 답하십시오."));
+    }
+
+    /** replace 의 [{from, to}] 를 AST 의 조건 값에 적용한다. 등록된 AST 에 없는 값이면 IllegalArgumentException */
+    static void applyReplace(Object ast, Object pairs) {
+        String shape = "replace 는 [{\"from\": 값, \"to\": 값}] 모양입니다";
+        if (!(pairs instanceof List<?> list)) {
+            throw new IllegalArgumentException(shape);
+        }
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> pair) || !pair.containsKey("from") || !pair.containsKey("to")) {
+                throw new IllegalArgumentException(shape);
+            }
+            if (replaceValues(ast, pair.get("from"), pair.get("to")) == 0) {
+                throw new IllegalArgumentException("replace 의 from 값 '" + Py.str(pair.get("from"))
+                        + "' 이 등록된 AST 에 없습니다. AST 에 있는 값 그대로 적으십시오");
+            }
+        }
+    }
+
+    /** 조건 값(value · str · num) 중 old 와 같은 것을 new 로 바꾼다. 컬럼 · 테이블 이름은 건드리지 않는다. 바꾼 수를 돌려준다 */
+    @SuppressWarnings("unchecked")
+    static int replaceValues(Object node, Object old, Object replacement) {
+        int count = 0;
+        if (node instanceof List<?> list) {
+            for (Object x : list) {
+                count += replaceValues(x, old, replacement);
+            }
+        } else if (node instanceof Map<?, ?> raw) {
+            for (Map.Entry<String, Object> e : ((Map<String, Object>) raw).entrySet()) {
+                String key = e.getKey();
+                Object value = e.getValue();
+                if ((key.equals("value") || key.equals("str") || key.equals("num")) && sameValue(value, old)) {
+                    e.setValue(replacement);
+                    count++;
+                } else if (key.equals("value") && value instanceof List<?> values) { // in · between 의 값 목록
+                    List<Object> items = (List<Object>) values;
+                    for (int i = 0; i < items.size(); i++) {
+                        if (sameValue(items.get(i), old)) {
+                            items.set(i, replacement);
+                            count++;
+                        } else {
+                            count += replaceValues(items.get(i), old, replacement);
+                        }
+                    }
+                } else {
+                    count += replaceValues(value, old, replacement);
+                }
+            }
+        }
+        return count;
+    }
+
+    /** 값 하나끼리 같은가. LLM 이 숫자를 문자로 적어도("90") 같은 값으로 본다 */
+    private static boolean sameValue(Object a, Object b) {
+        for (Object x : new Object[] {a, b}) {
+            if (x == null || x instanceof Map || x instanceof List || x instanceof Boolean) {
+                return false;
+            }
+        }
+        return Py.str(a).equals(Py.str(b));
     }
 
     /** 고른 지표 중 이 컬럼을 쓰는 것이 있나 */
