@@ -628,6 +628,53 @@ def main():
         for i, sql in enumerate(sorted(distinct), 1):
             print(f"  [{i}] x{results.count(sql)}  {sql}")
 
+TEST_SQL = """select vehicle_id, model, last_collect,
+       case when last_collect >= now() - interval '1 minute' then 'online' else 'offline' end as status
+  from (select v.vehicle_id, v.model, max(c.last_collect_datetime + interval '9 hours') as last_collect
+          from vehicle_info v
+          left join bms_collect_info c on c.vehicle_id = v.vehicle_id
+         group by v.vehicle_id, v.model) s"""
+
+ROUND_TRIP_PROMPT = f"""아래 PostgreSQL 쿼리를 sqlglot 으로 다룬다고 생각하고 두 가지를 답하십시오.
+
+1. sqlglot.parse_one(sql, read="postgres") 의 결과를 repr() 로 출력하면 나오는 트리를 그대로 적으십시오.
+2. 1번 트리만 보고 .sql(dialect="postgres", pretty=True) 로 다시 만든 SQL 을 적으십시오.
+
+설명 없이 아래 형식으로만 답합니다.
+[AST]
+(트리)
+[SQL]
+(쿼리)
+
+[쿼리]
+{TEST_SQL}"""
+
+
+def main2():
+    import sqlglot
+
+    model = make_model()
+    reply = model.invoke(ROUND_TRIP_PROMPT)
+    text = reply.content
+    print("===== LLM 답")
+    print(text)
+    print("finish:", reply.response_metadata.get("finish_reason"), "usage:", reply.response_metadata.get("token_usage"))
+    print("extra:", str(reply.additional_kwargs)[:2000])
+
+    real = sqlglot.parse_one(TEST_SQL, read="postgres")
+    print("\n===== 진짜 sqlglot repr")
+    print(repr(real))
+    print("\n===== 진짜 sqlglot 복원 SQL")
+    print(real.sql(dialect="postgres", pretty=True))
+
+    # LLM 이 복원한 SQL 이 원래 쿼리와 같은 트리인지 진짜 sqlglot 으로 비교한다
+    restored = text.split("[SQL]", 1)[1].strip() if "[SQL]" in text else ""
+    restored = restored.replace("```sql", "").replace("```", "").strip()
+    try:
+        same = sqlglot.parse_one(restored, read="postgres") == real
+        print("\n===== 복원 SQL 이 원래와 같은 트리인가:", same)
+    except sqlglot.errors.ParseError as error:
+        print("\n===== LLM 복원 SQL 파싱 실패:", error)
 
 if __name__ == "__main__":
-    main()
+    main2()
