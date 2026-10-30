@@ -396,7 +396,25 @@ def test_bound_sets_max_tokens_and_json_only_for_question_stages():
 
     gemma = ChatOpenAI(model="google/gemma-4-31B-it", api_key="x", base_url="http://localhost/v1")
     assert bound(gemma, "table").kwargs == {"max_tokens": 3000, "extra_body": {"response_format": {"type": "json_object"}}}
-    assert bound(gemma, "sql").kwargs["max_tokens"] == 6000
+    # AST 는 깊게 중첩돼 JSON 강제의 공백 제한에 잘리니 걸지 않는다
+    assert bound(gemma, "sql").kwargs == {"max_tokens": 6000}
     assert bound(gemma, "draft") is gemma
     claude = ChatOpenAI(model="claude-haiku-5-5", api_key="x", base_url="http://localhost/v1")
     assert bound(claude, "sql").kwargs == {"max_tokens": 6000}
+
+
+def test_gemma_requests_turn_thinking_off_and_keep_it_when_bound(monkeypatch):
+    from llm import make_model
+    from selector import bound
+
+    monkeypatch.setenv("LLM_MODEL", "google/gemma-4-31B-it")
+    monkeypatch.delenv("LLM_THINKING", raising=False)
+    model = make_model()
+    off = {"chat_template_kwargs": {"enable_thinking": False}}
+    assert model.extra_body == off
+    assert bound(model, "table").kwargs["extra_body"] == {**off, "response_format": {"type": "json_object"}}
+    monkeypatch.setenv("LLM_THINKING", "on")
+    assert make_model().extra_body is None
+    monkeypatch.setenv("LLM_MODEL", "claude-haiku-5-5")
+    monkeypatch.delenv("LLM_THINKING")
+    assert make_model().extra_body is None

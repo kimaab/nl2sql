@@ -3,6 +3,18 @@ import os
 from langchain_openai import ChatOpenAI
 
 
+def no_thinking(model: str) -> dict:
+    """vLLM 요청 본문에 실을 값: 추론(thinking)을 끈다.
+    서버마다 기본값이 달라, 켜진 서버는 답보다 몇 배 많은 토큰을 추론에 쓰고 그 내용은 응답에 남지 않는다.
+    LLM_THINKING=on 이면 서버 기본값을 따른다. Claude 는 이 값을 모르니 싣지 않는다."""
+    if model.startswith("claude") or os.environ.get("LLM_THINKING", "").lower() == "on":
+        return {}
+    # if  1==1 :
+    #     return {}
+
+    return {"chat_template_kwargs": {"enable_thinking": False}}
+
+
 def make_model(temperature: float = 0.0) -> ChatOpenAI:
     """OpenAI 호환 LLM (LLM_BASE_URL · LLM_API_KEY · LLM_MODEL)"""
     model = os.environ.get("LLM_MODEL", "gpt-3.5-turbo")
@@ -16,4 +28,5 @@ def make_model(temperature: float = 0.0) -> ChatOpenAI:
         api_key=os.environ.get("LLM_API_KEY", "not-needed"),
         model=model,
         temperature=temperature,
+        extra_body=no_thinking(model) or None,
     )

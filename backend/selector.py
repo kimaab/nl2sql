@@ -86,6 +86,9 @@ def parse_json(text: str) -> dict:
 # 단계별 출력 토큰 상한. 정상 응답은 질문 분석 3천, AST 4천 토큰 안쪽이다.
 # 같은 내용을 되풀이하다 수만 토큰(몇 분)을 쓰는 일이 있어, 이 길이에서 끊고 다시 묻는다.
 MAX_TOKENS = {"table": 3000, "sql": 6000}
+# vLLM 의 JSON 강제는 줄 앞 공백을 21자까지만 허용해, 깊게 중첩된 AST 를 들여쓰면 그 아래 내용이 {} 로 잘린다.
+# 그래서 중첩이 얕은 질문 분석에만 건다.
+JSON_STAGES = ("table",)
 
 TRUNCATED = "응답이 너무 길어 잘렸습니다. 같은 내용을 되풀이하지 말고 JSON 객체 하나로 짧게 다시 답하십시오."
 
@@ -97,9 +100,12 @@ def bound(model, stage: str):
         return model
     kwargs = {"max_tokens": limit}
     # vLLM 은 JSON 객체만 내게 강제한다. Claude 의 OpenAI 호환 API 는 지원이 달라 뺀다.
-    # response_format 인자로 주면 langchain 이 잘린 응답에서 예외를 던져 다시 묻지 못한다 — 요청 본문에 직접 싣는다
-    if not model_name(model).startswith("claude"):
-        kwargs["extra_body"] = {"response_format": {"type": "json_object"}}
+    # response_format 인자로 주면 langchain 이 잘린 응답에서 예외를 던져 다시 묻지 못한다 — 요청 본문에 직접 싣는다.
+    # bind 의 extra_body 는 모델의 extra_body(추론 끄기, llm.py)를 덮으니 합쳐서 싣는다
+    if stage in JSON_STAGES and not model_name(model).startswith("claude"):
+        body = dict(getattr(model, "extra_body", None) or {})
+        body["response_format"] = {"type": "json_object"}
+        kwargs["extra_body"] = body
     return model.bind(**kwargs)
 
 
