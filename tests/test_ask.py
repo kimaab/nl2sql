@@ -363,3 +363,40 @@ def test_missing_calc_stops_even_when_another_metric_is_chosen():
     assert out["needs_metric"] is True and out["sql"] is None
     assert out["missing"] == [{"name": "엔진 가동시간", "table": "bms_log", "column": "eg_time"}]
     assert len(model.calls) == 1
+
+
+class CutModel(FakeModel):
+    """첫 답은 출력 상한에서 잘린 것으로 돌려준다"""
+
+    def invoke(self, messages):
+        reply = super().invoke(messages)
+        if len(self.calls) == 1:
+            reply.response_metadata = {"finish_reason": "length"}
+        return reply
+
+
+def test_truncated_reply_is_asked_again_without_the_cut_text():
+    model = CutModel(
+        {"tables": ["bms_log"], "needs_metric": False, "metrics": [], "reason": "되풀이" * 10},
+        {"tables": ["bms_log"], "needs_metric": False, "metrics": [], "reason": ""},
+        {"ast": {"from": "bms_log", "select": [{"expr": {"col": "vehicle_id"}, "as": "v"}]}, "reason": ""},
+    )
+    out = run_question(contract(), "차량 목록", model, now=NOW)
+    assert out["sql"]
+    retry = model.calls[1]
+    # 잘린 답은 대화에 남기지 않고 짧게 다시 답하라고만 덧붙인다
+    assert [m.type for m in retry] == ["system", "human", "human"]
+    assert "잘렸습니다" in retry[-1].content
+
+
+def test_bound_sets_max_tokens_and_json_only_for_question_stages():
+    from langchain_openai import ChatOpenAI
+
+    from selector import bound
+
+    gemma = ChatOpenAI(model="google/gemma-4-31B-it", api_key="x", base_url="http://localhost/v1")
+    assert bound(gemma, "table").kwargs == {"max_tokens": 3000, "extra_body": {"response_format": {"type": "json_object"}}}
+    assert bound(gemma, "sql").kwargs["max_tokens"] == 6000
+    assert bound(gemma, "draft") is gemma
+    claude = ChatOpenAI(model="claude-haiku-5-5", api_key="x", base_url="http://localhost/v1")
+    assert bound(claude, "sql").kwargs == {"max_tokens": 6000}

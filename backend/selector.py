@@ -83,6 +83,39 @@ def parse_json(text: str) -> dict:
     return parsed
 
 
+# 단계별 출력 토큰 상한. 정상 응답은 질문 분석 3천, AST 4천 토큰 안쪽이다.
+# 같은 내용을 되풀이하다 수만 토큰(몇 분)을 쓰는 일이 있어, 이 길이에서 끊고 다시 묻는다.
+MAX_TOKENS = {"table": 3000, "sql": 6000}
+
+TRUNCATED = "응답이 너무 길어 잘렸습니다. 같은 내용을 되풀이하지 말고 JSON 객체 하나로 짧게 다시 답하십시오."
+
+
+def bound(model, stage: str):
+    """단계의 출력 상한과 JSON 강제를 건 모델. 상한이 없는 단계나 bind 가 없는 모델(테스트)은 그대로"""
+    limit = MAX_TOKENS.get(stage)
+    if limit is None or not hasattr(model, "bind"):
+        return model
+    kwargs = {"max_tokens": limit}
+    # vLLM 은 JSON 객체만 내게 강제한다. Claude 의 OpenAI 호환 API 는 지원이 달라 뺀다.
+    # response_format 인자로 주면 langchain 이 잘린 응답에서 예외를 던져 다시 묻지 못한다 — 요청 본문에 직접 싣는다
+    if not model_name(model).startswith("claude"):
+        kwargs["extra_body"] = {"response_format": {"type": "json_object"}}
+    return model.bind(**kwargs)
+
+
+def truncated(reply) -> bool:
+    """출력 상한에 걸려 응답이 잘렸는가"""
+    meta = getattr(reply, "response_metadata", None) or {}
+    return meta.get("finish_reason") in ("length", "max_tokens")
+
+
+def follow_up(reply, text: str) -> list:
+    """다시 물을 때 덧붙일 메시지. 잘린 응답은 되풀이를 부추기니 대화에 남기지 않는다"""
+    if truncated(reply):
+        return [HumanMessage(text)]
+    return [reply, HumanMessage(text)]
+
+
 def chat(model, messages: list, step: Step, attempt: int):
     """모델을 한 번 부른다. 요청·응답을 로그에 남기고 토큰·시간은 step 에 더한다."""
     stage = STAGE_NAMES.get(step.stage, step.stage)
@@ -94,13 +127,16 @@ def chat(model, messages: list, step: Step, attempt: int):
     else:
         log.info("%s %s 재요청 attempt=%d\n[user]\n%s", LLM_LOG, stage, attempt, messages[-1].content)
     started = time.monotonic()
-    reply = model.invoke(messages)
+    reply = bound(model, step.stage).invoke(messages)
     elapsed = int((time.monotonic() - started) * 1000)
     p, c = usage_of(reply)
     step.elapsed_ms += elapsed
     step.prompt_tokens += p
     step.completion_tokens += c
-    log.info("%s %s 응답 attempt=%d (토큰 %d+%d, %dms)\n%s", LLM_LOG, stage, attempt, p, c, elapsed, reply.content)
+    log.info(
+        "%s %s 응답 attempt=%d (토큰 %d+%d, %dms)%s\n%s",
+        LLM_LOG, stage, attempt, p, c, elapsed, " 출력 상한에서 잘림" if truncated(reply) else "", reply.content,
+    )
     return reply
 
 
@@ -111,15 +147,17 @@ def ask_json(model, system: str, user: str, step: Step, validate, tries: int = 2
     for attempt in range(1, tries + 1):
         reply = chat(model, messages, step, attempt)
         try:
+            if truncated(reply):
+                raise ValueError(TRUNCATED)
             parsed = parse_json(reply.content)
             return validate(parsed) or parsed
         except (ValueError, KeyError, TypeError) as error:
             log.info("%s 응답 형식 오류 attempt=%d: %s", LLM_LOG, attempt, error)
             last_error = error
-            messages += [
-                reply,
-                HumanMessage(f"형식이 틀렸습니다: {error}. 설명 없이 JSON 객체 하나만 다시 답하십시오."),
-            ]
+            if truncated(reply):
+                messages += follow_up(reply, TRUNCATED)
+            else:
+                messages += follow_up(reply, f"형식이 틀렸습니다: {error}. 설명 없이 JSON 객체 하나만 다시 답하십시오.")
     raise ValueError(f"{STAGE_NAMES.get(step.stage, step.stage)} 응답을 읽지 못했습니다: {last_error}")
 
 

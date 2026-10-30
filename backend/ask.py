@@ -16,7 +16,7 @@ import re
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from compiler import CalcColumnError, Compiler, temporal_kind
-from selector import Step, chat, model_name, parse_json, select_tables
+from selector import TRUNCATED, Step, chat, follow_up, model_name, parse_json, select_tables, truncated
 
 MAX_ATTEMPTS = 5
 
@@ -298,6 +298,8 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
         reply = chat(model, messages, step, attempt)
         outcome["attempts"] = attempt
         try:
+            if truncated(reply):
+                raise ValueError(TRUNCATED)
             parsed = parse_json(reply.content)
             if str(parsed.get("clarify") or "").strip() and not parsed.get("ast"):
                 outcome.update(clarification=str(parsed["clarify"]).strip(), error=None)
@@ -320,12 +322,12 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
                 break
             outcome["error"] = str(error)
             step.reason = f"{attempt}번째 시도 실패: {error}"
-            messages += [reply, HumanMessage(f"오류: {error}\n고쳐서 JSON 으로 다시 답하십시오.")]
+            messages += follow_up(reply, f"오류: {error}\n고쳐서 JSON 으로 다시 답하십시오.")
             continue
         except (ValueError, KeyError, TypeError) as error:
             outcome["error"] = str(error)
             step.reason = f"{attempt}번째 시도 실패: {error}"
-            messages += [reply, HumanMessage(f"오류: {error}\n고쳐서 JSON 으로 다시 답하십시오.")]
+            messages += follow_up(reply, f"오류: {error}\n고쳐서 JSON 으로 다시 답하십시오.")
             continue
         outcome.update(sql=sql, ast=ast, error=None)
         step.selected = [json.dumps(ast, ensure_ascii=False)]

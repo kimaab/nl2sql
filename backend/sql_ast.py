@@ -14,7 +14,7 @@ import datetime
 import sqlglot
 from sqlglot import exp
 
-from compiler import parse_datetime, temporal_kind
+from compiler import parse_datetime, temporal_kind, type_family
 
 DIALECTS = {"postgresql": "postgres", "mysql": "mysql", "oracle": "oracle"}
 _AGGREGATES = {exp.Sum: "SUM", exp.Avg: "AVG", exp.Min: "MIN", exp.Max: "MAX"}
@@ -118,13 +118,20 @@ class _Parser:
     def __init__(self, contract: dict):
         driver = contract.get("driver") or "postgresql"
         self.tables = {}
+        self.zones: dict = {}  # 테이블 → {UTC 컬럼: 행마다 시차를 담은 컬럼} (compiler.py 와 같은 조건)
         for t in contract.get("tables", []):
             cols = {}
+            types = {}
+            for c in t.get("columns", []):
+                types[c["name"]] = c.get("type", "")
             for c in t.get("columns", []):
                 hours = c.get("utc_offset") or 0
                 if hours and temporal_kind(c.get("type", ""), driver) != "datetime":
                     hours = 0
                 cols[c["name"]] = int(hours)
+                zone = c.get("utc_offset_column") or ""
+                if hours and zone in types and type_family(types[zone]) == "number":
+                    self.zones.setdefault(t["name"], {})[c["name"]] = zone
             self.tables[t["name"].lower()] = (t["name"], cols)
         self.ctes: dict = {}
         self.shared: set = set()  # AST 의 with 로 둘 WITH 이름 (JOIN 에 쓰거나 두 번 이상 쓴다)
@@ -527,7 +534,15 @@ class _Parser:
         for v in values:
             literals.append(self._literal(v) if isinstance(v, exp.Expression) else v)
             moments.append(_moment(v))
-        utc = self._utc_column(left, scope)
+        # 저장된 UTC 값과 지금(UTC)의 비교: 컬럼 >= (NOW() AT TIME ZONE 'UTC') - INTERVAL …
+        # 또는 (컬럼 AT TIME ZONE 'UTC') >= NOW() - INTERVAL …. AST 에서는 컬럼 >= NOW 기준 값이고, 컴파일러가 UTC 로 맞춘다
+        core, wrapped = _at_utc(left)
+        utc = self._utc_column(core, scope)
+        now = _now_offset(right) if utc and isinstance(right, exp.Expression) else None
+        if now is not None and now[0] != wrapped:
+            return {"expr": {"col": utc[0]}, "op": op, "value": now[1]}
+        if wrapped:
+            raise ValueError(f"AT TIME ZONE 'UTC' 는 UTC 컬럼과 NOW() 의 비교에만 씁니다 -> {left.sql()}")
         if utc and None not in moments:
             ref, hours = utc
             shifted = []
@@ -593,6 +608,10 @@ class _Parser:
             return {"str": literal} if isinstance(literal, str) else {"num": literal}
         if isinstance(node, exp.Neg):
             return {"fn": "SUB", "args": [{"num": 0}, self.node(node.this, scope, aliases)]}
+        if isinstance(node, exp.Add):
+            local = self._zone_shift(node, scope)
+            if local is not None:
+                return local
         if isinstance(node, (exp.Add, exp.Sub)):
             shifted = self._interval_add(node, scope, aliases)
             if shifted is not None:
@@ -657,6 +676,29 @@ class _Parser:
         if isinstance(node, exp.Interval):
             raise ValueError(f"INTERVAL 은 날짜 ± INTERVAL 로만 씁니다 -> {node.sql()}")
         raise ValueError(f"지원하지 않는 식입니다 -> {node.sql()} ({type(node).__name__})")
+
+    def _zone_shift(self, node, scope: _Scope):
+        """UTC 컬럼 + (COALESCE(시차 컬럼, h) || ' hours')::INTERVAL → 컬럼 (행마다 보정한 현지 시각).
+        시차 컬럼과 h 가 메타데이터의 보정(utc_offset_column, utc_offset)과 같을 때만이다."""
+        zone = _zone_hours(node.expression)
+        column = _unparen(node.this)
+        if zone is None or not isinstance(column, exp.Column):
+            return None
+        utc = self._utc_column(column, scope)
+        if utc is None:
+            return None
+        alias, src = scope.owner(column)
+        name = _find(src["columns"], column.name)
+        expected = self.zones.get(src["name"], {}).get(name) if src.get("table") else None
+        zone_column, fallback = zone
+        zone_alias, _ = scope.owner(zone_column)
+        if expected is None or zone_column.name.lower() != expected.lower() or zone_alias != alias:
+            raise ValueError(
+                f"{name} 의 행마다 시차는 같은 행의 {expected or '시차 컬럼'} 으로만 보정합니다 -> {node.sql()}"
+            )
+        if fallback != utc[1]:
+            raise ValueError(f"{name} 의 시차 컬럼이 비었을 때 값은 {utc[1]} 시간입니다 -> {node.sql()}")
+        return {"col": utc[0]}
 
     def _interval_add(self, node, scope: _Scope, aliases):
         """날짜 ± INTERVAL. UTC 컬럼 + 시차는 현지 시각 컬럼이 된다."""
@@ -776,6 +818,67 @@ _TEXT_TYPES = (
 )
 
 
+def _unparen(node):
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return node
+
+
+def _is_utc_zone(node) -> bool:
+    """AT TIME ZONE 'UTC' 인가"""
+    node = _unparen(node)
+    if not isinstance(node, exp.AtTimeZone):
+        return False
+    zone = node.args.get("zone")
+    return isinstance(zone, exp.Literal) and zone.is_string and zone.this.upper() == "UTC"
+
+
+def _at_utc(node) -> tuple:
+    """(x AT TIME ZONE 'UTC') → (x, True). 아니면 (node, False)"""
+    if _is_utc_zone(node):
+        return _unparen(node).this, True
+    return node, False
+
+
+def _now_offset(node):
+    """NOW() ± INTERVAL … → (UTC 로 맞췄는가, AST 식). NOW() AT TIME ZONE 'UTC' 면 True. 아니면 None"""
+    node = _unparen(node)
+    if isinstance(node, (exp.Add, exp.Sub)) and isinstance(node.expression, exp.Interval):
+        inner = _now_offset(node.this)
+        if inner is None:
+            return None
+        n, unit = _interval(node.expression)
+        if isinstance(node, exp.Sub):
+            n = -n
+        return inner[0], {"fn": _INTERVAL_FN[unit], "args": [inner[1], {"num": _whole(n)}]}
+    if isinstance(node, exp.CurrentTimestamp):
+        return False, {"fn": "NOW", "args": []}
+    if _is_utc_zone(node) and isinstance(_unparen(node.this), exp.CurrentTimestamp):
+        return True, {"fn": "NOW", "args": []}
+    return None
+
+
+def _zone_hours(node):
+    """(COALESCE(시차 컬럼, h) || ' hours')::INTERVAL → (시차 컬럼, h). 아니면 None"""
+    node = _unparen(node)
+    if not isinstance(node, exp.Cast) or node.to.this != exp.DataType.Type.INTERVAL:
+        return None
+    text = _unparen(node.this)
+    if not isinstance(text, exp.DPipe):
+        return None
+    unit = _unparen(text.expression)
+    if not isinstance(unit, exp.Literal) or not unit.is_string or unit.this.strip().lower() not in ("hours", "hour"):
+        return None
+    zone = _unparen(text.this)
+    if not isinstance(zone, exp.Coalesce) or len(zone.expressions) != 1:
+        return None
+    column = _unparen(zone.this)
+    fallback = _unparen(zone.expressions[0])
+    if not isinstance(column, exp.Column) or not isinstance(fallback, exp.Literal) or fallback.is_string:
+        return None
+    return column, _number(fallback.this)
+
+
 def _strip_text_cast(node):
     """문자로 바꾸는 형 변환(CAST … AS VARCHAR, ::text, TO_CHAR)을 벗긴다.
     타입이 다른 컬럼끼리의 비교에 붙는 것이라 AST 에는 두지 않는다 — 컴파일러가 다시 맞춘다."""
@@ -791,20 +894,31 @@ def _strip_text_cast(node):
 
 
 def _unwrap_text_select(query):
-    """컴파일러가 만든 SELECT CAST(x.c AS VARCHAR) FROM (안쪽 SELECT) x 를 안쪽 SELECT 로 되돌린다"""
+    """IN 하위 쿼리의 SELECT 항목에 붙은 문자 형 변환을 벗긴다 (컴파일러가 비교 타입을 다시 맞춘다).
+    컴파일러가 만든 SELECT CAST(x.c AS VARCHAR) FROM (안쪽 SELECT) x 는 안쪽 SELECT 로 되돌린다."""
     select = query.this if isinstance(query, exp.Subquery) else query
     if not isinstance(select, exp.Select) or len(select.expressions) != 1:
         return select
     expr = select.expressions[0]
-    col = _strip_text_cast(expr.this if isinstance(expr, exp.Alias) else expr)
+    inner = expr.this if isinstance(expr, exp.Alias) else expr
+    col = _strip_text_cast(inner)
+    if col is expr or not isinstance(col, exp.Column):
+        return select
     source = select.args.get("from_") or select.args.get("from")
-    if col is expr or not isinstance(col, exp.Column) or source is None or not isinstance(source.this, exp.Subquery):
+    wrapped = (
+        source is not None
+        and isinstance(source.this, exp.Subquery)
+        and not (select.args.get("joins") or select.args.get("where") or select.args.get("group"))
+        and source.this.alias == col.table
+    )
+    if wrapped:
+        return source.this.this
+    if col is inner:
         return select
-    if select.args.get("joins") or select.args.get("where") or select.args.get("group"):
-        return select
-    if source.this.alias != col.table:
-        return select
-    return source.this.this
+    # 예: u.group_id IN (SELECT id::text FROM grp)
+    stripped = select.copy()
+    stripped.set("expressions", [col.copy()])
+    return stripped
 
 
 def _cte_names(cte) -> list[str]:

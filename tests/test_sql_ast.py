@@ -272,3 +272,47 @@ def test_in_subquery_roundtrip():
     value = ast["where"][0]["value"]
     assert ast["where"][0]["op"] == "in" and value["query"]["from"] == "vehicle"
     assert '"vehicle_id" IN (SELECT "vehicle_id" AS "vehicle_id" FROM "vehicle" WHERE' in sql
+
+
+def test_text_cast_inside_in_subquery_is_dropped():
+    """IN (SELECT id::text …) 의 문자 변환은 타입을 맞추려는 것이라 AST 에 두지 않는다 — 컴파일러가 다시 맞춘다"""
+    ast, sql, _ = roundtrip(
+        "select vehicle_id from bms_log where vehicle_id in (select vehicle_name::text from vehicle where vehicle_name like 'A%')"
+    )
+    inner = ast["where"][0]["value"]["query"]
+    assert inner["select"] == [{"expr": {"col": "vehicle_name"}, "as": "vehicle_name"}]
+    assert inner["where"][0]["op"] == "like"
+
+
+def test_zone_shift_and_utc_now_compare_become_local_column():
+    """행마다 시차 보정과 UTC 지금과의 비교는 현지 시각 컬럼으로 옮긴다 — 컴파일러가 다시 같은 뜻으로 만든다"""
+    from test_compiler import ZONED
+
+    parsed = parse_sql(
+        """select collect_datetime + (coalesce(timezone, 9) || ' hours')::interval as local_dt,
+                  case when collect_datetime >= (now() at time zone 'UTC') - interval '10 seconds'
+                       then 'online' else 'offline' end as status
+             from bms_condition
+            where (collect_datetime at time zone 'UTC') >= now() - interval '1 minutes'""",
+        ZONED,
+    )
+    ast = parsed["ast"]
+    assert ast["select"][0]["expr"] == {"col": "collect_datetime"}
+    online = ast["select"][1]["expr"]["when"][0]["if"][0]
+    assert online == {
+        "expr": {"col": "collect_datetime"},
+        "op": ">=",
+        "value": {"fn": "ADD_SECONDS", "args": [{"fn": "NOW", "args": []}, {"num": -10}]},
+    }
+    assert ast["where"][0]["value"] == {"fn": "ADD_MINUTES", "args": [{"fn": "NOW", "args": []}, {"num": -1}]}
+    assert parsed["warnings"] == []
+    sql = Compiler(ZONED).compile(ast)
+    assert "(\"collect_datetime\" + (COALESCE(\"timezone\", 9)) * INTERVAL '1 hour')" in sql
+    assert "\"collect_datetime\" >= ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '10 seconds')" in sql
+
+
+def test_zone_shift_must_use_the_registered_zone_column_and_default():
+    from test_compiler import ZONED
+
+    with pytest.raises(ValueError, match="비었을 때 값은 9 시간"):
+        parse_sql("select collect_datetime + (coalesce(timezone, 0) || ' hours')::interval as t from bms_condition", ZONED)
