@@ -15,7 +15,39 @@ interface Entry extends api.AskResponse {
 
 const EXAMPLES = ["일별 차량별 가장 마지막 기록", "최근 5일 차량별 무인 가동시간", "어제 수집된 차량 수"];
 
-const STAGE_LABEL = { table: "테이블 선택", metric: "지표 선택", sql: "조회 명세" } as const;
+const STAGE_LABEL = { table: "질문 분석", metric: "지표 선택", sql: "조회 명세" } as const;
+
+function partText(p: api.AskPart) {
+  let text = p.name;
+  if (p.column && p.column !== p.name) text += ` (${p.column})`;
+  if (p.value) text += ` = ${p.value}`;
+  return text;
+}
+
+/** 질문을 조회 항목, 테이블, 묶음, 조건으로 나눈 결과 — 다음 단계가 이대로 SQL 을 만든다 */
+export function Analysis({ analysis, tables, open }: { analysis: api.AskAnalysis; tables: string[]; open: boolean }) {
+  const rows: [string, string][] = [
+    ["조회 항목", analysis.items.map(partText).join(", ") || "-"],
+    ["테이블", tables.join(", ") || "-"],
+    ["묶음", analysis.grouping ? analysis.dimensions.map(partText).join(", ") || "있음" : "없음"],
+    ["조건", analysis.conditions.map(partText).join(", ") || "없음"],
+  ];
+  return (
+    <details className="steps" open={open}>
+      <summary>
+        질문 분석 · 조회 항목 {analysis.items.length}개 · 묶음 {analysis.grouping ? "있음" : "없음"} · 조건{" "}
+        {analysis.conditions.length}개
+      </summary>
+      {rows.map(([label, text]) => (
+        <div key={label} className="step">
+          <span className="step-name">{label}</span>
+          <div>{text}</div>
+          <span />
+        </div>
+      ))}
+    </details>
+  );
+}
 
 /** 단계별로 무엇을 골랐고 왜 골랐는지 — 틀렸을 때 어느 단계에서 틀렸는지 보인다. */
 export function Steps({ steps }: { steps: api.AskStep[] }) {
@@ -92,6 +124,21 @@ export function AskPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [history.length, pending]);
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("복사했습니다", "ok");
+    } catch {
+      toast("클립보드에 쓰지 못했습니다. 직접 선택해 복사하십시오.", "error");
+    }
+  }
+
+  /** 컬럼 목록을 원래 질문 뒤에 붙여 입력창에 둔다 — 필요 없는 컬럼을 지우고 보낸다 */
+  function appendColumns(asked: string, text: string) {
+    setQuestion(`${asked} ${text}`);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }
 
   async function copySql(index: number, sql: string) {
     try {
@@ -336,9 +383,29 @@ export function AskPage() {
                   <SqlBlock sql={entry.sql} />
                 ) : entry.clarification ? (
                   <div className="alert warn">
-                    {entry.clarification}
+                    <div style={{ whiteSpace: "pre-line" }}>{entry.clarification}</div>
+                    {entry.columns?.map((choice) => (
+                      <div key={choice.table} style={{ marginTop: 10 }}>
+                        <div className="row" style={{ gap: 8 }}>
+                          <strong>{choice.table}</strong>
+                          {choice.description && <span className="faint">{choice.description}</span>}
+                          <span className="spacer" />
+                          <Button size="sm" onClick={() => copyText(choice.text)}>
+                            복사
+                          </Button>
+                          <Button size="sm" variant="primary" onClick={() => appendColumns(entry.question, choice.text)}>
+                            질문에 붙이기
+                          </Button>
+                        </div>
+                        <pre className="cell-sub" style={{ whiteSpace: "pre-wrap", marginTop: 6, userSelect: "all" }}>
+                          {choice.text}
+                        </pre>
+                      </div>
+                    ))}
                     <div className="field-hint" style={{ marginTop: 6 }}>
-                      원래 질문을 입력창에 돌려놓았습니다. 답을 덧붙여 한 문장으로 다시 보내세요.
+                      {entry.columns?.length
+                        ? "목록을 질문에 붙이고 필요 없는 컬럼을 지운 뒤 다시 보내세요."
+                        : "원래 질문을 입력창에 돌려놓았습니다. 답을 덧붙여 한 문장으로 다시 보내세요."}
                     </div>
                   </div>
                 ) : entry.needs_metric ? (
@@ -367,6 +434,9 @@ export function AskPage() {
                   </div>
                 ) : (
                   <div className="alert danger">{entry.error}</div>
+                )}
+                {entry.analysis && (
+                  <Analysis analysis={entry.analysis} tables={entry.selected_tables} open={!entry.sql} />
                 )}
                 {entry.steps?.length > 0 && <Steps steps={entry.steps} />}
               </div>

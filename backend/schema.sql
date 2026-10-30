@@ -64,6 +64,8 @@ CREATE INDEX IF NOT EXISTS idx_meta_column_table ON meta_column (table_id);
 -- UTC 로 저장된 시각 컬럼의 현지 시차(시간, 예: KST = 9). 사람이 적고, 동기화는 건드리지 않는다.
 -- 컴파일러가 날짜 묶음·표시는 현지 시각으로, 필터 값은 UTC 로 바꿔 비교한다.
 ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS utc_offset_hours SMALLINT;
+-- 행마다 시차를 담은 같은 테이블의 숫자 컬럼 (예: 차량별 timezone). 있으면 그 행의 시차로, 비면 utc_offset_hours 로 보정한다.
+ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS utc_offset_column TEXT NOT NULL DEFAULT '';
 -- 계산이 필요한 컬럼 (예: 누적값 — 그대로 합치면 틀린다). 사람이 표시하고, 동기화는 건드리지 않는다.
 -- 이 컬럼을 계산해야 답할 수 있는 질문은 지표가 필요하다 — 테이블 선택 단계의 LLM 이 판단한다.
 ALTER TABLE meta_column ADD COLUMN IF NOT EXISTS needs_calc BOOLEAN NOT NULL DEFAULT false;

@@ -1,4 +1,7 @@
-"""질문 하나를 처리한다: 테이블 선택(지표 필요 판단) → AST 생성(LLM) → 컴파일(조합·검증).
+"""질문 하나를 처리한다: 질문 분석(조회 항목, 테이블, 묶음, 조건, 지표 필요 판단) → AST 생성(LLM) → 컴파일(조합·검증).
+
+질문 분석에서 정할 수 없는 항목이 있으면 사용자에게 묻고, 조회 항목이 '전체' 면 그 테이블의 컬럼 목록을 보여 주고 멈춘다.
+사용자는 목록에서 필요한 컬럼을 골라 질문에 붙여 다시 묻는다. 분석 결과는 AST 단계에 그대로 넘긴다.
 
 지표가 필요한 질문인데 맞는 지표가 없으면 SQL 을 만들지 않고 '지표 등록이 필요합니다' 로 끝난다.
 지표를 쓰면 고른 지표(질문이 묻는 계산마다 하나)의 AST 를 모두 LLM 에 주고,
@@ -8,6 +11,7 @@
 import copy
 import datetime
 import json
+import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -60,7 +64,11 @@ AST_SYSTEM = """당신은 질문을 '{name}' 데이터베이스({driver})의 조
   상세 쪽을 order_by 와 limit 으로 자르면 묶음이 아니라 행이 잘립니다.
 - 집계하지 않은 select 항목은 group_by 에 같은 식으로 넣습니다.
 - 컬럼 뒤의 [UTC 보정] 은 DB 에 UTC 로 저장됐지만 자동으로 현지 시각으로 바뀌는 컬럼입니다. 날짜·시각은 현지 기준 그대로 적고, ADD_HOURS 로 직접 바꾸지 마십시오.
+  '행마다 … 시차' 가 붙은 컬럼은 그 행의 시차 컬럼으로 보정됩니다 (예: 차량별 타임존). 시차를 직접 더하지 않습니다.
+  최근 수신 여부(예: 10초 이내)는 이 컬럼을 NOW 기준 값(ADD_SECONDS(NOW, -10))과 비교하면 됩니다. 시간대는 컴파일러가 맞춥니다.
 - 시각을 포함한 컬럼의 기간은 시작은 >=, 끝은 < 다음 날로 적습니다.
+- [질문 분석] 은 앞 단계에서 질문을 나눈 결과입니다. select 는 조회 항목을, group_by 는 묶음 항목을, where 는 조건을 따릅니다.
+  조회 항목을 더하거나 빼지 않습니다. 결과 이름("as")은 조회 항목의 이름을 씁니다.
 - 질문만으로 조회를 정할 수 없으면 {{"clarify": "사용자에게 물을 한 문장"}} 으로 답합니다.
 - 설명 없이 JSON 객체 하나로만 답합니다: {{"ast": AST, "reason": "설명"}}"""
 
@@ -89,7 +97,10 @@ METRICS_RULE = """[지표 여러 개]
 def column_line(c: dict, driver: str) -> str:
     note = " ".join(str(c.get("description") or "").split())
     if c.get("utc_offset") and temporal_kind(c.get("type", ""), driver) == "datetime":
-        note = f"{note} [UTC 보정]".strip()
+        if c.get("utc_offset_column"):
+            note = f"{note} [UTC 보정: 행마다 {c['utc_offset_column']} 시차, 비면 {c['utc_offset']:+d}시간]".strip()
+        else:
+            note = f"{note} [UTC 보정]".strip()
     return f"  - {c['name']} ({c.get('type', '')}){': ' + note if note else ''}"
 
 
@@ -125,6 +136,83 @@ def ast_prompt(contract: dict, tables: list, metrics: list, now: datetime.dateti
     return system, user
 
 
+def column_label(c: dict) -> str:
+    """컬럼의 한글 이름: 설명의 앞부분 (코드값 풀이와 괄호는 뺀다). 설명이 없으면 컬럼 이름"""
+    text = " ".join(str(c.get("description") or "").split())
+    text = re.split(r"[:：(（\[]", text, maxsplit=1)[0].strip()
+    return text or c["name"]
+
+
+def column_choices(contract: dict, tables: list) -> list:
+    """조회 항목이 '전체' 인 테이블의 컬럼 목록 → [{table, description, columns: [{name, label}], text}]
+    text 는 사용자가 필요한 것만 남겨 질문에 붙여 넣는 한 줄이다."""
+    out = []
+    for t in contract["tables"]:
+        if t["name"] not in tables:
+            continue
+        columns = []
+        parts = []
+        for c in t["columns"]:
+            label = column_label(c)
+            columns.append({"name": c["name"], "label": label})
+            parts.append(label if label == c["name"] else f"{label}({c['name']})")
+        note = " ".join(str(t.get("purpose") or t.get("description") or "").split())
+        out.append(
+            {
+                "table": t["name"],
+                "description": note,
+                "columns": columns,
+                "text": f"조회 항목({t['name']}): " + ", ".join(parts),
+            }
+        )
+    return out
+
+
+def star_tables(analysis: dict, tables: list) -> list:
+    """조회 항목이 '전체' 인 테이블. 테이블 없이 '*' 만 적었으면 고른 테이블 전부"""
+    out = []
+    for item in analysis.get("items") or []:
+        if item["column"] == "*":
+            for t in tables:
+                if t not in out:
+                    out.append(t)
+        elif item["column"].endswith(".*") and item["column"][:-2] not in out:
+            out.append(item["column"][:-2])
+    return out
+
+
+def analysis_block(analysis: dict) -> str:
+    """AST 단계에 넘기는 질문 분석. 비었으면 빈 문자열"""
+
+    def line(part: dict) -> str:
+        text = part["name"]
+        if part.get("column") and part["column"] != part["name"]:
+            text += f" ({part['column']})"
+        if part.get("value"):
+            text += f" = {part['value']}"
+        return text
+
+    if not analysis or not (analysis.get("items") or analysis.get("conditions") or analysis.get("dimensions")):
+        return ""
+    lines = ["[질문 분석]"]
+    items = []
+    for p in analysis.get("items") or []:
+        items.append(line(p))
+    lines.append("- 조회 항목: " + (", ".join(items) if items else "(질문에서 정하지 않음)"))
+    if analysis.get("grouping"):
+        dims = []
+        for p in analysis.get("dimensions") or []:
+            dims.append(line(p))
+        lines.append("- 묶음: 있음, 묶음 항목: " + (", ".join(dims) if dims else "(질문에서 정하지 않음)"))
+    else:
+        lines.append("- 묶음: 없음 (행을 그대로 보여 줍니다)")
+    conditions = []
+    for p in analysis.get("conditions") or []:
+        conditions.append(line(p))
+    lines.append("- 조건: " + (", ".join(conditions) if conditions else "없음"))
+    return "\n".join(lines)
+
+
 def with_user(question: str, user_id: str) -> str:
     """질문에 질문한 사용자를 붙인다. '나', '내 권한', '로그인한 사용자' 를 LLM 이 이 아이디로 풀게 한다."""
     user_id = " ".join(str(user_id or "").split())
@@ -140,7 +228,8 @@ def with_user(question: str, user_id: str) -> str:
 def run_question(contract: dict, question: str, model, now: datetime.datetime | None = None, user_id: str = "") -> dict:
     """질문 하나를 처리한다. 상태는 이 호출 안에서만 산다.
 
-    돌려주는 것: {sql, error, attempts, ast, clarification, needs_metric, missing, tables, metrics, steps, total_tokens}
+    돌려주는 것: {sql, error, attempts, ast, clarification, columns, analysis, needs_metric, missing, tables, metrics,
+    steps, total_tokens}
     """
     outcome = {
         "sql": None,
@@ -148,6 +237,8 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
         "attempts": 0,
         "ast": None,
         "clarification": None,
+        "columns": [],  # 조회 항목이 '전체' 일 때 고를 컬럼 목록 (column_choices)
+        "analysis": {},  # 질문 분석 (selector.Selection.analysis)
         "needs_metric": False,
         "missing": [],
         "tables": [],
@@ -164,13 +255,15 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
     outcome["tables"] = selection.tables
     outcome["metrics"] = list(selection.metrics)
     outcome["steps"].append(selection.step.as_dict())
-    if selection.clarification:
-        outcome["clarification"] = selection.clarification
-        return _with_tokens(outcome)
-    if selection.needs_metric and not selection.metrics:
-        outcome["needs_metric"] = True
-        outcome["missing"] = selection.missing
-        outcome["error"] = f"지표 등록이 필요합니다 — {selection.reason or '계산이 필요한 질문인데 맞는 지표가 없습니다'}"
+    outcome["analysis"] = selection.analysis
+    # 조회 항목이 '전체' 면 컬럼 목록을 보여 주고 멈춘다 — 사용자가 필요한 컬럼만 골라 다시 묻는다
+    stars = star_tables(selection.analysis, selection.tables)
+    if stars:
+        outcome["columns"] = column_choices(contract, stars)
+    if selection.clarification or outcome["columns"]:
+        outcome["clarification"] = selection.clarification or (
+            "조회할 컬럼을 정해 주십시오. 아래 목록에서 필요한 컬럼만 남겨 질문에 붙여 다시 보내세요."
+        )
         return _with_tokens(outcome)
 
     metrics = []
@@ -179,7 +272,24 @@ def run_question(contract: dict, question: str, model, now: datetime.datetime | 
             if m["name"] == name:
                 metrics.append(m)
                 break
+    # 지표를 골랐어도 그 지표들이 하지 않는 계산이 남았으면 지표 등록이 먼저다
+    missing = []
+    for m in selection.missing:
+        if m["column"] and _covered(metrics, m["column"]):
+            continue
+        if not m["column"] and m["name"] in selection.metrics:
+            continue
+        missing.append(m)
+    if selection.needs_metric and (not metrics or missing):
+        outcome["needs_metric"] = True
+        outcome["missing"] = missing
+        outcome["error"] = f"지표 등록이 필요합니다 — {selection.reason or '계산이 필요한 질문인데 맞는 지표가 없습니다'}"
+        return _with_tokens(outcome)
+
     system, user = ast_prompt(contract, selection.tables, metrics, now or datetime.datetime.now())
+    analysis = analysis_block(selection.analysis)
+    if analysis:
+        user += "\n\n" + analysis
     messages = [SystemMessage(system), HumanMessage(f"{user}\n\n[질문]\n{question}")]
     # [계산 필요] 컬럼의 계산은 고른 지표의 식으로만 허용한다 — 지표 없이 LLM 이 만든 계산은 틀리기 쉽다
     compiler = Compiler(contract, metrics)
@@ -276,7 +386,7 @@ def _covered(metrics: list, column: str) -> bool:
 
 
 def _columns_in(node, out: set | None = None) -> set:
-    """AST 가 쓰는 컬럼 이름 ('테이블.' 은 뺀다)"""
+    """AST 가 쓰는 컬럼 이름 ('테이블.' 은 뺀다). 계층의 key · parent 도 센다."""
     out = set() if out is None else out
     if isinstance(node, list):
         for x in node:
@@ -284,6 +394,10 @@ def _columns_in(node, out: set | None = None) -> set:
     elif isinstance(node, dict):
         if isinstance(node.get("col"), str):
             out.add(node["col"].split(".")[-1])
+        if isinstance(node.get("tree"), dict):
+            for key in ("key", "parent"):
+                if isinstance(node["tree"].get(key), str):
+                    out.add(node["tree"][key])
         for value in node.values():
             _columns_in(value, out)
     return out

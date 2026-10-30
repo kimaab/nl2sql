@@ -306,11 +306,99 @@ def test_case_with_utc_column_against_now_minutes(c):
             ],
         }
     )
-    # NOW 와 비교하면 상수가 아니니 컬럼을 현지 시각으로 보정한다
+    # NOW 와 비교하면 저장된 UTC 값을 UTC 지금과 비교한다 — DB 세션 시간대와 상관없고 컬럼을 감싸지 않는다
     assert (
-        "(CASE WHEN (\"collect_datetime\" + INTERVAL '9 hours') >= (CURRENT_TIMESTAMP - INTERVAL '1 minutes') "
+        "(CASE WHEN \"collect_datetime\" >= ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '1 minutes') "
         "THEN 'online' ELSE 'offline' END) AS \"status\""
     ) in sql
+
+
+ZONED = {
+    "driver": "postgresql",
+    "tables": [
+        {
+            "name": "bms_condition",
+            "columns": [
+                {"name": "vehicle_id", "type": "varchar"},
+                {"name": "collect_datetime", "type": "timestamp", "utc_offset": 9, "utc_offset_column": "timezone"},
+                {"name": "timezone", "type": "double precision"},
+            ],
+        },
+        {
+            "name": "collect_info",
+            "columns": [
+                {"name": "vehicle_id", "type": "varchar"},
+                {"name": "last_collect_datetime", "type": "timestamp", "utc_offset": 9},
+            ],
+        },
+    ],
+}
+
+
+def test_zone_column_corrects_each_row_with_its_own_offset():
+    sql = Compiler(ZONED).compile(
+        {"from": "bms_condition", "select": [{"expr": {"col": "collect_datetime"}, "as": "local"}]}
+    )
+    assert sql == (
+        'SELECT ("collect_datetime" + (COALESCE("timezone", 9)) * INTERVAL \'1 hour\') AS "local" FROM "bms_condition"'
+    )
+
+
+def test_zone_column_against_constant_compares_local_value_with_index_bound():
+    sql = Compiler(ZONED).compile(
+        {
+            "from": "bms_condition",
+            "select": [{"expr": {"col": "vehicle_id"}, "as": "v"}],
+            "where": [{"expr": {"col": "collect_datetime"}, "op": ">=", "value": "2026-10-01"}],
+        }
+    )
+    assert sql.endswith(
+        "WHERE (\"collect_datetime\" >= (TIMESTAMP '2026-10-01 00:00:00' - INTERVAL '14 hours') "
+        "AND (\"collect_datetime\" + (COALESCE(\"timezone\", 9)) * INTERVAL '1 hour') >= TIMESTAMP '2026-10-01 00:00:00')"
+    )
+
+
+def test_zone_column_against_now_uses_stored_utc_value():
+    sql = Compiler(ZONED).compile(
+        {
+            "from": "bms_condition",
+            "select": [{"expr": {"col": "vehicle_id"}, "as": "v"}],
+            "where": [
+                {"expr": {"col": "collect_datetime"}, "op": ">=",
+                 "value": {"fn": "ADD_SECONDS", "args": [{"fn": "NOW"}, {"num": -10}]}}
+            ],
+        }
+    )
+    assert sql.endswith(
+        "WHERE \"collect_datetime\" >= ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '10 seconds')"
+    )
+
+
+def test_subquery_max_of_utc_column_against_now_keeps_same_offset():
+    # 하위 쿼리가 MAX(UTC 컬럼)을 현지 시각(+9)으로 내보냈으니 바깥에서는 UTC 지금 + 9시간과 비교한다
+    sql = Compiler(ZONED).compile(
+        {
+            "from": {
+                "query": {
+                    "from": "collect_info",
+                    "select": [
+                        {"expr": {"col": "vehicle_id"}, "as": "vehicle_id"},
+                        {"expr": {"fn": "MAX", "args": [{"col": "last_collect_datetime"}]}, "as": "last_recv"},
+                    ],
+                    "group_by": [{"col": "vehicle_id"}],
+                },
+                "as": "m",
+            },
+            "select": [{"expr": {"col": "vehicle_id"}, "as": "v"}],
+            "where": [
+                {"expr": {"col": "last_recv"}, "op": ">=",
+                 "value": {"fn": "ADD_SECONDS", "args": [{"fn": "NOW"}, {"num": -10}]}}
+            ],
+        }
+    )
+    assert sql.endswith(
+        "WHERE \"last_recv\" >= (((CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '10 seconds') + INTERVAL '9 hours')"
+    )
 
 
 def test_case_inside_aggregate_and_errors(c):
@@ -408,3 +496,31 @@ def test_same_calculation_written_differently_is_allowed():
     # 지표가 MAX, MIN 으로 계산하는 컬럼을 SUM 하면 안 된다
     with pytest.raises(CalcColumnError, match="MAX, MIN"):
         guarded.compile(by_vehicle({"fn": "SUM", "args": [{"col": "eg_time"}]}))
+
+
+def test_join_local_subquery_time_back_to_stored_utc_column():
+    # 하위 쿼리의 MAX(CASE … THEN UTC 컬럼) 은 현지 시각(+9)이다 — UTC 로 저장된 컬럼과 조인하면 보정을 되돌린다
+    sql = Compiler(ZONED).compile(
+        {
+            "from": {
+                "query": {
+                    "from": "collect_info",
+                    "select": [
+                        {"expr": {"col": "vehicle_id"}, "as": "vehicle_id"},
+                        {"expr": {"fn": "MAX", "args": [{"fn": "CASE", "when": [
+                            {"if": [{"expr": {"col": "vehicle_id"}, "op": "is_not_null"}],
+                             "then": {"col": "last_collect_datetime"}}]}]}, "as": "cond_time"},
+                    ],
+                    "group_by": [{"col": "vehicle_id"}],
+                },
+                "as": "m",
+            },
+            "joins": [{"table": "bms_condition", "as": "c", "type": "left",
+                       "on": [["m.vehicle_id", "c.vehicle_id"], ["m.cond_time", "c.collect_datetime"]]}],
+            "select": [{"expr": {"col": "m.vehicle_id"}, "as": "v"}],
+        }
+    )
+    assert (
+        'LEFT JOIN "bms_condition" "c" ON "m"."vehicle_id" = "c"."vehicle_id" '
+        "AND (\"m\".\"cond_time\" - INTERVAL '9 hours') = \"c\".\"collect_datetime\""
+    ) in sql

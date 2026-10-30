@@ -45,6 +45,7 @@ from models import (
     SystemInput,
     TableInfo,
     TablePurposeInput,
+    UtcOffsetColumnInput,
     UtcOffsetInput,
 )
 from systems import (
@@ -60,6 +61,7 @@ from systems import (
     set_needs_calc,
     set_table_purpose,
     set_utc_offset,
+    set_utc_offset_column,
     sync_system,
     update_system,
 )
@@ -232,6 +234,11 @@ def put_utc_offset(system_id: UUID, table_id: UUID, req: UtcOffsetInput):
     return set_utc_offset(system_id, table_id, req.column, req.utc_offset_hours)
 
 
+@app.put("/api/systems/{system_id}/tables/{table_id}/utc-offset-column", response_model=TableInfo)
+def put_utc_offset_column(system_id: UUID, table_id: UUID, req: UtcOffsetColumnInput):
+    return set_utc_offset_column(system_id, table_id, req.column, req.utc_offset_column)
+
+
 @app.put("/api/systems/{system_id}/tables/{table_id}/needs-calc", response_model=TableInfo)
 def put_needs_calc(system_id: UUID, table_id: UUID, req: NeedsCalcInput):
     return set_needs_calc(system_id, table_id, req.column, req.needs_calc)
@@ -328,7 +335,7 @@ def post_compile(system_id: UUID, req: CompileRequest):
 # ── 질문 ────────────────────────────────────────────────────────────────
 @app.post("/api/ask", response_model=AskResponse)
 def post_ask(req: AskRequest):
-    """질문에서 SQL 생성: 테이블 선택(지표 필요 판단) → 조회 명세 → 컴파일"""
+    """질문에서 SQL 생성: 질문 분석(테이블 선택, 지표 필요 판단) → 조회 명세 → 컴파일"""
     started = time.monotonic()
     contract = load_contract(req.system_id, active_only=True)
 
@@ -368,6 +375,8 @@ def post_ask(req: AskRequest):
         error=outcome["error"],
         attempts=outcome["attempts"],
         clarification=outcome["clarification"],
+        columns=outcome["columns"],
+        analysis=outcome["analysis"] or None,
         selected_tables=outcome["tables"],
         selected_metrics=outcome["metrics"],
         needs_metric=outcome["needs_metric"],

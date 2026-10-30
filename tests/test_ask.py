@@ -254,3 +254,112 @@ def test_no_user_id_keeps_question_as_is():
     model = FakeModel({"tables": [], "needs_metric": False, "metrics": [], "reason": "", "clarify": "어떤 차량인가요?"})
     run_question(contract(), "내 차량 목록", model, now=NOW)
     assert "[현재 사용자]" not in model.calls[0][-1].content
+
+
+def test_analysis_is_parsed_and_given_to_ast_step():
+    model = FakeModel(
+        {
+            "items": [{"name": "차량", "column": "bms_log.vehicle_id"}, {"name": "가동시간", "column": "EG_TIME"}],
+            "tables": ["bms_log"],
+            "grouping": False,
+            "dimensions": [{"name": "무시됨", "column": "bms_log.vehicle_id"}],
+            "conditions": [{"name": "차량", "column": "bms_log.vehicle_id", "value": ["A1", "A2"]}, {"name": "", "column": "nope.x"}],
+            "ambiguous": [],
+            "needs_metric": False,
+            "metrics": [],
+            "reason": "",
+        },
+        {"ast": {"from": "bms_log", "select": [{"expr": {"col": "vehicle_id"}, "as": "차량"}]}, "reason": ""},
+    )
+    out = run_question(contract(), "A1, A2 차량의 가동시간", model, now=NOW)
+    assert out["sql"]
+    assert out["analysis"]["items"] == [
+        {"name": "차량", "column": "bms_log.vehicle_id"},
+        {"name": "가동시간", "column": "bms_log.eg_time"},
+    ]
+    # 묶지 않으면 묶음 항목은 버린다. 모르는 테이블의 이름 없는 조건도 버린다
+    assert out["analysis"]["dimensions"] == []
+    assert out["analysis"]["conditions"] == [{"name": "차량", "column": "bms_log.vehicle_id", "value": '["A1", "A2"]'}]
+    sent = model.calls[1][1].content
+    assert "[질문 분석]\n- 조회 항목: 차량 (bms_log.vehicle_id), 가동시간 (bms_log.eg_time)" in sent
+    assert "- 묶음: 없음" in sent
+    assert '- 조건: 차량 (bms_log.vehicle_id) = ["A1", "A2"]' in sent
+
+
+def test_all_columns_lists_columns_and_stops():
+    described = contract()
+    described["tables"][1] = {
+        "name": "vehicle",
+        "description": "차량 기본 정보",
+        "columns": [
+            {"name": "vehicle_id", "type": "varchar", "description": "차량 시리얼 번호"},
+            {"name": "vehicle_name", "type": "varchar", "description": "작동모드:1 = 매뉴얼, 2 = 티치"},
+            {"name": "memo", "type": "varchar"},
+        ],
+    }
+    model = FakeModel(
+        {
+            "items": [{"name": "전체", "column": "vehicle.*"}],
+            "tables": [],
+            "grouping": False,
+            "dimensions": [],
+            "conditions": [],
+            "ambiguous": [],
+            "needs_metric": False,
+            "metrics": [],
+            "reason": "",
+        }
+    )
+    out = run_question(described, "차량 정보 전체", model, now=NOW)
+    assert out["sql"] is None and out["clarification"]
+    assert out["tables"] == ["vehicle"]
+    assert out["columns"] == [
+        {
+            "table": "vehicle",
+            "description": "차량 기본 정보",
+            "columns": [
+                {"name": "vehicle_id", "label": "차량 시리얼 번호"},
+                {"name": "vehicle_name", "label": "작동모드"},
+                {"name": "memo", "label": "memo"},
+            ],
+            "text": "조회 항목(vehicle): 차량 시리얼 번호(vehicle_id), 작동모드(vehicle_name), memo",
+        }
+    ]
+    assert len(model.calls) == 1
+
+
+def test_several_ambiguous_parts_are_asked_together():
+    model = FakeModel(
+        {
+            "items": [{"name": "가동시간", "column": ""}],
+            "tables": ["bms_log"],
+            "ambiguous": [
+                {"part": "조회 항목", "question": "엔진 가동시간인가요, 무인 가동시간인가요?"},
+                {"part": "엉뚱", "question": "어느 차량인가요?"},
+                {"part": "조건", "question": ""},
+            ],
+            "needs_metric": False,
+            "metrics": [],
+            "reason": "",
+        }
+    )
+    out = run_question(contract(), "가동시간 보여줘", model, now=NOW)
+    assert out["clarification"] == "- 조회 항목: 엔진 가동시간인가요, 무인 가동시간인가요?\n- 어느 차량인가요?"
+    assert len(model.calls) == 1
+
+
+def test_missing_calc_stops_even_when_another_metric_is_chosen():
+    """지표 하나를 골랐어도 그 지표가 하지 않는 계산이 남으면 AST 로 넘어가지 않는다"""
+    model = FakeModel(
+        {
+            "tables": ["bms_log"],
+            "needs_metric": True,
+            "metrics": ["무인 가동시간"],
+            "missing": [{"name": "엔진 가동시간", "table": "bms_log", "column": "eg_time"}],
+            "reason": "엔진 가동시간 지표가 없음",
+        }
+    )
+    out = run_question(contract(), "차량별 무인 가동시간과 엔진 가동시간", model, now=NOW)
+    assert out["needs_metric"] is True and out["sql"] is None
+    assert out["missing"] == [{"name": "엔진 가동시간", "table": "bms_log", "column": "eg_time"}]
+    assert len(model.calls) == 1

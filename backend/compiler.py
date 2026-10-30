@@ -3,6 +3,8 @@
 예외는 하나: UTC 로 저장된 시각 컬럼(utc_offset)은 현지 시각으로 자동 보정한다. AST 의 시각은 모두 현지 시각이다.
   - 컬럼을 쓰면 (컬럼 + 시차) 로 바꾼다 — 날짜 묶음·표시가 현지 기준이 된다.
   - 컬럼을 상수와 비교하면 반대로 상수를 UTC 로 바꾼다 — 컬럼을 감싸지 않아야 인덱스를 탄다.
+  - 컬럼을 NOW 기준 값과 비교하면 저장된 UTC 값을 UTC 지금과 비교한다 — DB 세션 시간대와 상관없다.
+  - 시차 컬럼(utc_offset_column, 예: 차량별 timezone)이 있으면 행마다 그 시차로 보정한다. 비어 있으면 utc_offset.
 
 AST 모양
   {"with": [{"name": "이름", "query": AST}],   맨 바깥에만. 정의한 이름은 from · joins 에서 테이블처럼 쓴다
@@ -134,6 +136,22 @@ class Dialect:
             interval = f"INTERVAL '{amount} {unit}'"
         return f"({sql} {sign} {interval})"
 
+    def add_hours(self, sql: str, hours_sql: str) -> str:
+        """시각 + (식) 시간. 행마다 다른 시차(예: 차량별 timezone 컬럼)를 더할 때 쓴다. 30분 단위 시차도 된다."""
+        if self.driver == "mysql":
+            return f"({sql} + INTERVAL ROUND(({hours_sql}) * 60) MINUTE)"
+        if self.driver == "oracle":
+            return f"({sql} + NUMTODSINTERVAL({hours_sql}, 'HOUR'))"
+        return f"({sql} + ({hours_sql}) * INTERVAL '1 hour')"
+
+    def utc_now(self) -> str:
+        """지금 UTC 시각 (시간대 없는 값). UTC 로 저장된 컬럼과 바로 비교한다 — DB 세션 시간대와 상관없다."""
+        if self.driver == "mysql":
+            return "UTC_TIMESTAMP()"
+        if self.driver == "oracle":
+            return "SYS_EXTRACT_UTC(SYSTIMESTAMP)"
+        return "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')"
+
     def timestamp(self, moment: datetime.datetime) -> str:
         return f"TIMESTAMP '{moment:%Y-%m-%d %H:%M:%S}'"
 
@@ -182,12 +200,17 @@ class Scope:
         self.sources: dict[str, dict[str, int]] = {}
         self.real: dict[str, str] = {}  # 별칭 → 실제 테이블 (하위 쿼리는 없다)
         self.families: dict[str, dict[str, str]] = {}  # 별칭 → {컬럼: 타입 갈래} (모르면 비어 있다)
+        self.zones: dict[str, dict[str, str]] = {}  # 별칭 → {UTC 컬럼: 행마다 시차를 담은 컬럼}
+        self.local: dict[str, dict[str, int]] = {}  # 별칭 → {이미 현지 시각인 컬럼: 시차} (하위 쿼리가 보정해 내보낸 값)
 
-    def add(self, alias: str, columns: dict, families: dict | None = None):
+    def add(self, alias: str, columns: dict, families: dict | None = None, zones: dict | None = None,
+            local: dict | None = None):
         if alias in self.sources:
             raise AstError(f"FROM 의 테이블·별칭이 겹칩니다 -> {alias}")
         self.sources[alias] = dict(columns)
         self.families[alias] = dict(families or {})
+        self.zones[alias] = dict(zones or {})
+        self.local[alias] = dict(local or {})
 
     def resolve(self, ref) -> tuple[str, str, int]:
         """→ (별칭, 컬럼, 시차)"""
@@ -285,6 +308,22 @@ def _metric_aggregates(node, out: dict):
             _metric_aggregates(value, out)
 
 
+def _metric_columns(node, out: set):
+    """지표 AST 가 쓰는 컬럼 이름 ('테이블.' 은 뺀다). 계층의 key · parent 도 센다."""
+    if isinstance(node, list):
+        for x in node:
+            _metric_columns(x, out)
+    elif isinstance(node, dict):
+        if isinstance(node.get("col"), str):
+            out.add(node["col"].split(".")[-1])
+        if isinstance(node.get("tree"), dict):
+            for key in ("key", "parent"):
+                if isinstance(node["tree"].get(key), str):
+                    out.add(node["tree"][key])
+        for value in node.values():
+            _metric_columns(value, out)
+
+
 def _sqls(parts) -> list[str]:
     """(SQL, info) 목록에서 SQL 만"""
     out = []
@@ -304,29 +343,39 @@ class Compiler:
         self.schemas: dict[str, str] = {}  # 기본 스키마가 아닌 테이블 → 스키마
         self.families: dict[str, dict[str, str]] = {}  # 테이블 → {컬럼: 타입 갈래}
         self.calc_columns: dict[str, set] = {}
+        self.zones: dict[str, dict[str, str]] = {}  # 테이블 → {UTC 컬럼: 행마다 시차를 담은 컬럼}
         self.trees = 0  # 계층 CTE 이름을 겹치지 않게
         self.level = 0  # 지금 컴파일하는 쿼리의 깊이 (조건 안 하위 쿼리의 깊이를 센다)
-        self.ctes: dict[str, tuple[dict, dict]] = {}  # with 이름 → ({컬럼: 0}, {컬럼: 타입 갈래})
+        # with 이름 → ({컬럼: 0}, {컬럼: 타입 갈래}, {이미 현지 시각인 컬럼: 시차})
+        self.ctes: dict[str, tuple[dict, dict, dict]] = {}
         self.output_families: dict[str, str | None] = {}  # 마지막으로 컴파일한 쿼리의 {select 이름: 타입 갈래}
+        self.output_local: dict[str, int] = {}  # 마지막으로 컴파일한 쿼리의 {select 이름: 시차} (UTC 컬럼을 보정해 내보낸 값)
         for t in contract.get("tables", []):
-            cols, calc, families = {}, set(), {}
+            cols, calc, families, zones = {}, set(), {}, {}
             for c in t.get("columns", []):
                 families[c["name"]] = type_family(c.get("type", ""))
+            for c in t.get("columns", []):
                 hours = c.get("utc_offset") or 0
                 if hours and temporal_kind(c.get("type", ""), self.dialect.driver) != "datetime":
                     hours = 0
                 cols[c["name"]] = int(hours)
+                zone = c.get("utc_offset_column")
+                if hours and zone and families.get(zone) == "number":
+                    zones[c["name"]] = zone
                 if c.get("needs_calc"):
                     calc.add(c["name"])
             self.tables[t["name"]] = cols
             self.schemas[t["name"]] = t.get("schema") or ""
             self.families[t["name"]] = families
             self.calc_columns[t["name"]] = calc
+            self.zones[t["name"]] = zones
         self.allowed: dict | None = None  # {컬럼: 지표가 그 컬럼에 쓴 집계 함수}
+        self.metric_columns: set = set()  # 고른 지표가 어디에든 쓴 컬럼 (계층의 key · parent 포함)
         if metrics is not None:
             self.allowed = {}
             for m in metrics:
                 _metric_aggregates(m.get("ast"), self.allowed)
+                _metric_columns(m.get("ast"), self.metric_columns)
 
     def compile(self, ast: dict) -> str:
         self.ctes = {}
@@ -345,7 +394,7 @@ class Compiler:
             if name in self.tables or name in self.ctes:
                 raise AstError(f"with 이름이 테이블이나 앞의 with 와 겹칩니다 -> {name}")
             inner_sql, names = self._query(item.get("query"), 1)
-            self.ctes[name] = (dict.fromkeys(names, 0), dict(self.output_families))
+            self.ctes[name] = (dict.fromkeys(names, 0), dict(self.output_families), dict(self.output_local))
             parts.append(f"{d.q(name)} AS ({inner_sql})")
         body = {}
         for key, value in ast.items():
@@ -410,11 +459,17 @@ class Compiler:
             for pair in pairs:
                 if not isinstance(pair, (list, tuple)) or len(pair) != 2:
                     raise AstError('on 은 [["a.컬럼", "b.컬럼"]] 모양입니다')
-                sides, families = [], []
+                sides, families, utc, local = [], [], [], []
                 for ref in pair:
-                    alias, col, _ = scope.resolve(ref)
+                    alias, col, hours = scope.resolve(ref)
                     sides.append(scope.raw(alias, col))
                     families.append(scope.families.get(alias, {}).get(col))
+                    utc.append(hours)
+                    local.append(scope.local.get(alias, {}).get(col, 0))
+                for i in (0, 1):
+                    # 하위 쿼리가 현지 시각으로 보정해 내보낸 값과 UTC 로 저장된 컬럼 — 보정을 되돌려 저장된 값끼리 맞춘다
+                    if local[i] and utc[1 - i]:
+                        sides[i] = d.add_interval(sides[i], -local[i], "hours")
                 if families[0] and families[1] and families[0] != families[1]:
                     # 예: 정수 id 와 문자 parent_id — PostgreSQL 은 그대로 비교하면 오류다
                     sides = [d.text(sides[0]), d.text(sides[1])]
@@ -426,6 +481,7 @@ class Compiler:
             raise AstError("select 가 비었습니다")
         names, items, has_agg = [], [], False
         families: dict[str, str | None] = {}
+        local: dict[str, int] = {}
         for item in select:
             if not isinstance(item, dict) or "expr" not in item:
                 raise AstError('select 항목은 {"expr": 식, "as": "이름"} 입니다')
@@ -445,6 +501,9 @@ class Compiler:
                 raise AstError(f"select 이름이 겹칩니다 -> {name}")
             names.append(name)
             families[name] = self._family_of(item["expr"], scope)
+            hours = self._local_hours(item["expr"], scope)
+            if hours:
+                local[name] = hours
             sql, info = self._expr(item["expr"], scope)
             has_agg |= info["agg"]
             items.append((sql, info, name))
@@ -485,25 +544,53 @@ class Compiler:
             parts.append(d.limit(limit))
         self.level = outer_level
         self.output_families = families
+        self.output_local = local
         return " ".join(parts), names
+
+    def _local_hours(self, expr, scope: Scope) -> int:
+        """고정 시차로 보정되는 UTC 컬럼 하나(또는 그 MIN · MAX, 그 컬럼만 고르는 CASE)면 그 시차.
+        하위 쿼리 바깥에서 NOW 와 비교하거나 UTC 컬럼과 조인할 때 쓴다."""
+        if not isinstance(expr, dict):
+            return 0
+        fn = str(expr.get("fn") or "").upper()
+        if fn in ("MIN", "MAX"):
+            args = expr.get("args")
+            return self._local_hours(args[0], scope) if isinstance(args, list) and len(args) == 1 else 0
+        if fn == "CASE":
+            # 예: MAX(CASE WHEN topic = 'log' THEN 수집 시각 END) — 모든 갈래가 같은 시차의 시각이면 그 시차
+            branches = []
+            for w in expr.get("when") or []:
+                branches.append(w.get("then") if isinstance(w, dict) else None)
+            if expr.get("else") is not None:
+                branches.append(expr["else"])
+            found = set()
+            for b in branches:
+                found.add(self._local_hours(b, scope))
+            return found.pop() if len(found) == 1 else 0
+        if not (set(expr) == {"col"} and isinstance(expr["col"], str) and expr["col"] != "*"):
+            return 0
+        alias, col, hours = scope.resolve(expr["col"])
+        if hours and col not in scope.zones.get(alias, {}):
+            return hours
+        return scope.local.get(alias, {}).get(col, 0)
 
     def _subquery(self, ast, alias: str, scope: Scope, depth: int) -> str:
         """하위 쿼리 하나 (from 이나 joins). 바깥에서는 하위 쿼리 select 의 이름을 컬럼으로 쓴다."""
         inner_sql, names = self._query(ast, depth + 1)
-        scope.add(alias, dict.fromkeys(names, 0), self.output_families)
+        scope.add(alias, dict.fromkeys(names, 0), self.output_families, local=self.output_local)
         return f"({inner_sql}) {self.dialect.q(alias)}"
 
     def _table(self, name, scope: Scope, alias=None) -> str:
         """테이블 하나. 별칭(as)이 없으면 테이블 이름이 곧 별칭이라 컬럼을 '테이블.컬럼' 으로 가리킨다."""
         if isinstance(name, str) and name in self.ctes:  # with 로 정의한 이름
-            columns, families = self.ctes[name]
+            columns, families, local = self.ctes[name]
             alias = str(alias or "").strip() or name
-            scope.add(alias, columns, families)
+            scope.add(alias, columns, families, local=local)
             return self.dialect.q(name) if alias == name else f"{self.dialect.q(name)} {self.dialect.q(alias)}"
         if not isinstance(name, str) or name not in self.tables:
             raise AstError(f"없는 테이블입니다 -> {name}")
         alias = str(alias or "").strip() or name
-        scope.add(alias, self.tables[name], self.families[name])
+        scope.add(alias, self.tables[name], self.families[name], self.zones[name])
         scope.real[alias] = name
         schema = self.schemas[name]
         # 다른 스키마의 테이블은 '스키마.테이블' 이름 그대로를 별칭으로 둔다 — 컬럼을 그 이름으로 가리킨다
@@ -530,6 +617,9 @@ class Compiler:
         for label, col in (("key", key), ("parent", parent)):
             if not isinstance(col, str) or col not in columns:
                 raise AstError(f"tree 의 {label} 는 {name} 의 컬럼입니다 -> {col} (있는 것: {', '.join(columns)})")
+            # [계산 필요] 컬럼으로 계층을 따라가는 것도 계산이다 — 그 컬럼을 쓰는 지표를 골랐을 때만 된다
+            if self.allowed is not None and col in self.calc_columns[name] and col not in self.metric_columns:
+                self._calc_error(name, col, "계층 따라가기", "이 계층을 쓰는 지표가 있어야 합니다")
         direction = str(spec.get("direction") or "down").lower()
         if direction not in ("down", "up"):
             raise AstError("tree 의 direction 은 down(자식 쪽) 이나 up(부모 쪽) 입니다")
@@ -604,10 +694,15 @@ class Compiler:
         )
 
     def _column(self, alias: str, col: str, scope: Scope) -> str:
-        """컬럼 SQL. UTC 컬럼은 현지 시각으로 보정한다."""
+        """컬럼 SQL. UTC 컬럼은 현지 시각으로 보정한다. 시차 컬럼이 있으면 행마다 그 시차로 (비면 기본 시차)."""
         raw = scope.raw(alias, col)
         hours = scope.sources[alias][col]
-        return self.dialect.add_interval(raw, hours, "hours") if hours else raw
+        if not hours:
+            return raw
+        zone = scope.zones.get(alias, {}).get(col)
+        if zone:
+            return self.dialect.add_hours(raw, f"COALESCE({scope.raw(alias, zone)}, {hours})")
+        return self.dialect.add_interval(raw, hours, "hours")
 
     def _order(self, items, scope: Scope, names: list) -> str:
         out = []
@@ -658,10 +753,25 @@ class Compiler:
             return self._in_query(expr, op, value["query"], scope)
 
         utc = self._utc_column(expr, scope)
-        if utc and op in (*COMPARE, "in", "not_in", "between"):
+        if utc and op in (*COMPARE, "between"):
+            # NOW 기준 값(예: 10초 전)은 저장된 UTC 값과 UTC 지금으로 비교한다 — 세션 시간대 · 차량 시차와 상관없다
+            now = self._utc_now_values(value, 0)
+            if now is not None:
+                return self._compare(utc[0], op, now)
+        if utc and utc[2] is None and op in (*COMPARE, "in", "not_in", "between"):
             shifted = self._utc_values(value, utc[1])
             if shifted is not None:
                 return self._compare(utc[0], op, shifted)
+        if utc and utc[2] is not None and op in (*COMPARE, "between"):
+            zoned = self._zone_compare(utc, op, value)
+            if zoned is not None:
+                return zoned
+        local = self._local_column(expr, scope)
+        if local and op in (*COMPARE, "between"):
+            # 하위 쿼리가 현지 시각으로 내보낸 값 — 지금도 같은 시차의 현지 시각으로 맞춘다
+            now = self._utc_now_values(value, local[1])
+            if now is not None:
+                return self._compare(local[0], op, now)
 
         left, info = self._expr(expr, scope)
         if info["window"] or (info["agg"] and not allow_agg):
@@ -720,15 +830,25 @@ class Compiler:
         return self.dialect.literal(value)
 
     def _utc_column(self, expr, scope: Scope):
-        """보정 대상 컬럼 하나만 있는 식이면 (저장된 컬럼 SQL, 시차)"""
+        """보정 대상 컬럼 하나만 있는 식이면 (저장된 컬럼 SQL, 시차, 행마다 시차를 담은 컬럼 SQL 또는 None)"""
         if isinstance(expr, dict) and set(expr) == {"col"} and expr["col"] != "*":
             alias, col, hours = scope.resolve(expr["col"])
+            if hours:
+                zone = scope.zones.get(alias, {}).get(col)
+                return scope.raw(alias, col), hours, scope.raw(alias, zone) if zone else None
+        return None
+
+    def _local_column(self, expr, scope: Scope):
+        """하위 쿼리가 현지 시각으로 보정해 내보낸 컬럼 하나면 (컬럼 SQL, 시차)"""
+        if isinstance(expr, dict) and set(expr) == {"col"} and isinstance(expr["col"], str) and expr["col"] != "*":
+            alias, col, _ = scope.resolve(expr["col"])
+            hours = scope.local.get(alias, {}).get(col)
             if hours:
                 return scope.raw(alias, col), hours
         return None
 
-    def _utc_values(self, value, hours: int):
-        """현지 시각 상수(CURRENT_DATE 는 오늘 날짜로)를 UTC 로. 그 밖의 식이면 None (그때는 컬럼을 보정해 비교한다)."""
+    def _local_moments(self, value, hours: int):
+        """현지 시각 상수 목록 (CURRENT_DATE 는 그 시차의 오늘 날짜로). 상수가 아닌 값이 있으면 None"""
         values = value if isinstance(value, list) else [value]
         if not values:
             return None
@@ -742,8 +862,70 @@ class Compiler:
                 moment = self._local_day(v, hours)
             if moment is None:
                 return None
+            out.append(moment)
+        return out
+
+    def _utc_values(self, value, hours: int):
+        """현지 시각 상수(CURRENT_DATE 는 오늘 날짜로)를 UTC 로. 그 밖의 식이면 None (그때는 컬럼을 보정해 비교한다)."""
+        moments = self._local_moments(value, hours)
+        if moments is None:
+            return None
+        out = []
+        for moment in moments:
             out.append(self.dialect.add_interval(self.dialect.timestamp(moment), -hours, "hours"))
         return out if isinstance(value, list) else out[0]
+
+    def _zone_compare(self, utc, op: str, value):
+        """행마다 시차가 다른 UTC 컬럼과 현지 시각 상수. 상수가 아니면 None.
+
+        보정한 값(컬럼 + 그 행의 시차)으로 비교하되, 시차가 -12 ~ +14 시간 안이라는 것으로 저장된 값의 범위를
+        함께 걸어 인덱스를 탄다. 예: 현지 >= 10-01 00:00 이면 UTC 는 09-30 10:00(= -14시간) 이후다.
+        """
+        moments = self._local_moments(value, utc[1])
+        if moments is None or (op == "between" and len(moments) != 2) or (op != "between" and isinstance(value, list)):
+            return None
+        d = self.dialect
+        constants = []
+        for moment in moments:
+            constants.append(d.timestamp(moment))
+        shifted = d.add_hours(utc[0], f"COALESCE({utc[2]}, {utc[1]})")
+        exact = self._compare(shifted, op, constants if op == "between" else constants[0])
+        bounds = []
+        if op in (">", ">=", "=", "between"):
+            bounds.append(f"{utc[0]} >= {d.add_interval(constants[0], -14, 'hours')}")
+        if op in ("<", "<=", "=", "between"):
+            bounds.append(f"{utc[0]} <= {d.add_interval(constants[-1], 12, 'hours')}")
+        if not bounds:
+            return exact
+        return "(" + " AND ".join(bounds + [exact]) + ")"
+
+    def _utc_now_values(self, value, hours: int):
+        """NOW 기준 값(NOW, ADD_SECONDS(NOW, -10) …)이면 UTC 지금 + hours 로 바꾼 SQL. 아니면 None"""
+        values = value if isinstance(value, list) else [value]
+        if not values:
+            return None
+        out = []
+        for v in values:
+            sql = self._utc_now(v)
+            if sql is None:
+                return None
+            out.append(self.dialect.add_interval(sql, hours, "hours") if hours else sql)
+        return out if isinstance(value, list) else out[0]
+
+    def _utc_now(self, value):
+        if not isinstance(value, dict):
+            return None
+        fn = str(value.get("fn") or "").upper()
+        args = value.get("args") or []
+        if fn == "NOW" and not args:
+            return self.dialect.utc_now()
+        if fn in INTERVAL_FUNCTIONS and len(args) == 2 and isinstance(args[1], dict):
+            n = args[1].get("num")
+            inner = self._utc_now(args[0])
+            if inner is None or isinstance(n, bool) or not isinstance(n, (int, float)):
+                return None
+            return self.dialect.add_interval(inner, n, INTERVAL_FUNCTIONS[fn])
+        return None
 
     def _local_day(self, value, hours: int) -> datetime.datetime | None:
         """CURRENT_DATE · DATE(CURRENT_DATE) · ADD_DAYS(그것, n) 이면 그 컬럼의 현지 날짜 0시, 아니면 None.
@@ -852,7 +1034,7 @@ class Compiler:
             if isinstance(n, bool) or not isinstance(n, (int, float)):
                 raise AstError(f"{fn} 의 두 번째 값은 숫자입니다")
             utc = self._utc_column(args[0], scope)
-            if fn == "ADD_HOURS" and utc and n == -utc[1]:
+            if fn == "ADD_HOURS" and utc and utc[2] is None and n == -utc[1]:
                 return utc[0], _info(cols=True)  # 보정을 되돌리면 저장된 UTC 값 그대로
             ((sql, info),) = subs(args[:1])
             return d.add_interval(sql, n, INTERVAL_FUNCTIONS[fn]), info

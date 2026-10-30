@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import db
 import secret
 from catalog import read_catalog
-from compiler import temporal_kind
+from compiler import temporal_kind, type_family
 from models import (
     ApiException,
     ColumnInfo,
@@ -467,7 +467,7 @@ def _time_columns(system_id: UUID) -> dict:
     """테이블별 시각 컬럼 (UTC 보정값을 적을 수 있는 컬럼). 날짜뿐인 컬럼은 시차가 뜻이 없어 뺀다."""
     rows = db.query(
         """
-        SELECT c.table_id, c.name, c.data_type, c.utc_offset_hours, s.driver
+        SELECT c.table_id, c.name, c.data_type, c.utc_offset_hours, c.utc_offset_column, s.driver
           FROM meta_column c
           JOIN meta_table t ON t.id = c.table_id
           JOIN meta_system s ON s.id = t.system_id
@@ -484,6 +484,7 @@ def _time_columns(system_id: UUID) -> dict:
                     name=r["name"],
                     data_type=r["data_type"],
                     utc_offset_hours=r["utc_offset_hours"],
+                    utc_offset_column=r["utc_offset_column"],
                 )
             )
     return out
@@ -506,6 +507,33 @@ def set_utc_offset(
             (hours, str(table_id), column),
         )
     log.info("utc offset %s.%s = %s", found.name, column, hours)
+    return _find_table(system_id, table_id)
+
+
+def set_utc_offset_column(system_id: UUID, table_id: UUID, column: str, offset_column: str) -> TableInfo:
+    """UTC 컬럼의 시차를 행마다 담은 컬럼. 같은 테이블의 숫자 컬럼이어야 한다. 비우면 고정 시차만 쓴다."""
+    found = _find_table(system_id, table_id)
+    if not _has_column(found.time_columns, column):
+        raise ApiException(400, f"{column} 은(는) 시각을 포함한 날짜 컬럼이 아니라 UTC 보정을 쓸 수 없습니다")
+    offset_column = offset_column.strip()
+    if offset_column:
+        target = None
+        for c in found.columns:
+            if c.name == offset_column:
+                target = c
+        if target is None:
+            raise ApiException(400, f"{found.name} 에 없는 컬럼입니다 -> {offset_column}")
+        if type_family(target.data_type) != "number":
+            raise ApiException(400, f"시차 컬럼은 숫자 컬럼이어야 합니다 -> {offset_column} ({target.data_type})")
+    with db.connection() as conn:
+        conn.execute(
+            """
+            UPDATE meta_column SET utc_offset_column = %s, updated_at = now()
+             WHERE table_id = %s AND name = %s AND deleted_at IS NULL
+        """,
+            (offset_column, str(table_id), column),
+        )
+    log.info("utc offset column %s.%s = %s", found.name, column, offset_column or "-")
     return _find_table(system_id, table_id)
 
 

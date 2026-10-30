@@ -124,6 +124,8 @@ export interface TimeColumn {
   name: string;
   data_type: string;
   utc_offset_hours: number | null;
+  /** 행마다 시차를 담은 컬럼 (예: 차량별 timezone). 비면 utc_offset_hours 만 쓴다 */
+  utc_offset_column: string;
 }
 
 /** 컬럼과 '계산 필요' 표시. 계산 필요 컬럼을 계산해야 답할 수 있는 질문은 지표가 필요하다 */
@@ -175,12 +177,37 @@ export interface AskStep {
   elapsed_ms: number;
 }
 
+/** 질문 분석의 항목 하나. column 은 '테이블.컬럼', '테이블.*' 또는 빈 값 */
+export interface AskPart {
+  name: string;
+  column: string;
+  value?: string | null;
+}
+
+export interface AskAnalysis {
+  items: AskPart[];
+  grouping: boolean;
+  dimensions: AskPart[];
+  conditions: AskPart[];
+  ambiguous: { part: string; question: string }[];
+}
+
+/** 조회 항목이 '전체' 인 테이블의 컬럼 목록. text 를 고쳐 질문에 붙인다 */
+export interface ColumnChoice {
+  table: string;
+  description: string;
+  columns: { name: string; label: string }[];
+  text: string;
+}
+
 export interface AskResponse {
   id: string | null;
   sql: string | null;
   error: string | null;
   attempts: number;
   clarification: string | null;
+  columns: ColumnChoice[];
+  analysis: AskAnalysis | null;
   selected_tables: string[];
   selected_metrics: string[];
   /** 지표가 필요한 질문인데 맞는 지표가 없다 — error 에 이유가 있다 */
@@ -293,6 +320,11 @@ export const setUtcOffset = (id: string, tableId: string, column: string, hours:
   request<TableInfo>(`/systems/${id}/tables/${tableId}/utc-offset`, {
     method: "PUT",
     body: { column, utc_offset_hours: hours },
+  });
+export const setUtcOffsetColumn = (id: string, tableId: string, column: string, offsetColumn: string) =>
+  request<TableInfo>(`/systems/${id}/tables/${tableId}/utc-offset-column`, {
+    method: "PUT",
+    body: { column, utc_offset_column: offsetColumn },
   });
 export const setColumnNote = (id: string, tableId: string, column: string, note: string) =>
   request<TableInfo>(`/systems/${id}/tables/${tableId}/column-note`, { method: "PUT", body: { column, note } });

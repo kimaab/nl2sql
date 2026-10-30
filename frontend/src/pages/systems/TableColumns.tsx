@@ -42,6 +42,21 @@ export function TableColumns() {
     }
   }
 
+  async function saveOffsetColumn(column: string, offsetColumn: string) {
+    setSaving(column);
+    try {
+      setTable(await api.setUtcOffsetColumn(sysId, tableId, column, offsetColumn));
+      toast(
+        offsetColumn ? `${column}: 행마다 ${offsetColumn} 시차로 보정합니다` : `${column}: 고정 시차로 보정합니다`,
+        "ok",
+      );
+    } catch (err) {
+      toast("저장 실패: " + errorMessage(err), "error");
+    } finally {
+      setSaving(null);
+    }
+  }
+
   async function saveNote(column: string, note: string) {
     setSaving(column);
     try {
@@ -90,6 +105,10 @@ export function TableColumns() {
   const timeColumns = new Map(table.time_columns.map((c) => [c.name, c]));
   const offsetCount = table.time_columns.filter((c) => c.utc_offset_hours).length;
   const calcCount = table.columns.filter((c) => c.needs_calc).length;
+  // 행마다 시차를 담을 수 있는 숫자 컬럼 (예: 차량별 timezone)
+  const numberColumns = table.columns.filter((c) =>
+    /int|num|dec|float|double|real|serial/.test(c.data_type.toLowerCase()),
+  );
   const word = filter.toLowerCase();
   const shown = table.columns.filter((c) => {
     if (onlySet && !c.needs_calc && !timeColumns.get(c.name)?.utc_offset_hours) return false;
@@ -225,7 +244,25 @@ export function TableColumns() {
                             </option>
                           ))}
                         </select>
-                      ) : (
+                      ) : null}
+                      {time && time.utc_offset_hours && numberColumns.length > 0 ? (
+                        <select
+                          className="select"
+                          style={{ width: 130, marginTop: 4 }}
+                          title="행마다 시차를 담은 컬럼. 비면 위 시차로 보정합니다"
+                          value={time.utc_offset_column}
+                          disabled={saving === c.name}
+                          onChange={(e) => saveOffsetColumn(c.name, e.target.value)}
+                        >
+                          <option value="">시차 고정</option>
+                          {numberColumns.map((n) => (
+                            <option key={n.name} value={n.name}>
+                              행마다 {n.name}
+                            </option>
+                          ))}
+                        </select>
+                      ) : null}
+                      {time ? null : (
                         <span className="muted" title="시각을 포함한 날짜 컬럼만 보정합니다">
                           —
                         </span>

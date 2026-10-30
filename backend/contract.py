@@ -16,7 +16,7 @@ def load_tables(system_id: UUID) -> dict:
         """
         SELECT t.id AS table_id, t.name AS table_name, t.db_schema AS table_schema, t.comment AS table_note, t.ai_comment AS table_ai, t.purpose,
                c.name AS column_name, c.data_type, c.comment AS column_note, c.ai_comment AS column_ai, c.note AS column_human, c.is_pk,
-               c.utc_offset_hours, c.needs_calc
+               c.utc_offset_hours, c.utc_offset_column, c.needs_calc
           FROM meta_table t
           LEFT JOIN meta_column c ON c.table_id = t.id AND c.deleted_at IS NULL
          WHERE t.system_id = %s AND t.deleted_at IS NULL
@@ -50,6 +50,8 @@ def load_tables(system_id: UUID) -> dict:
                 column["is_pk"] = True
             if r["utc_offset_hours"]:
                 column["utc_offset"] = r["utc_offset_hours"]
+                if r["utc_offset_column"]:
+                    column["utc_offset_column"] = r["utc_offset_column"]
             if r["needs_calc"]:
                 column["needs_calc"] = True
             table["columns"].append(column)

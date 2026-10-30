@@ -257,8 +257,46 @@ class AskStep(BaseModel):
     elapsed_ms: int = 0
 
 
+class AskPart(BaseModel):
+    """질문 분석의 항목 하나 (조회 항목, 묶음 항목, 조건). column 은 '테이블.컬럼', '테이블.*' 또는 빈 값"""
+
+    name: str
+    column: str = ""
+    value: str | None = None  # 조건만
+
+
+class AskAmbiguity(BaseModel):
+    part: str = ""  # 조회 항목 | 테이블 | 묶음 | 묶음 항목 | 조건
+    question: str
+
+
+class AskAnalysis(BaseModel):
+    """질문 분석: 조회 항목, 묶음 여부, 묶음 항목, 조건, 정할 수 없는 것"""
+
+    items: list[AskPart] = []
+    grouping: bool = False
+    dimensions: list[AskPart] = []
+    conditions: list[AskPart] = []
+    ambiguous: list[AskAmbiguity] = []
+
+
+class ColumnLabel(BaseModel):
+    name: str
+    label: str  # 한글 이름 (설명의 앞부분)
+
+
+class ColumnChoice(BaseModel):
+    """조회 항목이 '전체' 인 테이블의 컬럼 목록. text 를 고쳐 질문에 붙여 다시 묻는다"""
+
+    table: str
+    description: str = ""
+    columns: list[ColumnLabel]
+    text: str
+
+
 class AskResponse(BaseModel):
     """질문 응답. clarification 이 있으면 모델이 되물은 것이다 — sql 은 없다.
+    columns 가 있으면 조회 항목이 '전체' 라 컬럼을 골라 다시 물어야 한다.
     needs_metric 이면 지표가 필요한 질문인데 맞는 지표가 없다는 뜻이다 — error 에 이유가, missing 에 없는 계산이 있다."""
 
     id: UUID | None = None
@@ -266,6 +304,8 @@ class AskResponse(BaseModel):
     error: str | None
     attempts: int
     clarification: str | None = None
+    columns: list[ColumnChoice] = []
+    analysis: AskAnalysis | None = None
     selected_tables: list[str] = []
     selected_metrics: list[str] = []
     needs_metric: bool = False
@@ -357,6 +397,7 @@ class TimeColumn(BaseModel):
     name: str
     data_type: str
     utc_offset_hours: int | None = None
+    utc_offset_column: str = ""  # 행마다 시차를 담은 컬럼 (예: 차량별 timezone). 비면 utc_offset_hours 만 쓴다
 
 
 class ColumnInfo(BaseModel):
@@ -398,6 +439,13 @@ class UtcOffsetInput(BaseModel):
         if value is not None and not -12 <= value <= 14:
             raise ValueError("UTC 보정값은 -12 ~ +14 시간입니다")
         return value
+
+
+class UtcOffsetColumnInput(BaseModel):
+    """UTC 컬럼의 시차를 행마다 담은 컬럼 (예: 차량별 timezone). 비우면 고정 시차(utc_offset_hours)만 쓴다."""
+
+    column: str
+    utc_offset_column: str = ""
 
 
 class NeedsCalcInput(BaseModel):

@@ -167,3 +167,20 @@ def test_tables_inside_conditions_are_listed():
         "select": [{"expr": {"col": "user_id"}, "as": "u"}],
     }
     assert ast_tables(ast) == ["users", "grp"]
+
+
+def test_tree_on_calc_parent_needs_a_metric_that_walks_it():
+    from compiler import CalcColumnError
+
+    contract = copy.deepcopy(GROUPS)
+    contract["tables"][0]["columns"][1]["needs_calc"] = True
+    # 지표 등록 (metrics 를 주지 않음) 은 검사하지 않는다
+    Compiler(contract).compile(tree_ast())
+    # 질문 처리에서 이 계층을 쓰는 지표가 없으면 지표 등록이 필요하다
+    with pytest.raises(CalcColumnError) as error:
+        Compiler(contract, []).compile(tree_ast())
+    assert error.value.column == "parent_id"
+    # 계층을 쓰는 지표를 골랐으면 된다
+    Compiler(contract, [{"name": "권한 그룹", "ast": tree_ast()}]).compile(tree_ast())
+    # 값을 그대로 보여 주는 것은 지표 없이 된다
+    Compiler(contract, []).compile({"from": "grp", "select": [{"expr": {"col": "parent_id"}, "as": "p"}]})
