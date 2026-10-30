@@ -289,7 +289,7 @@ def _candidate(system_id, row, model, messages, proposal, step, taken, table_nam
 SIMPLE_REASON = (
     "단순 집계입니다 — 한 컬럼을 그대로 COUNT · SUM · AVG 하고 묶기만 하는 계산은 질문할 때 LLM 이 바로 만들어 지표로 등록하지 않습니다"
 )
-_GROUPING_FUNCTIONS = {"DATE", "DATE_TRUNC", "ADD_HOURS", "ADD_DAYS", "ADD_MINUTES"}
+_GROUPING_FUNCTIONS = {"DATE", "DATE_TRUNC", "FORMAT", "ADD_HOURS", "ADD_DAYS", "ADD_MINUTES"}
 
 
 def _simple_check(contract: dict, period: dict | None):

@@ -14,7 +14,7 @@ import datetime
 import sqlglot
 from sqlglot import exp
 
-from compiler import parse_datetime, temporal_kind, type_family
+from compiler import DATE_FORMATS, parse_datetime, temporal_kind, type_family
 
 DIALECTS = {"postgresql": "postgres", "mysql": "mysql", "oracle": "oracle"}
 _AGGREGATES = {exp.Sum: "SUM", exp.Avg: "AVG", exp.Min: "MIN", exp.Max: "MAX"}
@@ -23,6 +23,15 @@ _SCALARS = {exp.Coalesce: "COALESCE", exp.Greatest: "GREATEST", exp.Least: "LEAS
 _COMPARE = {exp.EQ: "=", exp.NEQ: "!=", exp.GT: ">", exp.GTE: ">=", exp.LT: "<", exp.LTE: "<="}
 _FLIP = {"=": "=", "!=": "!=", ">": "<", ">=": "<=", "<": ">", "<=": ">="}
 _INTERVAL_FN = {"seconds": "ADD_SECONDS", "minutes": "ADD_MINUTES", "hours": "ADD_HOURS", "days": "ADD_DAYS"}
+# sqlglot 이 TO_CHAR · DATE_FORMAT 의 형식을 바꿔 주는 strftime 형식 → FORMAT 의 형식
+_STRFTIME = {
+    "%Y-%m-%d %H:%M:%S": "YYYY-MM-DD HH24:MI:SS",
+    "%Y-%m-%d %H:%M": "YYYY-MM-DD HH24:MI",
+    "%Y-%m-%d": "YYYY-MM-DD",
+    "%Y-%m": "YYYY-MM",
+    "%H:%M:%S": "HH24:MI:SS",
+    "%H:%M": "HH24:MI",
+}
 _TRUNC = {"hour": "hour", "hours": "hour", "hh24": "hour", "day": "day", "dd": "day", "week": "week", "iw": "week",
           "month": "month", "mm": "month", "year": "year", "yyyy": "year"}
 
@@ -663,6 +672,8 @@ class _Parser:
             if word not in _TRUNC:
                 raise ValueError(f"DATE_TRUNC 단위는 hour · day · week · month · year 만 받습니다 -> {node.sql()}")
             return {"fn": "DATE_TRUNC", "unit": _TRUNC[word], "args": [self.node(node.this, scope, aliases)]}
+        if isinstance(node, exp.TimeToStr) or (type(node).__name__ == "ToChar" and node.args.get("format") is not None):
+            return self._format(node, scope, aliases)
         if isinstance(node, exp.CurrentTimestamp):
             return {"fn": "NOW", "args": []}
         if isinstance(node, exp.CurrentDate):
@@ -676,6 +687,16 @@ class _Parser:
         if isinstance(node, exp.Interval):
             raise ValueError(f"INTERVAL 은 날짜 ± INTERVAL 로만 씁니다 -> {node.sql()}")
         raise ValueError(f"지원하지 않는 식입니다 -> {node.sql()} ({type(node).__name__})")
+
+    def _format(self, node, scope: _Scope, aliases) -> dict:
+        """TO_CHAR(날짜, '형식') · DATE_FORMAT → FORMAT. 정해 둔 형식(compiler.DATE_FORMATS)만 받는다.
+        PostgreSQL · MySQL 은 sqlglot 이 strftime 형식(%Y-%m-%d …)으로, Oracle 은 원래 형식으로 준다."""
+        pattern = node.args.get("format")
+        text = pattern.this if isinstance(pattern, exp.Literal) and pattern.is_string else None
+        fmt = _STRFTIME.get(text) if isinstance(node, exp.TimeToStr) else str(text or "").upper()
+        if fmt not in DATE_FORMATS:
+            raise ValueError(f"날짜 표시 형식은 {', '.join(DATE_FORMATS)} 만 받습니다 -> {node.sql()}")
+        return {"fn": "FORMAT", "format": fmt, "args": [self.node(node.this, scope, aliases)]}
 
     def _zone_shift(self, node, scope: _Scope):
         """UTC 컬럼 + (COALESCE(시차 컬럼, h) || ' hours')::INTERVAL → 컬럼 (행마다 보정한 현지 시각).

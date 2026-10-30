@@ -524,3 +524,30 @@ def test_join_local_subquery_time_back_to_stored_utc_column():
         'LEFT JOIN "bms_condition" "c" ON "m"."vehicle_id" = "c"."vehicle_id" '
         "AND (\"m\".\"cond_time\" - INTERVAL '9 hours') = \"c\".\"collect_datetime\""
     ) in sql
+
+
+def test_format_turns_date_into_text_per_dialect():
+    ast = {
+        "from": "bms_log",
+        "select": [
+            {"expr": {"fn": "FORMAT", "format": "yyyy-mm-dd hh24:mi:ss", "args": [{"col": "collect_datetime"}]}, "as": "t"}
+        ],
+    }
+    local = "(\"collect_datetime\" + INTERVAL '9 hours')"
+    assert Compiler(CONTRACT).compile(ast) == f"SELECT TO_CHAR({local}, 'YYYY-MM-DD HH24:MI:SS') AS \"t\" FROM \"bms_log\""
+    assert "DATE_FORMAT(" in Compiler({**CONTRACT, "driver": "mysql"}).compile(ast)
+    assert "'%Y-%m-%d %H:%i:%s')" in Compiler({**CONTRACT, "driver": "mysql"}).compile(ast)
+    assert "TO_CHAR(" in Compiler({**CONTRACT, "driver": "oracle"}).compile(ast)
+    with pytest.raises(ValueError, match="FORMAT 은"):
+        Compiler(CONTRACT).compile(
+            {"from": "bms_log", "select": [{"expr": {"fn": "FORMAT", "format": "DD/MM", "args": [{"col": "collect_datetime"}]}, "as": "t"}]}
+        )
+
+
+def test_format_of_zone_column_formats_the_row_local_time():
+    ast = {
+        "from": "bms_condition",
+        "select": [{"expr": {"fn": "FORMAT", "format": "YYYY-MM-DD", "args": [{"col": "collect_datetime"}]}, "as": "d"}],
+    }
+    sql = Compiler(ZONED).compile(ast)
+    assert sql.startswith("SELECT TO_CHAR((\"collect_datetime\" + (COALESCE(\"timezone\", 9)) * INTERVAL '1 hour'), 'YYYY-MM-DD')")

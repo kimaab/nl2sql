@@ -316,3 +316,20 @@ def test_zone_shift_must_use_the_registered_zone_column_and_default():
 
     with pytest.raises(ValueError, match="비었을 때 값은 9 시간"):
         parse_sql("select collect_datetime + (coalesce(timezone, 0) || ' hours')::interval as t from bms_condition", ZONED)
+
+
+def test_to_char_with_a_known_format_becomes_format():
+    from test_compiler import ZONED
+
+    parsed = parse_sql(
+        "select to_char(collect_datetime + (coalesce(timezone, 9) || ' hours')::interval, 'YYYY-MM-DD HH24:MI:SS') as t"
+        " from bms_condition",
+        ZONED,
+    )
+    assert parsed["ast"]["select"][0]["expr"] == {
+        "fn": "FORMAT",
+        "format": "YYYY-MM-DD HH24:MI:SS",
+        "args": [{"col": "collect_datetime"}],
+    }
+    with pytest.raises(ValueError, match="날짜 표시 형식은"):
+        parse_sql("select to_char(collect_datetime, 'FMDay') as t from bms_condition", ZONED)

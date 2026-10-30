@@ -33,7 +33,16 @@ SCALARS = {  # 이름: (최소, 최대 인자 수)
     "GREATEST": (2, 8),
     "LEAST": (2, 8),
 }
-OTHER_FUNCTIONS = {"DIV", "DATE", "DATE_TRUNC", "ADD_HOURS", "ADD_DAYS", "ADD_MINUTES", "ADD_SECONDS", "NOW", "CURRENT_DATE", "ROW_NUMBER", "CASE"}
+# 날짜 표시 형식 (FORMAT). DB 마다 기호가 달라 정해 둔 것만 받는다 — 값은 MySQL DATE_FORMAT 형식
+DATE_FORMATS = {
+    "YYYY-MM-DD HH24:MI:SS": "%Y-%m-%d %H:%i:%s",
+    "YYYY-MM-DD HH24:MI": "%Y-%m-%d %H:%i",
+    "YYYY-MM-DD": "%Y-%m-%d",
+    "YYYY-MM": "%Y-%m",
+    "HH24:MI:SS": "%H:%i:%s",
+    "HH24:MI": "%H:%i",
+}
+OTHER_FUNCTIONS = {"DIV", "DATE", "DATE_TRUNC", "FORMAT", "ADD_HOURS", "ADD_DAYS", "ADD_MINUTES", "ADD_SECONDS", "NOW", "CURRENT_DATE", "ROW_NUMBER", "CASE"}
 INTERVAL_FUNCTIONS = {"ADD_SECONDS": "seconds", "ADD_MINUTES": "minutes", "ADD_HOURS": "hours", "ADD_DAYS": "days"}
 TRUNC_UNITS = ("hour", "day", "week", "month", "year")
 _ORACLE_TRUNC = {"hour": "HH24", "day": "DD", "week": "IW", "month": "MM", "year": "YYYY"}
@@ -174,6 +183,12 @@ class Dialect:
                 "year": f"DATE_FORMAT({sql}, '%Y-01-01')",
             }[unit]
         return f"DATE_TRUNC('{unit}', {sql})"
+
+    def format(self, sql: str, fmt: str) -> str:
+        """날짜를 정해 둔 형식의 문자로 (fmt 는 DATE_FORMATS 의 키)"""
+        if self.driver == "mysql":
+            return f"DATE_FORMAT({sql}, '{DATE_FORMATS[fmt]}')"
+        return f"TO_CHAR({sql}, '{fmt}')"
 
     def current_date(self) -> str:
         return "TRUNC(SYSDATE)" if self.driver == "oracle" else "CURRENT_DATE"
@@ -1027,6 +1042,12 @@ class Compiler:
                 raise AstError(f'DATE_TRUNC 는 {{"fn": "DATE_TRUNC", "unit": "{"|".join(TRUNC_UNITS)}", "args": [식]}} 입니다')
             ((sql, info),) = subs(args)
             return d.trunc(unit, sql), info
+        if fn == "FORMAT":
+            fmt = str(e.get("format", "")).upper()
+            if fmt not in DATE_FORMATS or len(args) != 1:
+                raise AstError(f'FORMAT 은 {{"fn": "FORMAT", "format": "{"|".join(DATE_FORMATS)}", "args": [식]}} 입니다')
+            ((sql, info),) = subs(args)
+            return d.format(sql, fmt), info
         if fn in INTERVAL_FUNCTIONS:
             if len(args) != 2 or not isinstance(args[1], dict) or "num" not in args[1]:
                 raise AstError(f'{fn} 은 [식, {{"num": 숫자}}] 입니다')

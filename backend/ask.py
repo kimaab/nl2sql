@@ -40,6 +40,8 @@ AST_SYSTEM = """당신은 질문을 '{name}' 데이터베이스({driver})의 조
   계산: ADD SUB MUL DIV(0 으로 나누면 NULL)
   함수: ABS ROUND COALESCE NULLIF GREATEST LEAST
   날짜: DATE(날짜만), {{"fn": "DATE_TRUNC", "unit": "hour|day|week|month|year", "args": [식]}},
+        {{"fn": "FORMAT", "format": "YYYY-MM-DD HH24:MI:SS|YYYY-MM-DD HH24:MI|YYYY-MM-DD|YYYY-MM|HH24:MI:SS|HH24:MI", "args": [식]}}
+        (날짜를 그 형식의 문자로. 질문이 표시 형식을 정할 때만 씁니다),
         ADD_SECONDS · ADD_MINUTES · ADD_HOURS · ADD_DAYS [식, {{"num": n}}], NOW, CURRENT_DATE
   순위: {{"fn": "ROW_NUMBER", "partition_by": [식], "order_by": [{{"expr": 식, "dir": "desc"}}]}}
   분기: {{"fn": "CASE", "when": [{{"if": [조건], "then": 식}}], "else": 식}}
